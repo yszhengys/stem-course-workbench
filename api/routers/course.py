@@ -55,8 +55,10 @@ async def _call(operation: Awaitable[ResultT]) -> ResultT:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except InvalidInputError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except NotFoundError:
-        raise
+    except NotFoundError as exc:
+        raise HTTPException(
+            status_code=404, detail="Course resource not found"
+        ) from exc
     except OpenNotebookError as exc:
         raise OpenNotebookError("Course operation failed") from exc
     except Exception as exc:
@@ -175,7 +177,9 @@ async def create_lab(version_id: str, request: LabCreate):
     if request.lab_type not in LAB_TYPES:
         raise HTTPException(status_code=422, detail="Unsupported lab_type")
     lab = await _call(
-        CourseService.create_lab(version_id, request.model_dump(exclude_unset=True))
+        CourseService.create_lab(
+            version_id, request.model_dump(exclude_unset=True, by_alias=True)
+        )
     )
     return _body(lab)
 

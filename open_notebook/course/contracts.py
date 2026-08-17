@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Generic, Literal, TypeVar
+import math
+from typing import Annotated, Generic, Literal, TypeAlias, TypeVar, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -141,6 +142,45 @@ class ExerciseArtifact(CourseContract):
     anchor_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
+def _validate_bounded_lab_value(value: object, *, depth: int = 0) -> None:
+    if depth > 5:
+        raise ValueError("lab object nesting is too deep")
+    if isinstance(value, str):
+        if len(value) > 4000:
+            raise ValueError("lab object string is too long")
+        return
+    if value is None or isinstance(value, (bool, int, float)):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            numeric = float(value)
+            if not math.isfinite(numeric) or abs(numeric) > 1_000_000:
+                raise ValueError("lab object numeric value is too large")
+        return
+    if isinstance(value, list):
+        if len(value) > 64:
+            raise ValueError("lab object list is too large")
+        for item in value:
+            _validate_bounded_lab_value(item, depth=depth + 1)
+        return
+    if isinstance(value, dict):
+        if len(value) > 32:
+            raise ValueError("lab object has too many fields")
+        for key, item in value.items():
+            if not isinstance(key, str) or not 1 <= len(key) <= 100:
+                raise ValueError("lab object key is invalid")
+            _validate_bounded_lab_value(item, depth=depth + 1)
+        return
+    raise ValueError("lab object contains an unsupported value")
+
+
+class LabControl(CourseContract):
+    key: str = Field(min_length=1, max_length=100)
+    label: str | None = Field(default=None, max_length=300)
+    minimum: float = Field(alias="min", ge=-1_000_000, le=1_000_000)
+    maximum: float = Field(alias="max", ge=-1_000_000, le=1_000_000)
+    value: float = Field(ge=-1_000_000, le=1_000_000)
+    step: float | None = Field(default=None, gt=0, le=1_000_000)
+
+
 class LabSpec(CourseContract):
     """Common bounded, declarative lab payload; never contains executable code."""
 
@@ -150,8 +190,8 @@ class LabSpec(CourseContract):
     title: str = Field(min_length=1, max_length=300)
     expressions: list[str] = Field(default_factory=list, max_length=8)
     domain: dict[str, tuple[float, float]] = Field(default_factory=dict, max_length=8)
-    controls: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
-    objects: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
+    controls: list[LabControl] = Field(default_factory=list, max_length=8)
+    objects: list[dict[str, object]] = Field(default_factory=list, max_length=8)
 
     @field_validator("expressions")
     @classmethod
@@ -169,41 +209,33 @@ class LabSpec(CourseContract):
     def domain_is_bounded(
         cls, value: dict[str, tuple[float, float]]
     ) -> dict[str, tuple[float, float]]:
-        for bounds in value.values():
-            if bounds[0] >= bounds[1] or any(abs(point) > 1_000_000 for point in bounds):
+        for name, bounds in value.items():
+            if not 1 <= len(name) <= 100:
+                raise ValueError("lab domain key is invalid")
+            if bounds[0] >= bounds[1] or any(
+                not math.isfinite(point) or abs(point) > 1_000_000
+                for point in bounds
+            ):
                 raise ValueError("lab domain bounds are invalid")
         return value
 
     @field_validator("controls")
     @classmethod
-    def controls_are_bounded(cls, values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def controls_are_bounded(cls, values: list[LabControl]) -> list[LabControl]:
         for control in values:
-            if len(control) > 16:
-                raise ValueError("lab controls must be bounded objects")
-            minimum, maximum, current = (
-                control.get("min"),
-                control.get("max"),
-                control.get("value"),
-            )
-            if not isinstance(control.get("key"), str) or not all(
-                isinstance(item, (int, float)) and not isinstance(item, bool)
-                for item in (minimum, maximum, current)
-            ):
+            if not control.minimum < control.maximum:
                 raise ValueError("lab control bounds are invalid")
-            assert isinstance(minimum, (int, float))
-            assert isinstance(maximum, (int, float))
-            assert isinstance(current, (int, float))
-            if not float(minimum) < float(maximum) or not float(minimum) <= float(
-                current
-            ) <= float(maximum):
-                raise ValueError("lab control bounds are invalid")
+            if not control.minimum <= control.value <= control.maximum:
+                raise ValueError("lab control value is outside its bounds")
         return values
 
     @field_validator("objects")
     @classmethod
-    def objects_are_bounded(cls, values: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if any(len(value) > 32 for value in values):
-            raise ValueError("lab objects must be bounded")
+    def objects_are_bounded(
+        cls, values: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
+        for value in values:
+            _validate_bounded_lab_value(value)
         return values
 
 
@@ -227,6 +259,18 @@ class KinematicsLabSpec(LabSpec):
     kind: Literal["kinematics"] = "kinematics"
 
 
+LabSpecVariant: TypeAlias = Annotated[
+    Union[
+        FunctionPlotLabSpec,
+        ParametricCurveLabSpec,
+        VectorFieldLabSpec,
+        GeometryLabSpec,
+        KinematicsLabSpec,
+    ],
+    Field(discriminator="kind"),
+]
+
+
 class ChapterSection(CourseContract):
     key: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=300)
@@ -243,7 +287,7 @@ class ChapterArtifact(CourseContract):
     definitions: list[str] = Field(default_factory=list, max_length=100)
     formulas: list[FormulaArtifact] = Field(default_factory=list, max_length=100)
     worked_examples: list[WorkedExampleArtifact] = Field(default_factory=list, max_length=100)
-    labs: list[LabSpec] = Field(default_factory=list, max_length=20)
+    labs: list[LabSpecVariant] = Field(default_factory=list, max_length=20)
     misconceptions: list[str] = Field(default_factory=list, max_length=100)
     exercises: list[ExerciseArtifact] = Field(default_factory=list, max_length=200)
     quick_reference: list[str] = Field(default_factory=list, max_length=100)

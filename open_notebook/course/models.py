@@ -10,7 +10,7 @@ from surrealdb import RecordID
 
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.base import ObjectModel
-from open_notebook.exceptions import NotFoundError
+from open_notebook.exceptions import NotFoundError, OpenNotebookError
 
 from . import state_machine as sm
 from .contracts import ModelSelection, SourceLocator
@@ -58,7 +58,19 @@ class CourseRecord(ObjectModel):
     async def get(cls: type[T], id: str) -> T:
         if not id or id.partition(":")[0] != cls.table_name:
             raise NotFoundError(f"{cls.table_name} record not found")
-        return await super().get(id)
+        try:
+            result = await repo_query(
+                "SELECT * FROM $id", {"id": ensure_record_id(id)}
+            )
+        except Exception as exc:
+            raise OpenNotebookError("Course record lookup failed") from exc
+        rows = result if isinstance(result, list) else [result] if result else []
+        if not rows or not isinstance(rows[0], dict):
+            raise NotFoundError(f"{cls.table_name} record not found")
+        try:
+            return cls(**rows[0])
+        except Exception as exc:
+            raise OpenNotebookError("Course record is invalid") from exc
 
     @field_validator("id", mode="before")
     @classmethod

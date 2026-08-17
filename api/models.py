@@ -2,6 +2,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from open_notebook.course.contracts import LabSpecVariant
+
 
 # Notebook models
 class NotebookCreate(BaseModel):
@@ -877,13 +879,23 @@ class ChapterUpdate(BaseModel):
 
 
 class LabCreate(BaseModel):
-    lab_type: str = Field(..., description="One of the five vetted lab types")
+    model_config = ConfigDict(extra="forbid")
+
+    lab_type: Literal[
+        "function_plot", "parametric_curve", "vector_field", "geometry", "kinematics"
+    ]
     chapter: Optional[str] = Field(None, description="Optional chapter record id")
-    prompt: Optional[str] = Field(None, description="Exercise prompt")
-    payload: Dict[str, Any] = Field(..., description="Bounded JSON render payload")
+    prompt: Optional[str] = Field(None, max_length=4000, description="Exercise prompt")
+    payload: LabSpecVariant = Field(..., description="Bounded declarative lab payload")
     answer: Optional[Dict[str, Any]] = Field(
         None, description="Expected answer / check specification"
     )
+
+    @model_validator(mode="after")
+    def payload_kind_matches_lab_type(self):
+        if self.payload.kind != self.lab_type:
+            raise ValueError("lab_type must match payload.kind")
+        return self
 
 
 class AttemptCreate(BaseModel):

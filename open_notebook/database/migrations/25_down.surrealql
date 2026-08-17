@@ -1,6 +1,14 @@
 -- Roll back only objects introduced by migration 25.  Migration-24 tables and
 -- all rows that pre-date this migration remain intact.
 
+-- Restore migration 24's original cascade before removing migration-25 tables.
+DEFINE EVENT OVERWRITE course_delete ON TABLE course WHEN ($after == NONE) THEN {
+    delete course_version where course == $before.id;
+    delete evidence where course == $before.id;
+    delete progress where course == $before.id;
+    delete course_note where course == $before.id;
+};
+
 REMOVE INDEX IF EXISTS progress_stable_identity_unique ON TABLE progress;
 REMOVE INDEX IF EXISTS evidence_source_identity_unique ON TABLE evidence;
 REMOVE INDEX IF EXISTS chapter_version_identity_unique ON TABLE chapter;

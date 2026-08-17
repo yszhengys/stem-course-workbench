@@ -218,6 +218,7 @@ async def test_source_association_keeps_exactly_one_role(monkeypatch):
         AsyncMock(return_value=Notebook(id="notebook:one", name="N", description="")),
     )
     monkeypatch.setattr(Source, "get", AsyncMock(return_value=source))
+    monkeypatch.setattr(Notebook, "get_sources", AsyncMock(return_value=[]))
     monkeypatch.setattr(Source, "add_to_notebook", AsyncMock())
     save = AsyncMock()
     monkeypatch.setattr(Course, "save", save)

@@ -261,11 +261,9 @@ def validate_outline_approval_payload(outline: Any) -> None:
 def normalize_approval(text: str) -> str:
     """Normalize approval text per PDR-003 decision 5.
 
-    Rules: Unicode NFC normalization, per-line trim + trailing-whitespace
-    strip, drop blank lines, tolerate a missing trailing newline. Anything
-    that survives normalization differs — different indentation levels, extra
-    internal whitespace, punctuation — fails the gate by design (the gate is
-    *exact*).
+    Rules: Unicode NFC normalization, trim surrounding spaces/tabs, and remove
+    at most one trailing newline before the final spaces/tabs trim. Additional
+    newlines, internal whitespace, indentation, and punctuation remain exact.
     """
     normalized = unicodedata.normalize("NFC", text)
     # Only surrounding whitespace and one trailing newline are tolerated.

@@ -46,7 +46,19 @@ def _has_table(record_id: str | None, table: str) -> bool:
 async def _typed_get(model: type[ModelT], record_id: str, table: str) -> ModelT:
     if not _has_table(record_id, table):
         raise NotFoundError(f"{table} record not found")
-    return await model.get(record_id)
+    try:
+        return await model.get(record_id)
+    except NotFoundError as exc:
+        # ObjectModel.get historically collapses every repository/validation
+        # failure into NotFoundError. Preserve a real missing-record result, but
+        # promote wrapped operational failures so the router returns a sanitized
+        # server error rather than a misleading 404.
+        cause = exc.__cause__ or exc.__context__
+        if cause is not None and not isinstance(
+            cause, (NotFoundError, InvalidInputError)
+        ):
+            raise OpenNotebookError("Course record lookup failed") from exc
+        raise NotFoundError(f"{table} record not found") from None
 
 
 def _artifact_hash(artifact: dict[str, Any]) -> str:
@@ -54,6 +66,52 @@ def _artifact_hash(artifact: dict[str, Any]) -> str:
         artifact, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _artifact_keys(artifact: dict[str, Any] | None, field: str) -> set[str]:
+    if not artifact:
+        return set()
+    values = artifact.get(field, [])
+    if not isinstance(values, list):
+        return set()
+    return {
+        value["key"]
+        for value in values
+        if isinstance(value, dict) and isinstance(value.get("key"), str)
+    }
+
+
+def _artifact_block_keys(artifact: dict[str, Any] | None) -> set[str]:
+    keys: set[str] = set()
+    for field in ("sections", "formulas", "worked_examples", "labs", "exercises"):
+        keys.update(_artifact_keys(artifact, field))
+    return keys
+
+
+async def _owned_chapter(
+    *,
+    course_id: str,
+    version_id: str,
+    chapter_id: str | None = None,
+    chapter_key: str | None = None,
+) -> Chapter:
+    version = await _typed_get(CourseVersion, version_id, "course_version")
+    if version.course != course_id:
+        raise NotFoundError("Course resource not found")
+    if chapter_id is not None:
+        chapter = await _typed_get(Chapter, chapter_id, "chapter")
+        if chapter.course_version != version_id:
+            raise NotFoundError("Course resource not found")
+        if chapter_key is not None and chapter.chapter_key != chapter_key:
+            raise NotFoundError("Course resource not found")
+        return chapter
+    if chapter_key is None:
+        raise NotFoundError("Course resource not found")
+    chapters = await CourseVersion.chapters(version_id)
+    matches = [chapter for chapter in chapters if chapter.chapter_key == chapter_key]
+    if not matches:
+        raise NotFoundError("Course resource not found")
+    return max(matches, key=lambda chapter: chapter.version_no)
 
 
 class CourseService:
@@ -126,7 +184,7 @@ class CourseService:
         role: Literal["PRIMARY", "SUPPLEMENT"],
     ) -> Course:
         course = await CourseService.get_course(course_id)
-        await _typed_get(Notebook, course.notebook, "notebook")
+        notebook = await _typed_get(Notebook, course.notebook, "notebook")
         source = await _typed_get(Source, source_id, "source")
         if source_id in course.source_ids:
             existing_role = (
@@ -135,13 +193,34 @@ class CourseService:
             raise CourseConflictError(
                 f"Source is already associated as {existing_role}"
             )
-        await source.add_to_notebook(course.notebook)
+        notebook_sources = await notebook.get_sources()
+        relationship_created = source_id not in {
+            item.id for item in notebook_sources
+        }
+        if relationship_created:
+            await source.add_to_notebook(course.notebook)
         course.source_ids.append(source_id)
         if role == "PRIMARY":
             course.primary_source_ids.append(source_id)
         else:
             course.supplement_source_ids.append(source_id)
-        await course.save()
+        try:
+            await course.save()
+        except Exception:
+            course.source_ids.remove(source_id)
+            if role == "PRIMARY":
+                course.primary_source_ids.remove(source_id)
+            else:
+                course.supplement_source_ids.remove(source_id)
+            if relationship_created:
+                await repo_query(
+                    "DELETE reference WHERE in = $source_id AND out = $notebook_id",
+                    {
+                        "source_id": ensure_record_id(source_id),
+                        "notebook_id": ensure_record_id(course.notebook),
+                    },
+                )
+            raise
         return course
 
     @staticmethod
@@ -181,6 +260,8 @@ class CourseService:
         version = await _typed_get(CourseVersion, version_id, "course_version")
         if version.course != course_id:
             raise CourseConflictError("Outline version is stale")
+        if version.status in {sm.VersionStatus.PUBLISHED, sm.VersionStatus.FAILED}:
+            raise CourseConflictError("Course version cannot be approved in its current state")
         if version.outline_artifact is None:
             raise CourseConflictError("Outline version has no artifact")
         version.confirmation = normalized
@@ -296,12 +377,24 @@ class CourseService:
         version = await _typed_get(CourseVersion, version_id, "course_version")
         if version.status == sm.VersionStatus.PUBLISHED:
             return version
+        if version.status != sm.VersionStatus.GENERATING:
+            raise CourseConflictError("Course version is not ready for publication")
+        course = await CourseService.get_course(version.course)
+        if (
+            course.outline_version_id != version_id
+            or version.approved_at is None
+            or version.outline_artifact is None
+            or version.outline_hash != _artifact_hash(version.outline_artifact)
+        ):
+            raise CourseConflictError("Approved outline hash does not match")
         chapters = await CourseVersion.chapters(version_id)
         if not chapters or any(
             chapter.status != sm.ChapterStatus.PUBLISHED for chapter in chapters
         ):
             raise CourseConflictError("All chapters must be published first")
-        version.status = sm.VersionStatus.PUBLISHED
+        version.status = sm.transition(
+            "version", version.status, sm.VersionStatus.PUBLISHED
+        )
         version.published_at = datetime.now(timezone.utc)
         await version.save()
         return version
@@ -331,19 +424,29 @@ class CourseService:
     async def create_attempt(lab_id: str, values: dict[str, Any]) -> Attempt:
         lab = await _typed_get(Lab, lab_id, "lab")
         version = await _typed_get(CourseVersion, lab.course_version, "course_version")
-        chapter_id = lab.chapter
-        if chapter_id is not None:
-            chapter = await _typed_get(Chapter, chapter_id, "chapter")
-            if chapter.course_version != version.id:
-                raise NotFoundError("Lab chapter ownership mismatch")
+        requested_chapter_key = values.get("chapter_key")
+        requested_exercise_key = values.get("exercise_key")
+        chapter: Chapter | None = None
+        if lab.chapter is not None or requested_chapter_key is not None:
+            chapter = await _owned_chapter(
+                course_id=version.course,
+                version_id=lab.course_version,
+                chapter_id=lab.chapter,
+                chapter_key=requested_chapter_key,
+            )
+        if requested_exercise_key is not None:
+            if chapter is None or requested_exercise_key not in _artifact_keys(
+                chapter.artifact, "exercises"
+            ):
+                raise NotFoundError("Course resource not found")
         attempt = Attempt(
             lab=lab_id,
             answers=values["answers"],
             course=version.course,
             course_version=lab.course_version,
-            chapter=lab.chapter,
-            chapter_key=values.get("chapter_key"),
-            exercise_key=values.get("exercise_key"),
+            chapter=chapter.id if chapter is not None else lab.chapter,
+            chapter_key=chapter.chapter_key if chapter is not None else None,
+            exercise_key=requested_exercise_key,
         )
         await attempt.save()
         return attempt
@@ -357,10 +460,22 @@ class CourseService:
     async def transition_attempt(attempt_id: str, target: str) -> Attempt:
         attempt = await _typed_get(Attempt, attempt_id, "attempt")
         lab = await _typed_get(Lab, attempt.lab, "lab")
+        version = await _typed_get(CourseVersion, lab.course_version, "course_version")
+        if attempt.course and attempt.course != version.course:
+            raise NotFoundError("Attempt ownership mismatch")
         if attempt.course_version and attempt.course_version != lab.course_version:
             raise NotFoundError("Attempt ownership mismatch")
-        if attempt.chapter and attempt.chapter != lab.chapter:
-            raise NotFoundError("Attempt ownership mismatch")
+        if attempt.chapter or attempt.chapter_key or attempt.exercise_key:
+            chapter = await _owned_chapter(
+                course_id=version.course,
+                version_id=lab.course_version,
+                chapter_id=attempt.chapter or lab.chapter,
+                chapter_key=attempt.chapter_key,
+            )
+            if attempt.exercise_key and attempt.exercise_key not in _artifact_keys(
+                chapter.artifact, "exercises"
+            ):
+                raise NotFoundError("Attempt ownership mismatch")
         attempt.status = sm.transition("attempt", attempt.status, target)
         await attempt.save()
         return attempt
@@ -372,14 +487,22 @@ class CourseService:
 
     @staticmethod
     async def upsert_progress(course_id: str, values: dict[str, Any]) -> Progress:
-        await CourseService.get_course(course_id)
+        course = await CourseService.get_course(course_id)
         chapter_id = values.get("chapter")
-        if chapter_id:
-            chapter = await _typed_get(Chapter, chapter_id, "chapter")
-            version = await _typed_get(CourseVersion, chapter.course_version, "course_version")
-            if version.course != course_id:
-                raise NotFoundError("Chapter not found in Course")
         chapter_key = values.get("chapter_key")
+        block_key = values.get("block_key")
+        chapter: Chapter | None = None
+        if chapter_id or chapter_key or block_key:
+            if not course.outline_version_id:
+                raise NotFoundError("Course resource not found")
+            chapter = await _owned_chapter(
+                course_id=course_id,
+                version_id=course.outline_version_id,
+                chapter_id=chapter_id,
+                chapter_key=chapter_key,
+            )
+            chapter_id = chapter.id
+            chapter_key = chapter.chapter_key
         result = await repo_query(
             "SELECT * FROM progress WHERE course = $course AND chapter_key = $chapter_key",
             {"course": ensure_record_id(course_id), "chapter_key": chapter_key},
@@ -388,7 +511,12 @@ class CourseService:
             course=course_id,
             chapter=chapter_id,
             chapter_key=chapter_key,
-            block_key=values.get("block_key"),
+            block_key=block_key,
+            orphan_status=(
+                "orphaned"
+                if block_key and block_key not in _artifact_block_keys(chapter.artifact if chapter else None)
+                else "active"
+            ),
         )
         progress.status = sm.transition("progress", progress.status, values["status"])
         await progress.save()
@@ -401,14 +529,28 @@ class CourseService:
 
     @staticmethod
     async def create_note(course_id: str, values: dict[str, Any]) -> CourseNote:
-        await CourseService.get_course(course_id)
+        course = await CourseService.get_course(course_id)
         chapter_id = values.get("chapter")
-        if chapter_id:
-            chapter = await _typed_get(Chapter, chapter_id, "chapter")
-            version = await _typed_get(CourseVersion, chapter.course_version, "course_version")
-            if version.course != course_id:
-                raise NotFoundError("Chapter not found in Course")
-        note = CourseNote(course=course_id, **values)
+        chapter_key = values.get("chapter_key")
+        block_key = values.get("block_key")
+        payload = dict(values)
+        if chapter_id or chapter_key or block_key:
+            if not course.outline_version_id:
+                raise NotFoundError("Course resource not found")
+            chapter = await _owned_chapter(
+                course_id=course_id,
+                version_id=course.outline_version_id,
+                chapter_id=chapter_id,
+                chapter_key=chapter_key,
+            )
+            payload["chapter"] = chapter.id
+            payload["chapter_key"] = chapter.chapter_key
+            payload["orphan_status"] = (
+                "orphaned"
+                if block_key and block_key not in _artifact_block_keys(chapter.artifact)
+                else "active"
+            )
+        note = CourseNote(course=course_id, **payload)
         await note.save()
         return note
 

@@ -101,3 +101,14 @@ DEFINE INDEX IF NOT EXISTS chapter_version_identity_unique ON TABLE chapter FIEL
 DEFINE INDEX IF NOT EXISTS evidence_source_identity_unique ON TABLE evidence FIELDS course, source UNIQUE;
 DEFINE INDEX IF NOT EXISTS course_anchor_identity_unique ON TABLE course_evidence_anchor FIELDS course, anchor_id UNIQUE;
 DEFINE INDEX IF NOT EXISTS progress_stable_identity_unique ON TABLE progress FIELDS course, chapter_key UNIQUE;
+
+-- Extend migration 24's Course cascade without replacing the aggregate.
+DEFINE EVENT OVERWRITE course_delete ON TABLE course WHEN ($after == NONE) THEN {
+    delete course_version where course == $before.id;
+    delete evidence where course == $before.id;
+    delete progress where course == $before.id;
+    delete course_note where course == $before.id;
+    delete course_evidence_anchor where course == $before.id;
+    delete course_generation_run where course == $before.id;
+    delete course_validation_finding where course == $before.id;
+};

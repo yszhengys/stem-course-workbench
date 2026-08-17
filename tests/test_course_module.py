@@ -239,4 +239,6 @@ class TestCourseRouter:
             },
         )
         assert response.status_code == 422
-        assert "lab_type" in response.json()["detail"]
+        assert any(
+            "lab_type" in error["loc"] for error in response.json()["detail"]
+        )
