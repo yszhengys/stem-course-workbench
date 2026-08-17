@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import subprocess
 import sys
@@ -1873,6 +1874,335 @@ async def test_generic_command_stale_new_status_never_regresses_running_run(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("version_status", ["generating", "published"])
+async def test_active_outline_replay_of_approved_artifact_is_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    version_status: str,
+) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.contracts import CourseOutlineArtifact, ModelSelection
+    from open_notebook.course.models import Course, CourseGenerationRun, CourseVersion
+
+    outline = CourseOutlineArtifact(
+        title="Calculus",
+        chapters=[
+            {
+                "key": "limits",
+                "title": "Limits",
+                "purpose": "Learn limits.",
+                "objective_keys": ["limit"],
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+        concepts=[
+            {
+                "key": "limit",
+                "label": "Limit",
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+    )
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        status="ready",
+        outline_version_id="course_version:approved",
+    )
+    selection = ModelSelection(
+        adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
+    )
+    run = CourseGenerationRun(
+        id="course_generation_run:outline-replay",
+        course="course:one",
+        stage="outline",
+        adapter=selection.adapter,
+        model=selection.model,
+        reasoning_effort=selection.reasoning_effort,
+        status="running",
+        prompt_version="v1",
+        input_hash="logical-hash",
+    )
+    version = CourseVersion(
+        id="course_version:approved",
+        course="course:one",
+        version_no=1,
+        status=version_status,
+        outline_artifact=outline.model_dump(mode="json"),
+        input_hash=module.artifact_replay_hash(run),
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+    )
+    generate = AsyncMock(side_effect=AssertionError("model must not run"))
+    generation = SimpleNamespace(generate_outline=generate)
+    workflow = module.CourseWorkflowService(
+        generation=cast(module.CourseGenerationService, generation)
+    )
+    monkeypatch.setattr(module.Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(
+        module.CourseVersion, "get", AsyncMock(return_value=version)
+    )
+    monkeypatch.setattr(
+        module,
+        "repo_query",
+        AsyncMock(return_value=[version.model_dump(mode="json")]),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "grounded_inputs",
+        AsyncMock(return_value=([], {"source:one": "a" * 64}, [])),
+    )
+    monkeypatch.setattr(workflow, "validate_run_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workflow, "validate_run_claim", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workflow, "activate_run", AsyncMock(return_value=run))
+    course_save = AsyncMock()
+    monkeypatch.setattr(module.Course, "save", course_save)
+    monkeypatch.setattr(module.CourseGenerationRun, "save", AsyncMock())
+
+    result = await workflow.generate_outline(
+        run=run,
+        command_id="command:outline-replay",
+        course_id="course:one",
+        anchor_ids=["anchor:one"],
+        available_lab_keys=[],
+        model=selection,
+        prompt_version="v1",
+    )
+
+    assert result.id == version.id
+    assert run.status == "succeeded"
+    assert course.status == "ready"
+    assert course.outline_version_id == "course_version:approved"
+    generate.assert_not_awaited()
+    course_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ready_passed_chapter_re_review_with_high_finding_blocks_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.contracts import (
+        ChapterArtifact,
+        ChapterSection,
+        CourseOutlineArtifact,
+        ModelSelection,
+        ReviewArtifact,
+        ValidationFinding,
+    )
+    from open_notebook.course.generation_service import CourseGenerationService
+    from open_notebook.course.models import (
+        Chapter,
+        Course,
+        CourseGenerationRun,
+        CourseVersion,
+    )
+
+    outline = CourseOutlineArtifact(
+        title="Calculus",
+        chapters=[
+            {
+                "key": "limits",
+                "title": "Limits",
+                "purpose": "Learn limits.",
+                "objective_keys": ["limit"],
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+        concepts=[
+            {
+                "key": "limit",
+                "label": "Limit",
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+    )
+    artifact = ChapterArtifact(
+        chapter_key="limits",
+        purpose="Learn limits.",
+        objectives=["Evaluate limits"],
+        sections=[
+            ChapterSection(
+                key="definition",
+                title="Definition",
+                markdown="Grounded definition.",
+                anchor_ids=["anchor:one"],
+            )
+        ],
+    )
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        outline_version_id="course_version:one",
+        status="generating",
+    )
+    version = CourseVersion(
+        id="course_version:one",
+        course="course:one",
+        version_no=1,
+        status="generating",
+        outline_artifact=outline.model_dump(mode="json"),
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+    )
+    chapter = Chapter(
+        id="chapter:one",
+        course_version="course_version:one",
+        chapter_no=1,
+        chapter_key="limits",
+        title="Limits",
+        version_no=1,
+        status="ready",
+        review_status="passed",
+        validation_status="passed",
+        artifact=artifact.model_dump(mode="json"),
+    )
+    selection = ModelSelection(
+        adapter="codex_cli", model="gpt-5.6-luna", reasoning_effort="max"
+    )
+    run = CourseGenerationRun(
+        id="course_generation_run:re-review",
+        course="course:one",
+        course_version="course_version:one",
+        chapter="chapter:one",
+        chapter_key="limits",
+        stage="review",
+        adapter=selection.adapter,
+        model=selection.model,
+        reasoning_effort=selection.reasoning_effort,
+        status="running",
+        prompt_version="v1",
+        input_hash="logical-hash",
+    )
+    finding = ValidationFinding(
+        kind="review",
+        severity="high",
+        item_key="definition",
+        anchor_ids=["anchor:one"],
+        message="The definition needs correction.",
+    )
+    generation = SimpleNamespace(
+        review=AsyncMock(return_value=ReviewArtifact(findings=[finding])),
+        validate_chapter=lambda _artifact, _anchors: [],
+        assert_publishable=CourseGenerationService.assert_publishable,
+    )
+    workflow = module.CourseWorkflowService(
+        generation=cast(module.CourseGenerationService, generation)
+    )
+
+    async def finding_query(statement: str, variables=None):
+        del variables
+        if "FROM course_validation_finding" in statement:
+            return []
+        if statement.lstrip().startswith("DELETE course_validation_finding"):
+            return []
+        if "UPSERT $finding_id" in statement:
+            return []
+        raise AssertionError(statement)
+
+    monkeypatch.setattr(module.Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(
+        module.CourseVersion, "chapters", AsyncMock(return_value=[chapter])
+    )
+    monkeypatch.setattr(
+        workflow, "approved_version", AsyncMock(return_value=(version, outline))
+    )
+    monkeypatch.setattr(
+        workflow,
+        "grounded_inputs",
+        AsyncMock(return_value=([], {"source:one": "a" * 64}, [])),
+    )
+    monkeypatch.setattr(workflow, "validate_run_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workflow, "validate_run_claim", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workflow, "activate_run", AsyncMock(return_value=run))
+    monkeypatch.setattr(module, "repo_query", finding_query)
+    monkeypatch.setattr(module.Chapter, "save", AsyncMock())
+    monkeypatch.setattr(module.CourseGenerationRun, "save", AsyncMock())
+
+    reviewed, findings = await workflow.review_chapter(
+        run=run,
+        command_id="command:re-review",
+        course_id="course:one",
+        chapter_key="limits",
+        anchor_ids=["anchor:one"],
+        model=selection,
+        prompt_version="v1",
+    )
+
+    assert findings == [finding]
+    assert reviewed.status == "blocked"
+    assert reviewed.review_status == "escalated"
+    assert reviewed.validation_status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_current_chapter_requires_key_from_complete_approved_outline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.course_command_service as module
+    from open_notebook.course.contracts import CourseOutlineArtifact
+    from open_notebook.course.models import Chapter, Course, CourseVersion
+    from open_notebook.exceptions import NotFoundError
+
+    outline = CourseOutlineArtifact(
+        title="Calculus",
+        chapters=[
+            {
+                "key": "limits",
+                "title": "Limits",
+                "purpose": "Learn limits.",
+                "objective_keys": ["limit"],
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+        concepts=[
+            {
+                "key": "limit",
+                "label": "Limit",
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+    )
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        outline_version_id="course_version:one",
+    )
+    outline_payload = outline.model_dump(mode="json")
+    version = CourseVersion(
+        id="course_version:one",
+        course="course:one",
+        version_no=1,
+        outline_artifact=outline_payload,
+        outline_hash=hashlib.sha256(
+            json.dumps(
+                outline_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+    )
+    chapter = Chapter(
+        id="chapter:invented",
+        course_version="course_version:one",
+        chapter_no=2,
+        chapter_key="invented",
+        title="Invented",
+    )
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[chapter]))
+
+    with pytest.raises(NotFoundError, match="Chapter not found"):
+        await module.CourseCommandService.current_chapter("course:one", "invented")
+
+
+@pytest.mark.asyncio
 async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once(
     monkeypatch,
 ) -> None:
@@ -2097,6 +2427,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     monkeypatch.setattr(base_module, "repo_create", create_record)
     monkeypatch.setattr(base_module, "repo_update", update_record)
     monkeypatch.setattr(CourseService, "get_course", AsyncMock(return_value=course))
+    monkeypatch.setattr("api.course_service.repo_query", query)
 
     adapter = FakeCourseModelAdapter(outline)
     workflow = module.CourseWorkflowService(

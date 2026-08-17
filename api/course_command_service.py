@@ -528,10 +528,10 @@ class CourseCommandService:
     @staticmethod
     async def current_chapter(course_id: str, chapter_key: str) -> Chapter:
         course = await Course.get(course_id)
-        if not course.outline_version_id:
-            raise NotFoundError("Chapter not found")
-        version = await CourseVersion.get(course.outline_version_id)
-        if version.course != course_id:
+        try:
+            version, outline = await CourseWorkflowService.approved_version(course)
+            CourseWorkflowService._outline_chapter(outline, chapter_key)
+        except (NotFoundError, ValueError):
             raise NotFoundError("Chapter not found")
         chapters = await CourseVersion.chapters(str(version.id))
         matches = [item for item in chapters if item.chapter_key == chapter_key]

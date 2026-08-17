@@ -50,6 +50,29 @@ def artifact_hash(artifact: dict) -> str:
     ).hexdigest()
 
 
+def approved_outline() -> dict:
+    return {
+        "title": "Calculus",
+        "chapters": [
+            {
+                "key": "limits",
+                "title": "Limits",
+                "purpose": "Learn limits.",
+                "objective_keys": ["limit"],
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+        "concepts": [
+            {
+                "key": "limit",
+                "label": "Limit",
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+        "dependency_edges": [],
+    }
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("version_status", ["published", "failed"])
 async def test_outline_reapproval_rejects_terminal_version(monkeypatch, version_status):
@@ -164,7 +187,7 @@ async def test_version_publish_revalidates_current_approved_outline_hash(monkeyp
 
 @pytest.mark.asyncio
 async def test_version_publish_uses_legal_generating_to_published_transition(monkeypatch):
-    artifact = {"chapters": [{"key": "limits"}]}
+    artifact = approved_outline()
     course = Course(
         id="course:one",
         title="Calculus",
@@ -180,6 +203,7 @@ async def test_version_publish_uses_legal_generating_to_published_transition(mon
         outline_artifact=artifact,
         outline_hash=artifact_hash(artifact),
         approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
     )
     chapter = Chapter(
         id="chapter:one",
@@ -203,7 +227,7 @@ async def test_version_publish_uses_legal_generating_to_published_transition(mon
 
 
 def publishable_chapter_records():
-    artifact = {"chapters": [{"key": "limits"}]}
+    artifact = approved_outline()
     course = Course(
         id="course:one",
         title="Calculus",
@@ -219,6 +243,7 @@ def publishable_chapter_records():
         outline_artifact=artifact,
         outline_hash=artifact_hash(artifact),
         approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
     )
     chapter = Chapter(
         id="chapter:one",
@@ -309,6 +334,7 @@ async def test_publish_chapter_succeeds_after_every_gate_passes(monkeypatch):
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
     monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
+    monkeypatch.setattr("api.course_service.repo_query", AsyncMock(return_value=[]))
     save = AsyncMock()
     monkeypatch.setattr(Chapter, "save", save)
 

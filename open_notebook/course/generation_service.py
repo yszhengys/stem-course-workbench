@@ -151,13 +151,29 @@ class CourseGenerationService:
             schema_name="course_outline",
         )
         adapter = self.adapter or build_adapter(model)
+        lab_keys_json = json.dumps(
+            sorted(available_lab_keys),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if available_lab_keys:
+            lab_policy = (
+                f"Allowed lab keys (exact sorted set): {lab_keys_json}. "
+                "Each chapter may use any subset and must not invent other keys."
+            )
+        else:
+            lab_policy = (
+                "Allowed lab keys (exact sorted set): []. "
+                "Every chapter must set lab_keys to []."
+            )
         generated = await adapter.generate(
             request,
             CourseOutlineArtifact,
             prompt=self.prompt_for(
                 "outline",
                 evidence,
-                "Return a grounded outline and acyclic concept dependency graph.",
+                "Return a grounded outline and acyclic concept dependency graph.\n"
+                + lab_policy,
                 format_instructions=self._format_instructions(CourseOutlineArtifact),
             ),
         )

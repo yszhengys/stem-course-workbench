@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
 
+import httpx
+
 from open_notebook.ai.models import Model
 from open_notebook.course import state_machine as sm
+from open_notebook.course.contracts import CourseOutlineArtifact, ValidationFinding
+from open_notebook.course.generation_service import (
+    CourseGenerationService,
+    PublicationBlocked,
+)
 from open_notebook.course.models import (
     DEFAULT_MODEL_POLICY,
     Attempt,
@@ -19,6 +28,7 @@ from open_notebook.course.models import (
     Lab,
     Progress,
 )
+from open_notebook.course.workflow_service import CourseWorkflowService
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.base import ObjectModel
 from open_notebook.domain.notebook import Notebook, Source
@@ -90,6 +100,44 @@ def _artifact_block_keys(artifact: dict[str, Any] | None) -> set[str]:
     return keys
 
 
+async def _installed_ollama_models() -> set[str]:
+    """Probe only the local Ollama registry; offline means unavailable."""
+
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            response = await client.get("http://127.0.0.1:11434/api/tags")
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, TypeError, ValueError):
+        return set()
+    models = payload.get("models", []) if isinstance(payload, dict) else []
+    return {
+        name
+        for item in models
+        if isinstance(item, dict)
+        for name in (item.get("name") or item.get("model"),)
+        if isinstance(name, str)
+    }
+
+
+async def _approved_outline_records(
+    course_id: str,
+) -> tuple[Course, CourseVersion, CourseOutlineArtifact]:
+    course = await CourseService.get_course(course_id)
+    if not course.outline_version_id:
+        raise CourseConflictError("Current Course outline is not approved")
+    version = await _typed_get(
+        CourseVersion, course.outline_version_id, "course_version"
+    )
+    if str(version.id) != course.outline_version_id or version.course != course_id:
+        raise NotFoundError("Course resource not found")
+    try:
+        outline = CourseWorkflowService.validate_approved_version(course, version)
+    except ValueError as exc:
+        raise CourseConflictError("Current Course outline is not approved") from exc
+    return course, version, outline
+
+
 async def _owned_chapter(
     *,
     course_id: str,
@@ -121,19 +169,12 @@ async def _current_chapter_records(
 ) -> tuple[Course, CourseVersion, Chapter]:
     """Resolve the current approved Course version and latest stable-key chapter."""
 
-    course = await CourseService.get_course(course_id)
-    if not course.outline_version_id:
-        raise NotFoundError("Course resource not found")
-    version_id = course.outline_version_id
-    version = await _typed_get(CourseVersion, version_id, "course_version")
-    if (
-        str(version.id) != version_id
-        or version.course != course_id
-        or version.approved_at is None
-        or version.outline_artifact is None
-        or version.outline_hash != _artifact_hash(version.outline_artifact)
-    ):
-        raise CourseConflictError("Current Course outline is not approved")
+    course, version, outline = await _approved_outline_records(course_id)
+    try:
+        CourseWorkflowService._outline_chapter(outline, chapter_key)
+    except ValueError:
+        raise NotFoundError("Course chapter not found") from None
+    version_id = str(version.id)
     chapter = await _owned_chapter(
         course_id=course_id,
         version_id=version_id,
@@ -179,6 +220,13 @@ class CourseService:
     async def get_model_options() -> dict[str, Any]:
         """Return explicit Course-only selections without changing global defaults."""
         configured_models = await Model.get_models_by_type("language")
+        real_models_enabled = (
+            os.getenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS") == "1"
+        )
+        codex_available = real_models_enabled and shutil.which("codex") is not None
+        installed_ollama = (
+            await _installed_ollama_models() if real_models_enabled else set()
+        )
         efforts = ["low", "medium", "high", "xhigh", "max"]
         options: list[dict[str, Any]] = [
             {
@@ -187,7 +235,8 @@ class CourseService:
                 "reasoning_effort": "max",
                 "reasoning_efforts": efforts,
                 "optional": False,
-                "configured": True,
+                "configured": codex_available,
+                "selectable": codex_available,
             }
             for model in ("gpt-5.6-sol", "gpt-5.6-luna")
         ]
@@ -197,9 +246,10 @@ class CourseService:
                 "model": model,
                 "reasoning_effort": None,
                 "optional": True,
-                "configured": False,
+                "configured": model in installed_ollama,
+                "selectable": model in installed_ollama,
             }
-            for model in ("qwen3.5:9b", "deepseek-r1:8b")
+            for model in ("qwen3.5:9b", "gpt-oss:20b")
         )
         options.extend(
             {
@@ -207,8 +257,8 @@ class CourseService:
                 "model": str(model.id),
                 "reasoning_effort": None,
                 "optional": model.provider == "deepseek",
-                "configured": True,
-                "selectable": True,
+                "configured": real_models_enabled,
+                "selectable": real_models_enabled,
                 "name": model.name,
                 "provider": model.provider,
             }
@@ -480,6 +530,11 @@ class CourseService:
             raise NotFoundError("Chapter not found in Course")
         if chapter.status == sm.ChapterStatus.PUBLISHED:
             return chapter
+        try:
+            outline = CourseWorkflowService.validate_approved_version(course, version)
+            CourseWorkflowService._outline_chapter(outline, chapter.chapter_key)
+        except ValueError as exc:
+            raise CourseConflictError("Current Course outline is not approved") from exc
         if chapter.status != sm.ChapterStatus.READY:
             raise CourseConflictError("Chapter is not ready for publication")
         if (
@@ -487,13 +542,26 @@ class CourseService:
             or chapter.validation_status != sm.ChapterValidationStatus.PASSED
         ):
             raise CourseConflictError("Chapter review and validation must pass")
-        if (
-            course.outline_version_id != version_id
-            or version.approved_at is None
-            or version.outline_artifact is None
-            or version.outline_hash != _artifact_hash(version.outline_artifact)
-        ):
-            raise CourseConflictError("Approved outline hash does not match")
+        rows = await repo_query(
+            "SELECT * FROM course_validation_finding "
+            "WHERE course = $course AND course_version = $version "
+            "AND chapter = $chapter;",
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(version_id),
+                "chapter": ensure_record_id(chapter_id),
+            },
+        )
+        try:
+            findings = [
+                ValidationFinding.model_validate(row["finding"])
+                for row in rows
+            ]
+            CourseGenerationService.assert_publishable(findings)
+        except (KeyError, TypeError, ValueError, PublicationBlocked) as exc:
+            raise CourseConflictError(
+                "Chapter has unresolved validation findings"
+            ) from exc
         chapter.status = sm.transition("chapter", chapter.status, sm.ChapterStatus.PUBLISHED)
         chapter.published_at = datetime.now(timezone.utc)
         await chapter.save()
@@ -520,13 +588,10 @@ class CourseService:
         if version.status != sm.VersionStatus.GENERATING:
             raise CourseConflictError("Course version is not ready for publication")
         course = await CourseService.get_course(version.course)
-        if (
-            course.outline_version_id != version_id
-            or version.approved_at is None
-            or version.outline_artifact is None
-            or version.outline_hash != _artifact_hash(version.outline_artifact)
-        ):
-            raise CourseConflictError("Approved outline hash does not match")
+        try:
+            CourseWorkflowService.validate_approved_version(course, version)
+        except ValueError as exc:
+            raise CourseConflictError("Approved outline hash does not match") from exc
         chapters = await CourseVersion.chapters(version_id)
         if not chapters or any(
             chapter.status != sm.ChapterStatus.PUBLISHED for chapter in chapters
@@ -660,6 +725,11 @@ class CourseService:
                 or historical_chapter.chapter_key != chapter_key
                 or lab_key not in _artifact_keys(historical_chapter.artifact, "labs")
                 or (
+                    attempt.exercise_key is not None
+                    and attempt.exercise_key
+                    not in _artifact_keys(historical_chapter.artifact, "exercises")
+                )
+                or (
                     attempt.course_version is not None
                     and attempt.course_version != lab.course_version
                 )
@@ -745,37 +815,42 @@ class CourseService:
 
     @staticmethod
     async def upsert_progress(course_id: str, values: dict[str, Any]) -> Progress:
-        course = await CourseService.get_course(course_id)
-        chapter_id = values.get("chapter")
+        if "chapter" in values:
+            raise InvalidInputError("Client chapter record IDs are not accepted")
         chapter_key = values.get("chapter_key")
         block_key = values.get("block_key")
+        if block_key and not chapter_key:
+            raise InvalidInputError("block_key requires chapter_key")
+        chapter_id: str | None = None
         chapter: Chapter | None = None
-        if chapter_id or chapter_key or block_key:
-            if not course.outline_version_id:
-                raise NotFoundError("Course resource not found")
-            chapter = await _owned_chapter(
-                course_id=course_id,
-                version_id=course.outline_version_id,
-                chapter_id=chapter_id,
-                chapter_key=chapter_key,
-            )
-            chapter_id = chapter.id
+        if chapter_key:
+            _, _, chapter = await _current_chapter_records(course_id, chapter_key)
+            if chapter.id is None:
+                raise CourseConflictError("Current chapter is not persisted")
+            chapter_id = str(chapter.id)
             chapter_key = chapter.chapter_key
+        else:
+            await CourseService.get_course(course_id)
         result = await repo_query(
             "SELECT * FROM progress WHERE course = $course AND chapter_key = $chapter_key",
             {"course": ensure_record_id(course_id), "chapter_key": chapter_key},
         )
-        progress = Progress(**result[0]) if result else Progress(
-            course=course_id,
-            chapter=chapter_id,
-            chapter_key=chapter_key,
-            block_key=block_key,
-            orphan_status=(
-                "orphaned"
-                if block_key and block_key not in _artifact_block_keys(chapter.artifact if chapter else None)
-                else "active"
-            ),
+        orphan_status = (
+            "orphaned"
+            if block_key
+            and block_key
+            not in _artifact_block_keys(chapter.artifact if chapter else None)
+            else "active"
         )
+        progress = (
+            Progress(**result[0])
+            if result
+            else Progress(course=course_id)
+        )
+        progress.chapter = chapter_id
+        progress.chapter_key = chapter_key
+        progress.block_key = block_key
+        progress.orphan_status = orphan_status
         progress.status = sm.transition("progress", progress.status, values["status"])
         await progress.save()
         return progress
@@ -787,27 +862,26 @@ class CourseService:
 
     @staticmethod
     async def create_note(course_id: str, values: dict[str, Any]) -> CourseNote:
-        course = await CourseService.get_course(course_id)
-        chapter_id = values.get("chapter")
+        if "chapter" in values:
+            raise InvalidInputError("Client chapter record IDs are not accepted")
         chapter_key = values.get("chapter_key")
         block_key = values.get("block_key")
+        if block_key and not chapter_key:
+            raise InvalidInputError("block_key requires chapter_key")
         payload = dict(values)
-        if chapter_id or chapter_key or block_key:
-            if not course.outline_version_id:
-                raise NotFoundError("Course resource not found")
-            chapter = await _owned_chapter(
-                course_id=course_id,
-                version_id=course.outline_version_id,
-                chapter_id=chapter_id,
-                chapter_key=chapter_key,
-            )
-            payload["chapter"] = chapter.id
+        if chapter_key:
+            _, _, chapter = await _current_chapter_records(course_id, chapter_key)
+            if chapter.id is None:
+                raise CourseConflictError("Current chapter is not persisted")
+            payload["chapter"] = str(chapter.id)
             payload["chapter_key"] = chapter.chapter_key
             payload["orphan_status"] = (
                 "orphaned"
                 if block_key and block_key not in _artifact_block_keys(chapter.artifact)
                 else "active"
             )
+        else:
+            await CourseService.get_course(course_id)
         note = CourseNote(course=course_id, **payload)
         await note.save()
         return note

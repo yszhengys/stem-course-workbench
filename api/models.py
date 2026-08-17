@@ -989,18 +989,28 @@ class AttemptStatusUpdate(BaseModel):
     status: str = Field(..., description="Target attempt status")
 
 
-class ProgressUpdate(BaseModel):
-    chapter: Optional[str] = Field(None, description="Optional chapter record id")
-    chapter_key: Optional[str] = Field(None, description="Stable chapter key")
-    block_key: Optional[str] = Field(None, description="Stable block key")
+class ProgressUpdate(StrictCourseRequest):
+    chapter_key: Optional[str] = Field(None, min_length=1, max_length=100)
+    block_key: Optional[str] = Field(None, min_length=1, max_length=200)
     status: str = Field(..., description="Target progress status")
 
+    @model_validator(mode="after")
+    def block_requires_chapter(self) -> "ProgressUpdate":
+        if self.block_key is not None and self.chapter_key is None:
+            raise ValueError("block_key requires chapter_key")
+        return self
 
-class CourseNoteCreate(BaseModel):
-    chapter: Optional[str] = Field(None, description="Optional chapter record id")
-    chapter_key: Optional[str] = Field(None, description="Stable chapter key")
-    block_key: Optional[str] = Field(None, description="Stable block key")
+
+class CourseNoteCreate(StrictCourseRequest):
+    chapter_key: Optional[str] = Field(None, min_length=1, max_length=100)
+    block_key: Optional[str] = Field(None, min_length=1, max_length=200)
     content: str = Field(..., min_length=1, description="Note content")
+
+    @model_validator(mode="after")
+    def block_requires_chapter(self) -> "CourseNoteCreate":
+        if self.block_key is not None and self.chapter_key is None:
+            raise ValueError("block_key requires chapter_key")
+        return self
 
 
 class CourseNoteReattach(StrictCourseRequest):

@@ -334,19 +334,32 @@ class CourseWorkflowService:
         return selected, source_hashes, context
 
     @staticmethod
-    async def approved_version(
-        course: Course,
-    ) -> tuple[CourseVersion, CourseOutlineArtifact]:
-        if not course.outline_version_id:
-            raise ValueError("Course has no current outline version")
-        version = await CourseVersion.get(course.outline_version_id)
-        if version.course != course.id or version.approved_at is None:
+    def validate_approved_version(
+        course: Course, version: CourseVersion
+    ) -> CourseOutlineArtifact:
+        """Validate the complete immutable approval contract in one place."""
+
+        if (
+            not course.outline_version_id
+            or str(version.id) != course.outline_version_id
+            or version.course != course.id
+            or version.approved_at is None
+        ):
             raise ValueError("Current outline is not approved")
         if version.confirmation != "确认大纲" or version.outline_artifact is None:
             raise ValueError("Current outline approval is invalid")
         if version.outline_hash != _artifact_hash(version.outline_artifact):
             raise ValueError("Approved outline hash changed")
-        return version, CourseOutlineArtifact.model_validate(version.outline_artifact)
+        return CourseOutlineArtifact.model_validate(version.outline_artifact)
+
+    @classmethod
+    async def approved_version(
+        cls, course: Course
+    ) -> tuple[CourseVersion, CourseOutlineArtifact]:
+        if not course.outline_version_id:
+            raise ValueError("Course has no current outline version")
+        version = await CourseVersion.get(course.outline_version_id)
+        return version, cls.validate_approved_version(course, version)
 
     async def build_evidence(
         self,
@@ -465,6 +478,12 @@ class CourseWorkflowService:
                 return version
             if existing:
                 version = existing[0]
+                if (
+                    version.approved_at is not None
+                    or version.status == sm.VersionStatus.PUBLISHED
+                ):
+                    await self.complete_run(run, version.outline_artifact or {})
+                    return version
             else:
                 if course.status in {
                     sm.CourseStatus.OUTLINE_APPROVED,
@@ -842,6 +861,20 @@ class CourseWorkflowService:
         if chapter.status == sm.ChapterStatus.PUBLISHED:
             raise ValueError("Published chapters are immutable")
         artifact = ChapterArtifact.model_validate(chapter.artifact)
+
+        # A manual re-review must make a formerly publishable chapter
+        # non-publishable before the new findings are evaluated. Persist the
+        # lifecycle reset so a worker crash cannot leave ready/passed state.
+        if chapter.status in {sm.ChapterStatus.READY, sm.ChapterStatus.BLOCKED}:
+            await chapter.transition_to(sm.ChapterStatus.GENERATING)
+        if chapter.status == sm.ChapterStatus.GENERATING:
+            await chapter.transition_to(sm.ChapterStatus.REVIEWING)
+        if chapter.status != sm.ChapterStatus.REVIEWING:
+            raise ValueError("Chapter is not in a reviewable state")
+        if chapter.review_status != sm.ChapterReviewStatus.PENDING:
+            await chapter.transition_review(sm.ChapterReviewStatus.PENDING)
+        if chapter.validation_status != sm.ChapterValidationStatus.PENDING:
+            await chapter.transition_validation(sm.ChapterValidationStatus.PENDING)
 
         existing_rows = await repo_query(
             "SELECT * FROM course_validation_finding "

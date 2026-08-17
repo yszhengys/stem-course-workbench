@@ -209,6 +209,59 @@ async def test_outline_generation_requires_and_applies_approved_lab_set():
         )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("available_lab_keys", "expected_policy"),
+    [
+        (
+            {"zeta-lab", "alpha-lab"},
+            'Allowed lab keys (exact sorted set): ["alpha-lab","zeta-lab"]. '
+            "Each chapter may use any subset and must not invent other keys.",
+        ),
+        (
+            set(),
+            "Allowed lab keys (exact sorted set): []. Every chapter must set "
+            "lab_keys to [].",
+        ),
+    ],
+)
+async def test_outline_prompt_declares_exact_sorted_safe_lab_proposal_set(
+    available_lab_keys: set[str], expected_policy: str
+) -> None:
+    payload = {
+        "title": "Course",
+        "chapters": [
+            {
+                "key": "one",
+                "title": "One",
+                "purpose": "Purpose",
+                "objective_keys": ["concept"],
+                "anchor_ids": ["anchor:one"],
+                "lab_keys": [],
+            }
+        ],
+        "concepts": [
+            {"key": "concept", "label": "Concept", "anchor_ids": ["anchor:one"]}
+        ],
+    }
+    adapter = FakeCourseModelAdapter(payload)
+    service = CourseGenerationService(adapter=adapter)
+
+    await service.generate_outline(
+        course_id="course:one",
+        anchor_ids=["anchor:one"],
+        evidence=["[anchor:one]: fact"],
+        available_lab_keys=available_lab_keys,
+        model=ModelSelection(
+            adapter="codex_cli",
+            model="gpt-5.6-sol",
+            reasoning_effort="max",
+        ),
+    )
+
+    assert expected_policy in adapter.calls[0].prompt
+
+
 def test_grounded_context_validates_selected_anchor_integrity():
     anchor, source_hash = _anchor()
     service = CourseGenerationService()

@@ -2,6 +2,7 @@ import hashlib
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -67,6 +68,17 @@ async def test_course_model_options_keep_defaults_and_deepseek_optional(monkeypa
     monkeypatch.setattr(
         "api.course_service.Model.get_models_by_type", language_models
     )
+    monkeypatch.setenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS", "1")
+    monkeypatch.setattr(
+        "api.course_service.shutil",
+        SimpleNamespace(which=lambda _binary: "/bin/codex"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "api.course_service._installed_ollama_models",
+        AsyncMock(return_value={"qwen3.5:9b"}),
+        raising=False,
+    )
     payload = await CourseService.get_model_options()
 
     assert payload["defaults"] == {
@@ -93,6 +105,16 @@ async def test_course_model_options_keep_defaults_and_deepseek_optional(monkeypa
         option["adapter"] == "ollama" and option["reasoning_effort"] is None
         for option in options
     )
+    ollama = {
+        option["model"]: option
+        for option in options
+        if option["adapter"] == "ollama"
+    }
+    assert set(ollama) == {"qwen3.5:9b", "gpt-oss:20b"}
+    assert ollama["qwen3.5:9b"]["configured"] is True
+    assert ollama["qwen3.5:9b"]["selectable"] is True
+    assert ollama["gpt-oss:20b"]["configured"] is False
+    assert ollama["gpt-oss:20b"]["selectable"] is False
     codex = [option for option in options if option["adapter"] == "codex_cli"]
     assert codex and all(
         option["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
@@ -123,6 +145,17 @@ async def test_configured_deepseek_option_uses_real_id_and_stays_optional(monkey
     monkeypatch.setattr(
         "api.course_service.Model.get_models_by_type", language_models
     )
+    monkeypatch.setenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS", "1")
+    monkeypatch.setattr(
+        "api.course_service.shutil",
+        SimpleNamespace(which=lambda _binary: None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "api.course_service._installed_ollama_models",
+        AsyncMock(return_value=set()),
+        raising=False,
+    )
     options = (await CourseService.get_model_options())["options"]
     deepseek = [
         option
@@ -143,7 +176,46 @@ async def test_configured_deepseek_option_uses_real_id_and_stays_optional(monkey
             "provider": "deepseek",
         }
     ]
+    assert all(
+        option["configured"] is False and option["selectable"] is False
+        for option in options
+        if option["adapter"] in {"codex_cli", "ollama"}
+    )
     assert all(option.get("model") != "deepseek-v4-pro" for option in options)
+
+
+@pytest.mark.asyncio
+async def test_model_options_disable_every_real_adapter_without_explicit_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def language_models(_model_type: str):
+        return [
+            SimpleNamespace(
+                id="model:configured", name="configured-model", provider="openai"
+            )
+        ]
+
+    monkeypatch.delenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS", raising=False)
+    monkeypatch.setattr(
+        "api.course_service.Model.get_models_by_type", language_models
+    )
+    monkeypatch.setattr(
+        "api.course_service.shutil",
+        SimpleNamespace(which=lambda _binary: "/bin/codex"),
+        raising=False,
+    )
+    ollama_probe = AsyncMock(return_value={"qwen3.5:9b", "gpt-oss:20b"})
+    monkeypatch.setattr(
+        "api.course_service._installed_ollama_models",
+        ollama_probe,
+        raising=False,
+    )
+
+    options = (await CourseService.get_model_options())["options"]
+
+    assert all(option["configured"] is False for option in options)
+    assert all(option.get("selectable") is False for option in options)
+    ollama_probe.assert_not_awaited()
 
 
 def test_generation_hash_helpers_are_canonical_and_do_not_expose_input():

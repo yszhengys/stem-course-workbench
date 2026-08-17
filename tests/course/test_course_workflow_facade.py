@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from api.course_service import CourseConflictError, CourseService
+from api.models import CourseNoteCreate, ProgressUpdate
 from open_notebook.course.models import (
     Attempt,
     Chapter,
@@ -15,8 +17,9 @@ from open_notebook.course.models import (
     CourseNote,
     CourseVersion,
     Lab,
+    Progress,
 )
-from open_notebook.exceptions import NotFoundError
+from open_notebook.exceptions import InvalidInputError, NotFoundError
 
 
 def _current_course() -> Course:
@@ -30,7 +33,27 @@ def _current_course() -> Course:
 
 
 def _current_version() -> CourseVersion:
-    outline = {"chapters": [{"key": "limits"}]}
+    outline = {
+        "title": "Calculus",
+        "chapters": [
+            {
+                "key": "limits",
+                "title": "Limits",
+                "purpose": "Learn limits.",
+                "objective_keys": ["limit"],
+                "anchor_ids": ["anchor:one"],
+                "lab_keys": ["limit-plot"],
+            }
+        ],
+        "concepts": [
+            {
+                "key": "limit",
+                "label": "Limit",
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+        "dependency_edges": [],
+    }
     return CourseVersion(
         id="course_version:current",
         course="course:one",
@@ -46,6 +69,7 @@ def _current_version() -> CourseVersion:
             ).encode("utf-8")
         ).hexdigest(),
         approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
     )
 
 
@@ -350,6 +374,205 @@ async def test_current_chapter_facades_reject_tampered_approved_outline(
 
 
 @pytest.mark.asyncio
+async def test_current_chapter_facades_reject_unparseable_approved_outline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    course = _current_course()
+    version = _current_version()
+    invalid_outline = {"chapters": [{"key": "limits"}]}
+    version.outline_artifact = invalid_outline
+    version.outline_hash = hashlib.sha256(
+        json.dumps(
+            invalid_outline,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[]))
+
+    with pytest.raises(CourseConflictError, match="approved"):
+        await CourseService.list_chapter_labs("course:one", "limits")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["labs", "progress", "note", "attempt"])
+async def test_current_chapter_facades_require_exact_outline_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    course = _current_course()
+    version = _current_version()
+    version.confirmation = None
+    chapter = _chapter(record_id="chapter:latest", version_no=2)
+    lab = _lab(
+        record_id="lab:current",
+        chapter_id="chapter:latest",
+        lab_key="limit-plot",
+    )
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[chapter]))
+    monkeypatch.setattr(CourseVersion, "labs", AsyncMock(return_value=[lab]))
+    monkeypatch.setattr(
+        "api.course_service.repo_query", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(Progress, "save", AsyncMock())
+    monkeypatch.setattr(CourseNote, "save", AsyncMock())
+    monkeypatch.setattr(Attempt, "save", AsyncMock())
+
+    with pytest.raises(CourseConflictError, match="approved"):
+        if operation == "labs":
+            await CourseService.list_chapter_labs("course:one", "limits")
+        elif operation == "progress":
+            await CourseService.upsert_progress(
+                "course:one",
+                {"chapter_key": "limits", "status": "in_progress"},
+            )
+        elif operation == "note":
+            await CourseService.create_note(
+                "course:one", {"chapter_key": "limits", "content": "note"}
+            )
+        else:
+            await CourseService.create_chapter_attempt(
+                "course:one",
+                "limits",
+                "limit-plot",
+                {"answers": {"answer": "0"}},
+            )
+
+
+@pytest.mark.asyncio
+async def test_publish_rechecks_unresolved_findings_as_final_defense(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    course = _current_course()
+    version = _current_version()
+    chapter = _chapter(record_id="chapter:latest", version_no=2)
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
+    monkeypatch.setattr(
+        "api.course_service.repo_query",
+        AsyncMock(
+            return_value=[
+                {
+                    "finding": {
+                        "kind": "review",
+                        "severity": "high",
+                        "item_key": "definition",
+                        "anchor_ids": ["anchor:one"],
+                        "status": "open",
+                        "message": "The definition is unsafe to publish.",
+                    }
+                }
+            ]
+        ),
+    )
+    save = AsyncMock()
+    monkeypatch.setattr(Chapter, "save", save)
+
+    with pytest.raises(CourseConflictError, match="finding"):
+        await CourseService.publish_chapter(
+            "course:one", "course_version:current", "chapter:latest"
+        )
+
+    save.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (
+            ProgressUpdate,
+            {
+                "chapter_key": "limits",
+                "status": "in_progress",
+                "chapter": "chapter:old",
+            },
+        ),
+        (
+            ProgressUpdate,
+            {
+                "chapter_key": "limits",
+                "status": "in_progress",
+                "unexpected": True,
+            },
+        ),
+        (
+            CourseNoteCreate,
+            {
+                "chapter_key": "limits",
+                "content": "note",
+                "chapter": "chapter:old",
+            },
+        ),
+        (
+            CourseNoteCreate,
+            {
+                "chapter_key": "limits",
+                "content": "note",
+                "unexpected": True,
+            },
+        ),
+    ],
+)
+def test_progress_and_note_requests_forbid_record_ids_and_extra_fields(
+    model: type[ProgressUpdate] | type[CourseNoteCreate],
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["progress", "note"])
+async def test_progress_and_note_services_reject_client_chapter_record_id(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    course = _current_course()
+    version = _current_version()
+    old = _chapter(record_id="chapter:old", version_no=1)
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=old))
+    monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[old]))
+    progress_save = AsyncMock()
+    note_save = AsyncMock()
+    monkeypatch.setattr(Progress, "save", progress_save)
+    monkeypatch.setattr(CourseNote, "save", note_save)
+    monkeypatch.setattr(
+        "api.course_service.repo_query", AsyncMock(return_value=[])
+    )
+
+    with pytest.raises(InvalidInputError, match="chapter record"):
+        if operation == "progress":
+            await CourseService.upsert_progress(
+                "course:one",
+                {
+                    "chapter": "chapter:old",
+                    "chapter_key": "limits",
+                    "status": "in_progress",
+                },
+            )
+        else:
+            await CourseService.create_note(
+                "course:one",
+                {
+                    "chapter": "chapter:old",
+                    "chapter_key": "limits",
+                    "content": "note",
+                },
+            )
+
+    progress_save.assert_not_awaited()
+    note_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_create_chapter_attempt_resolves_lab_key_and_saves_v1_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -512,7 +735,13 @@ async def test_attempt_history_preserves_old_versions_and_explicit_lab_keys(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "corruption", ["chapterless_lab", "foreign_chapter", "unknown_lab_key"]
+    "corruption",
+    [
+        "chapterless_lab",
+        "foreign_chapter",
+        "unknown_lab_key",
+        "unknown_exercise_key",
+    ],
 )
 async def test_attempt_history_fails_closed_on_historical_ownership_corruption(
     monkeypatch: pytest.MonkeyPatch,
@@ -544,7 +773,8 @@ async def test_attempt_history_fails_closed_on_historical_ownership_corruption(
                     else "history-plot"
                 )
             }
-        ]
+        ],
+        "exercises": [{"key": "history-core"}],
     }
     lab = _lab(
         record_id="lab:history",
@@ -562,6 +792,9 @@ async def test_attempt_history_fails_closed_on_historical_ownership_corruption(
         course_version="course_version:history",
         chapter="chapter:history",
         chapter_key="limits",
+        exercise_key=(
+            "invented-exercise" if corruption == "unknown_exercise_key" else None
+        ),
     )
 
     async def get_version(record_id: str) -> CourseVersion:

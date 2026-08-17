@@ -131,17 +131,25 @@ TRANSITIONS: Dict[str, Dict[str, FrozenSet[str]]] = {
             {ChapterReviewStatus.PASSED, ChapterReviewStatus.ESCALATED}
         ),
         ChapterReviewStatus.ESCALATED: frozenset(
-            {ChapterReviewStatus.PASSED, ChapterReviewStatus.FAILED}
+            {
+                ChapterReviewStatus.PENDING,
+                ChapterReviewStatus.PASSED,
+                ChapterReviewStatus.FAILED,
+            }
         ),
-        ChapterReviewStatus.PASSED: frozenset(),
-        ChapterReviewStatus.FAILED: frozenset(),
+        ChapterReviewStatus.PASSED: frozenset({ChapterReviewStatus.PENDING}),
+        ChapterReviewStatus.FAILED: frozenset({ChapterReviewStatus.PENDING}),
     },
     "chapter_validation": {
         ChapterValidationStatus.PENDING: frozenset(
             {ChapterValidationStatus.PASSED, ChapterValidationStatus.FAILED}
         ),
-        ChapterValidationStatus.PASSED: frozenset(),
-        ChapterValidationStatus.FAILED: frozenset(),
+        ChapterValidationStatus.PASSED: frozenset(
+            {ChapterValidationStatus.PENDING}
+        ),
+        ChapterValidationStatus.FAILED: frozenset(
+            {ChapterValidationStatus.PENDING}
+        ),
     },
     "evidence": {
         EvidenceStatus.PENDING: frozenset({EvidenceStatus.PROCESSING}),
