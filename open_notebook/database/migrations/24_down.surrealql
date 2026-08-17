@@ -1,0 +1,13 @@
+-- Migration 24 rollback: remove the Course module tables (PDR-003).
+
+REMOVE EVENT IF EXISTS course_delete ON TABLE course;
+REMOVE EVENT IF EXISTS course_version_delete ON TABLE course_version;
+
+REMOVE TABLE IF EXISTS course_note;
+REMOVE TABLE IF EXISTS progress;
+REMOVE TABLE IF EXISTS attempt;
+REMOVE TABLE IF EXISTS lab;
+REMOVE TABLE IF EXISTS evidence;
+REMOVE TABLE IF EXISTS chapter;
+REMOVE TABLE IF EXISTS course_version;
+REMOVE TABLE IF EXISTS course;

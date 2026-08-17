@@ -27,6 +27,7 @@ from api.routers import (
     capabilities,
     chat,
     config,
+    course,
     credentials,
     embedding,
     embedding_rebuild,
@@ -403,6 +404,7 @@ app.include_router(source_chat.router, prefix="/api", tags=["source-chat"])
 app.include_router(credentials.router, prefix="/api", tags=["credentials"])
 app.include_router(providers.router, prefix="/api", tags=["providers"])
 app.include_router(capabilities.router, prefix="/api", tags=["capabilities"])
+app.include_router(course.router, prefix="/api", tags=["course"])
 app.include_router(languages.router, prefix="/api", tags=["languages"])
 
 

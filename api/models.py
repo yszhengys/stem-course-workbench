@@ -794,3 +794,88 @@ class NotebookDeleteResponse(BaseModel):
     deleted_chat_sessions: int = Field(
         ..., description="Number of chat sessions deleted"
     )
+
+
+# Course module models (PDR-003)
+
+class CourseCreate(BaseModel):
+    title: str = Field(..., min_length=1, description="Course title")
+    subject: Optional[str] = Field(None, description="Subject area")
+    description: Optional[str] = Field(None, description="Course description")
+    config: Optional[Dict[str, Any]] = Field(
+        None, description="Generation config (models, locale, validation)"
+    )
+
+
+class CourseUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, description="Course title")
+    subject: Optional[str] = Field(None, description="Subject area")
+    description: Optional[str] = Field(None, description="Course description")
+    config: Optional[Dict[str, Any]] = Field(
+        None, description="Generation config"
+    )
+
+
+class CourseOutlineUpdate(BaseModel):
+    outline: Dict[str, Any] = Field(
+        ..., description="Approved outline: chapters list + optional dependency_graph"
+    )
+
+
+class CourseStatusUpdate(BaseModel):
+    status: str = Field(..., description="Target course status")
+
+
+class CourseVersionCreate(BaseModel):
+    outline_hash: Optional[str] = Field(
+        None, description="Hash of the approved outline this version is based on"
+    )
+
+
+class CourseVersionStatusUpdate(BaseModel):
+    status: str = Field(..., description="Target version status")
+
+
+class ChapterCreate(BaseModel):
+    chapter_no: int = Field(..., ge=1, description="Chapter number (1-based)")
+    title: str = Field(..., min_length=1, description="Chapter title")
+
+
+class ChapterUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, description="Chapter title")
+    content: Optional[str] = Field(None, description="Chapter content")
+    citations: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Citation anchors into evidence"
+    )
+    review_status: Optional[str] = Field(None, description="Target review status")
+    validation_status: Optional[str] = Field(
+        None, description="Target validation status"
+    )
+
+
+class LabCreate(BaseModel):
+    lab_type: str = Field(..., description="One of the five vetted lab types")
+    chapter: Optional[str] = Field(None, description="Optional chapter record id")
+    prompt: Optional[str] = Field(None, description="Exercise prompt")
+    payload: Dict[str, Any] = Field(..., description="Bounded JSON render payload")
+    answer: Optional[Dict[str, Any]] = Field(
+        None, description="Expected answer / check specification"
+    )
+
+
+class AttemptCreate(BaseModel):
+    answers: Dict[str, Any] = Field(..., description="Student answers payload")
+
+
+class AttemptStatusUpdate(BaseModel):
+    status: str = Field(..., description="Target attempt status")
+
+
+class ProgressUpdate(BaseModel):
+    chapter: Optional[str] = Field(None, description="Optional chapter record id")
+    status: str = Field(..., description="Target progress status")
+
+
+class CourseNoteCreate(BaseModel):
+    chapter: Optional[str] = Field(None, description="Optional chapter record id")
+    content: str = Field(..., min_length=1, description="Note content")
