@@ -74,7 +74,7 @@ def test_public_contracts_forbid_extra_input_and_lock_model_defaults():
             title="unsafe",
             expressions=["__import__('os')"],
             domain={"x": (-1.0, 1.0)},
-            code="alert(1)",
+            code="alert(1)",  # type: ignore[call-arg]
         )
     assert GenerationResult[int](success=True, stage="outline", output=1).output == 1
 

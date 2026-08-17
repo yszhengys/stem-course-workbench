@@ -175,7 +175,12 @@ def test_chapter_section_rejects_code_fences_and_arbitrary_html():
                 anchor_ids=["anchor:one"],
             )
     with pytest.raises(ValidationError, match="anchor_ids"):
-        ChapterSection(key="ungrounded", title="Ungrounded", markdown="A claim.")
+        ChapterSection(
+            key="ungrounded",
+            title="Ungrounded",
+            markdown="A claim.",
+            anchor_ids=[],
+        )
 
 
 def test_generated_text_allows_math_angles_and_inline_tildes():

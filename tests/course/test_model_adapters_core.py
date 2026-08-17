@@ -3,6 +3,7 @@ import json
 import signal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from pydantic import BaseModel
@@ -71,7 +72,7 @@ async def test_codex_exact_safe_invocation_stdin_env_and_tempdir(monkeypatch):
 
         async def communicate(self, data):
             calls["stdin"] = data
-            args = list(calls["args"])
+            args = list(cast(tuple[str, ...], calls["args"]))
             output = Path(args[args.index("--output-last-message") + 1])
             output.write_text(json.dumps({"answer": "ok"}), encoding="utf-8")
             return b"", b""
@@ -92,7 +93,7 @@ async def test_codex_exact_safe_invocation_stdin_env_and_tempdir(monkeypatch):
     )
 
     assert result.answer == "ok"
-    args = list(calls["args"])
+    args = list(cast(tuple[str, ...], calls["args"]))
     assert args[:4] == ["/usr/bin/codex", "exec", "--model", "gpt-5.6-sol"]
     assert args[-1] == "-"
     for required in (
@@ -107,9 +108,9 @@ async def test_codex_exact_safe_invocation_stdin_env_and_tempdir(monkeypatch):
         assert required in args
     assert "private full prompt" not in args
     assert calls["stdin"] == b"private full prompt"
-    kwargs = calls["kwargs"]
+    kwargs = cast(dict[str, object], calls["kwargs"])
     assert kwargs["start_new_session"] is True
-    assert Path(kwargs["cwd"]).name.startswith("course-codex-")
+    assert Path(cast(str, kwargs["cwd"])).name.startswith("course-codex-")
     assert kwargs["env"] == {
         "PATH": "/usr/bin",
         "HOME": "/tmp/test-home",

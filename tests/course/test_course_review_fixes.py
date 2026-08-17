@@ -713,4 +713,6 @@ async def test_source_association_compensates_new_notebook_relationship(monkeypa
 
     add_relationship.assert_awaited_once_with("notebook:one")
     cleanup.assert_awaited_once()
-    assert "DELETE reference" in cleanup.await_args.args[0]
+    cleanup_call = cleanup.await_args
+    assert cleanup_call is not None
+    assert "DELETE reference" in cleanup_call.args[0]
