@@ -2,7 +2,7 @@
 
 import { useAuth } from '@/lib/hooks/use-auth'
 import { useVersionCheck } from '@/lib/hooks/use-version-check'
-import { useRouter } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { ErrorBoundary } from '@/components/common/ErrorBoundary'
@@ -19,6 +19,7 @@ export default function DashboardLayout({
   const { t } = useTranslation()
   const { isAuthenticated, isLoading } = useAuth()
   const router = useRouter()
+  const pathname = usePathname()
   const [hasCheckedAuth, setHasCheckedAuth] = useState(false)
 
   // Check for version updates once per session
@@ -45,6 +46,7 @@ export default function DashboardLayout({
       <div
         role="status"
         aria-live="polite"
+        data-course-workbench-ready={pathname === '/courses/new' ? 'new-course' : undefined}
         className="min-h-screen flex items-center justify-center gap-3"
       >
         <LoadingSpinner />
@@ -59,6 +61,7 @@ export default function DashboardLayout({
       <div
         role="status"
         aria-live="polite"
+        data-course-workbench-ready={pathname === '/courses/new' ? 'new-course' : undefined}
         className="min-h-screen flex items-center justify-center gap-3"
       >
         <LoadingSpinner />
