@@ -28,6 +28,7 @@ ProvenanceLabel: TypeAlias = Literal[
 _COMMONMARK_FENCE = re.compile(r"(?m)^[ \t]{0,3}(?:`{3,}|~{3,})")
 _ANGLE_TOKEN = re.compile(r"<[^<>\r\n]+>")
 _MATH_SINGLE_SYMBOL = re.compile(r"[A-Za-z]")
+_STANDARD_SINGLE_LETTER_HTML_TAGS = frozenset({"a", "b", "i", "p", "q", "s"})
 _MATH_INNER_PRODUCT = re.compile(
     r"[A-Za-z][A-Za-z0-9_]*(?:\s*[,|]\s*[A-Za-z][A-Za-z0-9_]*)+"
 )
@@ -38,10 +39,11 @@ _MATH_FUNCTION_VALUE = re.compile(
 
 def _is_math_angle_token(token: str) -> bool:
     inner = token[1:-1].strip()
+    if _MATH_SINGLE_SYMBOL.fullmatch(inner):
+        return inner.lower() not in _STANDARD_SINGLE_LETTER_HTML_TAGS
     return any(
         pattern.fullmatch(inner)
         for pattern in (
-            _MATH_SINGLE_SYMBOL,
             _MATH_INNER_PRODUCT,
             _MATH_FUNCTION_VALUE,
         )

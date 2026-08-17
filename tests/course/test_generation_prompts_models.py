@@ -202,6 +202,27 @@ def test_generated_text_allows_math_angles_and_inline_tildes():
 @pytest.mark.parametrize(
     "unsafe",
     [
+        "<p>paragraph",
+        "<b>bold",
+        "<i>italic",
+        "<a>link",
+        "<q>quote",
+        "<s>struck",
+    ],
+)
+def test_generated_text_rejects_unclosed_standard_single_letter_html(unsafe):
+    with pytest.raises(ValidationError, match="code or HTML"):
+        ChapterSection(
+            key="unsafe-unclosed-html",
+            title="Unsafe unclosed HTML",
+            markdown=unsafe,
+            anchor_ids=["anchor:one"],
+        )
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
         "<script>alert(1)</script>",
         "<svg><circle /></svg>",
         '<iframe src="https://example.test"></iframe>',
