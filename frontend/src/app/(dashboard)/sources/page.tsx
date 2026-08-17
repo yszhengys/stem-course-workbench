@@ -440,7 +440,7 @@ export default function SourcesPage() {
         open={sourceDialogOpen}
         onOpenChange={(open) => {
           setSourceDialogOpen(open)
-          if (!open) fetchSources(true)
+          if (!open) queryClient.invalidateQueries({ queryKey: ['sources', 'page'] })
         }}
       />
     </AppShell>

@@ -47,6 +47,8 @@ dependencies = [
     "numpy>=2.4.1",
     "pycountry>=26.2.16",
     "babel>=2.18.0",
+    "sympy>=1.14.0",
+    "pint>=0.25.3",
 ]
 
 [tool.setuptools]
