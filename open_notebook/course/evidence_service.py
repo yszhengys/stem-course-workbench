@@ -302,7 +302,15 @@ class EvidenceService:
         normalized_quote = self.normalize_text(quote)
         quote_hash = self.quote_sha256(normalized_quote)
         stable_key = "|".join(
-            [course_id, source_sha256, kind, str(index), block_key, quote_hash]
+            [
+                course_id,
+                source_id,
+                source_sha256,
+                kind,
+                str(index),
+                block_key,
+                quote_hash,
+            ]
         )
         anchor_id = f"anchor:{hashlib.sha256(stable_key.encode()).hexdigest()[:32]}"
         return CourseEvidenceAnchor(
@@ -461,7 +469,9 @@ FOR $anchor IN $anchors {
         source_role = $anchor.source_role,
         preview_path = $anchor.preview_path,
         is_current = true
-    WHERE course = $course_id AND anchor_id = $anchor.anchor_id;
+    WHERE course = $course_id
+      AND source = $source_id
+      AND anchor_id = $anchor.anchor_id;
 };
 COMMIT TRANSACTION;
 """

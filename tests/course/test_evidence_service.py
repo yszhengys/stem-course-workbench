@@ -194,6 +194,75 @@ def test_anchor_identity_is_deterministic_per_course_and_quote_is_normalized():
     ).hexdigest()
 
 
+@pytest.mark.asyncio
+async def test_identical_bytes_in_two_course_sources_keep_distinct_anchors(
+    tmp_path: Path, monkeypatch
+):
+    path = tmp_path / "shared.pdf"
+    _pdf(path)
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        source_ids=["source:primary", "source:supplement"],
+        primary_source_ids=["source:primary"],
+        supplement_source_ids=["source:supplement"],
+    )
+    sources = {
+        source_id: Source(
+            id=source_id,
+            title=source_id,
+            asset=Asset(file_path=str(path)),
+        )
+        for source_id in course.source_ids
+    }
+    service = EvidenceService(data_root=tmp_path / "cache", allowed_roots=[tmp_path])
+    local_job_lock = asyncio.Lock()
+    persisted: list[dict[str, object]] = []
+
+    async def get_source(source_id: str):
+        return sources[source_id]
+
+    async def persist(**kwargs):
+        persisted.append(kwargs)
+        return kwargs["anchors"]
+
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(Source, "get", get_source)
+    monkeypatch.setattr(service, "_extract_docling_content", AsyncMock(return_value=_docling_payload()))
+    monkeypatch.setattr(service, "_persist", persist)
+    monkeypatch.setattr(
+        "open_notebook.course.evidence_service.course_job_lock",
+        lambda: local_job_lock,
+    )
+
+    primary = await service.build(
+        course_id="course:one",
+        source_id="source:primary",
+        source_role="PRIMARY",
+    )
+    supplement = await service.build(
+        course_id="course:one",
+        source_id="source:supplement",
+        source_role="SUPPLEMENT",
+    )
+
+    assert primary[0].locator.content_sha256 == supplement[0].locator.content_sha256
+    assert primary[0].anchor_id != supplement[0].anchor_id
+    assert (primary[0].source, primary[0].source_role) == (
+        "source:primary",
+        "PRIMARY",
+    )
+    assert (supplement[0].source, supplement[0].source_role) == (
+        "source:supplement",
+        "SUPPLEMENT",
+    )
+    assert [call["source_id"] for call in persisted] == [
+        "source:primary",
+        "source:supplement",
+    ]
+
+
 def test_integrity_helpers_reject_changed_quote_or_source_hash():
     service = EvidenceService(data_root=Path("/tmp/course-evidence-test"))
     source_hash = hashlib.sha256(b"original").hexdigest()
@@ -309,10 +378,15 @@ async def test_persistence_is_one_bound_atomic_upsert_and_stales_changed_hash(
     assert persisted == [anchor]
     assert len(calls) == 1
     statement, params = calls[0]
+    normalized_statement = " ".join(statement.split())
     assert "BEGIN TRANSACTION" in statement
     assert "COMMIT TRANSACTION" in statement
     assert "UPSERT ONLY evidence" in statement
     assert "UPSERT course_evidence_anchor" in statement
+    assert (
+        "WHERE course = $course_id AND source = $source_id "
+        "AND anchor_id = $anchor.anchor_id"
+    ) in normalized_statement
     assert "SET is_current = false" in statement
     assert "anchor_id NOT IN $anchor_ids" in statement
     assert str(params["course_id"]) == "course:one"
