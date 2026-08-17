@@ -34,12 +34,15 @@ from open_notebook.exceptions import NotFoundError
 
 ACTIVE_RUN_STATUSES = {"queued", "running"}
 FRAMEWORK_TO_RUN_STATUS = {
-    "new": "queued",
     "running": "running",
     "completed": "succeeded",
     "failed": "failed",
     "canceled": "cancelled",
     "cancelled": "cancelled",
+}
+ALLOWED_RUN_TRANSITIONS = {
+    "queued": {"running", "succeeded", "failed", "cancelled"},
+    "running": {"succeeded", "failed", "cancelled"},
 }
 
 _claim_locks: dict[str, asyncio.Lock] = {}
@@ -58,6 +61,17 @@ async def _lock_for(input_hash: str) -> asyncio.Lock:
         return _claim_locks.setdefault(input_hash, asyncio.Lock())
 
 
+def next_course_run_status(
+    current_status: str, framework_status: str
+) -> str | None:
+    """Map one framework observation to an allowed monotonic Course transition."""
+
+    candidate = FRAMEWORK_TO_RUN_STATUS.get(framework_status)
+    if candidate in ALLOWED_RUN_TRANSITIONS.get(current_status, set()):
+        return candidate
+    return None
+
+
 class CourseCommandService:
     """Create persistent run claims before submitting surreal-commands jobs."""
 
@@ -73,28 +87,51 @@ class CourseCommandService:
 
     @staticmethod
     async def _set_run_status(
-        run_id: str, status: str, error_message: str | None = None
-    ) -> None:
-        await repo_query(
+        run_id: str,
+        *,
+        expected_status: str,
+        status: str,
+        error_message: str | None = None,
+    ) -> dict[str, Any] | None:
+        rows = await repo_query(
             """
-            UPDATE $run_id SET status = $status, error_message = $error_message;
+            UPDATE $run_id SET status = $status, error_message = $error_message
+            WHERE status = $expected_status
+            RETURN AFTER;
             """,
             {
                 "run_id": ensure_record_id(run_id),
+                "expected_status": expected_status,
                 "status": status,
                 "error_message": error_message,
             },
         )
+        return rows[0] if rows else None
 
     async def _sync_active_row(self, row: dict[str, Any]) -> dict[str, Any]:
         command_id = row.get("command")
         if not command_id:
             return row
         framework_status, error_message = await self._framework_status(str(command_id))
-        mapped = FRAMEWORK_TO_RUN_STATUS.get(framework_status or "")
-        if mapped and mapped != row.get("status"):
-            await self._set_run_status(str(row["id"]), mapped, error_message)
-            row = {**row, "status": mapped, "error_message": error_message}
+        current_status = str(row.get("status") or "")
+        mapped = next_course_run_status(current_status, framework_status or "")
+        if mapped:
+            updated = await self._set_run_status(
+                str(row["id"]),
+                expected_status=current_status,
+                status=mapped,
+                error_message=error_message,
+            )
+            if updated is not None:
+                return updated
+            # A concurrent worker may have advanced the run after this row was
+            # read. Reload instead of returning stale active state.
+            rows = await repo_query(
+                "SELECT * FROM $run_id;",
+                {"run_id": ensure_record_id(str(row["id"]))},
+            )
+            if rows:
+                return rows[0]
         return row
 
     @staticmethod

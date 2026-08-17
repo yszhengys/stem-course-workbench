@@ -9,6 +9,7 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -180,25 +181,242 @@ def test_worker_input_contract_is_strict() -> None:
 
 
 @pytest.mark.parametrize(
-    "message",
+    "cause",
     [
-        "Model output was not valid JSON.",
-        "Codex CLI returned JSON that did not match the requested schema.",
-        "Codex CLI authentication is required; sign in and retry.",
-        "Codex CLI quota was exceeded; review usage limits and retry later.",
+        TimeoutError("late"),
+        ConnectionError("offline"),
+        httpx.ReadTimeout("provider timed out"),
+        httpx.ConnectError("provider offline"),
     ],
 )
-def test_permanent_adapter_failures_are_classified_without_retry(message: str) -> None:
-    from commands.course_commands import _is_permanent_adapter_failure
+def test_adapter_failure_retry_uses_typed_transient_cause(cause: Exception) -> None:
+    from commands.course_commands import (
+        AdapterFailureDisposition,
+        _adapter_failure_disposition,
+    )
     from open_notebook.course.model_adapters import AdapterError
 
-    assert _is_permanent_adapter_failure(AdapterError(message)) is True
+    failure = AdapterError("sanitized provider failure")
+    failure.__cause__ = cause
+
     assert (
-        _is_permanent_adapter_failure(
-            AdapterError("Codex CLI timed out after 1800 seconds.")
-        )
-        is False
+        _adapter_failure_disposition(failure)
+        is AdapterFailureDisposition.TRANSIENT
     )
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [None, FileNotFoundError("missing CLI"), ValueError("invalid output")],
+)
+def test_adapter_failure_defaults_to_permanent_without_typed_network_cause(
+    cause: Exception | None,
+) -> None:
+    from commands.course_commands import (
+        AdapterFailureDisposition,
+        _adapter_failure_disposition,
+    )
+    from open_notebook.course.model_adapters import AdapterError
+
+    # The text deliberately says "timed out": retryability must not depend on it.
+    failure = AdapterError("Codex CLI timed out after 1800 seconds.")
+    failure.__cause__ = cause
+
+    assert (
+        _adapter_failure_disposition(failure)
+        is AdapterFailureDisposition.PERMANENT
+    )
+
+
+@pytest.mark.asyncio
+async def test_adapter_failure_handler_terminalizes_only_permanent_failures(
+    monkeypatch,
+) -> None:
+    import commands.course_commands as module
+    from open_notebook.course.model_adapters import AdapterError
+
+    input_data = module.CourseEvidenceInput.model_validate(
+        {
+            "run_id": "course_generation_run:one",
+            "course_id": "course:one",
+            "source_id": "source:one",
+            "role": "PRIMARY",
+        }
+    )
+    permanent = AsyncMock()
+    monkeypatch.setattr(module, "_permanent_failure", permanent)
+
+    permanent_failure = AdapterError("authentication failed")
+    with pytest.raises(ValueError, match="authentication failed"):
+        await module._handle_adapter_failure(input_data, permanent_failure)
+    permanent.assert_awaited_once_with(input_data, permanent_failure)
+
+    permanent.reset_mock()
+    transient_failure = AdapterError("provider unavailable")
+    transient_failure.__cause__ = TimeoutError("late")
+    with pytest.raises(AdapterError) as caught:
+        await module._handle_adapter_failure(input_data, transient_failure)
+    assert caught.value is transient_failure
+    permanent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_adapter_failure_retries_then_synchronizes_final_failure(
+    monkeypatch,
+) -> None:
+    import commands.course_commands as module
+    from open_notebook.course.model_adapters import AdapterError
+
+    input_data = module.CourseEvidenceInput.model_validate(
+        {
+            "run_id": "course_generation_run:one",
+            "course_id": "course:one",
+            "source_id": "source:one",
+            "role": "PRIMARY",
+        }
+    )
+
+    def transient_failure() -> AdapterError:
+        failure = AdapterError("provider unavailable")
+        failure.__cause__ = TimeoutError("late")
+        return failure
+
+    operation = AsyncMock(
+        side_effect=[transient_failure(), transient_failure(), transient_failure()]
+    )
+    permanent = AsyncMock()
+    sleep = AsyncMock()
+    monkeypatch.setattr(module, "_permanent_failure", permanent)
+    monkeypatch.setattr(module.asyncio, "sleep", sleep)
+
+    with pytest.raises(ValueError, match="provider unavailable"):
+        await module._execute_course_operation(input_data, operation)
+
+    assert operation.await_count == 3
+    assert sleep.await_count == 2
+    permanent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_transient_adapter_retry_reuses_selection_and_can_recover(
+    monkeypatch,
+) -> None:
+    import commands.course_commands as module
+    from open_notebook.course.model_adapters import AdapterError
+
+    input_data = module.CourseEvidenceInput.model_validate(
+        {
+            "run_id": "course_generation_run:one",
+            "course_id": "course:one",
+            "source_id": "source:one",
+            "role": "PRIMARY",
+        }
+    )
+    failure = AdapterError("provider unavailable")
+    failure.__cause__ = ConnectionError("offline")
+    expected = object()
+    operation = AsyncMock(side_effect=[failure, expected])
+    permanent = AsyncMock()
+    monkeypatch.setattr(module, "_permanent_failure", permanent)
+    monkeypatch.setattr(module.asyncio, "sleep", AsyncMock())
+
+    assert await module._execute_course_operation(input_data, operation) is expected
+    assert operation.await_count == 2
+    permanent.assert_not_awaited()
+
+
+def test_course_command_registry_import_failure_is_fatal() -> None:
+    from api.course_command_registry import ensure_course_commands_registered
+
+    def fail_import(_module_name: str) -> None:
+        raise ImportError("commands unavailable")
+
+    with pytest.raises(RuntimeError, match="import Course commands"):
+        ensure_course_commands_registered(importer=fail_import)
+
+
+def test_course_command_registry_missing_required_command_is_fatal() -> None:
+    from api.course_command_registry import ensure_course_commands_registered
+
+    registered = [
+        SimpleNamespace(app_id="open_notebook", name="course_build_evidence"),
+        SimpleNamespace(app_id="open_notebook", name="course_generate_outline"),
+        SimpleNamespace(app_id="open_notebook", name="course_generate_chapter"),
+    ]
+
+    with pytest.raises(RuntimeError, match="course_review_chapter"):
+        ensure_course_commands_registered(
+            importer=lambda _module_name: None,
+            registered_commands=lambda: registered,
+        )
+
+
+def test_api_startup_fails_when_course_registry_is_incomplete() -> None:
+    script = """
+from surreal_commands import registry
+registry.get_all_commands = lambda: []
+try:
+    import api.main
+except RuntimeError as exc:
+    print(str(exc))
+else:
+    raise SystemExit('api.main continued with an incomplete Course registry')
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "Missing required Course commands" in completed.stdout
+
+
+@pytest.mark.parametrize(
+    ("current", "framework", "expected"),
+    [
+        ("queued", "new", None),
+        ("running", "new", None),
+        ("succeeded", "running", None),
+        ("failed", "completed", None),
+        ("cancelled", "running", None),
+        ("queued", "running", "running"),
+        ("queued", "failed", "failed"),
+        ("running", "completed", "succeeded"),
+    ],
+)
+def test_course_run_status_mapping_is_monotonic(
+    current: str,
+    framework: str,
+    expected: str | None,
+) -> None:
+    from api.course_command_service import next_course_run_status
+
+    assert next_course_run_status(current, framework) == expected
+
+
+@pytest.mark.asyncio
+async def test_active_run_sync_ignores_stale_new_and_terminal_polling(
+    monkeypatch,
+) -> None:
+    import api.course_command_service as module
+
+    service = module.CourseCommandService()
+    set_status = AsyncMock()
+    monkeypatch.setattr(service, "_set_run_status", set_status)
+
+    monkeypatch.setattr(
+        service, "_framework_status", AsyncMock(return_value=("new", None))
+    )
+    running = {"id": "course_generation_run:one", "command": "command:one", "status": "running"}
+    assert await service._sync_active_row(running) == running
+    set_status.assert_not_awaited()
+
+    monkeypatch.setattr(
+        service, "_framework_status", AsyncMock(return_value=("running", None))
+    )
+    succeeded = {**running, "status": "succeeded"}
+    assert await service._sync_active_row(succeeded) == succeeded
+    set_status.assert_not_awaited()
 
 
 def test_worker_recomputes_claim_hash_and_rejects_reordered_queue_anchors() -> None:
@@ -1206,7 +1424,38 @@ async def test_generic_command_status_synchronizes_course_run(monkeypatch) -> No
 
     assert result["status"] == "failed"
     assert "status = $run_status" in query.await_args.args[0]
+    assert "status = 'queued'" in query.await_args.args[0]
+    assert "status = 'running'" in query.await_args.args[0]
     assert query.await_args.args[1]["run_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_generic_command_stale_new_status_never_regresses_running_run(
+    monkeypatch,
+) -> None:
+    import api.command_service as module
+
+    monkeypatch.setattr(
+        module,
+        "get_command_status",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                status="new",
+                result=None,
+                error_message=None,
+                created=None,
+                updated=None,
+                progress=None,
+            )
+        ),
+    )
+    query = AsyncMock(return_value=[])
+    monkeypatch.setattr(module, "repo_query", query, raising=False)
+
+    result = await module.CommandService.get_command_status("command:abc")
+
+    assert result["status"] == "new"
+    query.assert_not_awaited()
 
 
 @pytest.mark.asyncio

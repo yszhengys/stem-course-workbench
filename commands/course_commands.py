@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Literal, NoReturn
+import asyncio
+from collections.abc import Awaitable, Callable
+from enum import Enum
+from typing import Literal, NoReturn, TypeVar
 
+import httpx
 from pydantic import ConfigDict, Field, field_validator
 from surreal_commands import CommandInput, CommandOutput, command
 
@@ -13,6 +17,7 @@ from open_notebook.course.workflow_service import CourseWorkflowService
 from open_notebook.exceptions import (
     ConfigurationError,
     InvalidInputError,
+    NetworkError,
     NotFoundError,
 )
 
@@ -58,17 +63,31 @@ class CourseCommandOutput(CommandOutput):
     finding_count: int = 0
 
 
+COURSE_ADAPTER_MAX_ATTEMPTS = 3
+COURSE_ADAPTER_WAIT_MAX_SECONDS = 30
 COURSE_RETRY = {
-    "max_attempts": 3,
+    "max_attempts": COURSE_ADAPTER_MAX_ATTEMPTS,
     "wait_strategy": "exponential_jitter",
     "wait_min": 1,
-    "wait_max": 30,
+    "wait_max": COURSE_ADAPTER_WAIT_MAX_SECONDS,
     "stop_on": [ValueError, ConfigurationError],
     "retry_log_level": "debug",
 }
 
 
 _workflow = CourseWorkflowService()
+OperationResultT = TypeVar("OperationResultT")
+
+
+class AdapterFailureDisposition(str, Enum):
+    """Worker retry decision derived only from machine-readable exception types."""
+
+    PERMANENT = "permanent"
+    TRANSIENT = "transient"
+
+
+class _TerminalAdapterFailure(ValueError):
+    """Adapter failure already synchronized to its persistent Course run."""
 
 
 def _command_id(input_data: StrictCourseCommandInput) -> str | None:
@@ -86,30 +105,57 @@ async def _permanent_failure(
     )
 
 
-def _is_permanent_adapter_failure(exc: AdapterError) -> bool:
-    message = str(exc).lower()
-    return any(
-        marker in message
-        for marker in (
-            "not valid json",
-            "must be a json object",
-            "did not match the requested schema",
-            "authentication is required",
-            "quota was exceeded",
-            "requires a registered model id",
-            "unknown course model adapter",
-            "unable to start the configured codex cli",
-        )
-    )
+def _adapter_failure_disposition(exc: AdapterError) -> AdapterFailureDisposition:
+    """Retry only failures with an explicitly typed transient cause chain."""
+
+    cause = exc.__cause__
+    seen: set[int] = set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(
+            cause,
+            (
+                TimeoutError,
+                ConnectionError,
+                NetworkError,
+                httpx.TimeoutException,
+                httpx.NetworkError,
+            ),
+        ):
+            return AdapterFailureDisposition.TRANSIENT
+        cause = cause.__cause__
+    return AdapterFailureDisposition.PERMANENT
 
 
 async def _handle_adapter_failure(
     input_data: StrictCourseCommandInput, exc: AdapterError
 ) -> NoReturn:
-    if _is_permanent_adapter_failure(exc):
+    if _adapter_failure_disposition(exc) is AdapterFailureDisposition.PERMANENT:
         await _permanent_failure(input_data, exc)
-        raise ValueError(str(exc)) from exc
+        raise _TerminalAdapterFailure(str(exc)) from exc
     raise exc
+
+
+async def _execute_course_operation(
+    input_data: StrictCourseCommandInput,
+    operation: Callable[[], Awaitable[OperationResultT]],
+) -> OperationResultT:
+    """Retry only typed transient adapter failures and terminalize exhaustion."""
+
+    max_attempts = COURSE_ADAPTER_MAX_ATTEMPTS
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await operation()
+        except AdapterError as exc:
+            if _adapter_failure_disposition(exc) is AdapterFailureDisposition.PERMANENT:
+                await _handle_adapter_failure(input_data, exc)
+            if attempt == max_attempts:
+                await _permanent_failure(input_data, exc)
+                raise _TerminalAdapterFailure(str(exc)) from exc
+            await asyncio.sleep(
+                min(2 ** (attempt - 1), COURSE_ADAPTER_WAIT_MAX_SECONDS)
+            )
+    raise AssertionError("unreachable adapter retry state")
 
 
 @command("course_build_evidence", app="open_notebook", retry=COURSE_RETRY)
@@ -117,25 +163,29 @@ async def course_build_evidence_command(
     input_data: CourseEvidenceInput,
 ) -> CourseCommandOutput:
     command_id = _command_id(input_data)
-    try:
+
+    async def operation():
         run = await _workflow.load_run(
             run_id=input_data.run_id,
             course_id=input_data.course_id,
             stage="evidence",
             command_id=command_id,
         )
-        anchors = await _workflow.build_evidence(
+        return await _workflow.build_evidence(
             run=run,
             command_id=command_id or "",
             course_id=input_data.course_id,
             source_id=input_data.source_id,
             role=input_data.role,
         )
+
+    try:
+        anchors = await _execute_course_operation(input_data, operation)
+    except _TerminalAdapterFailure:
+        raise
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
         await _permanent_failure(input_data, exc)
         raise ValueError(str(exc)) from exc
-    except AdapterError as exc:
-        await _handle_adapter_failure(input_data, exc)
     return CourseCommandOutput(
         success=True,
         run_id=input_data.run_id,
@@ -148,14 +198,15 @@ async def course_generate_outline_command(
     input_data: CourseOutlineInput,
 ) -> CourseCommandOutput:
     command_id = _command_id(input_data)
-    try:
+
+    async def operation():
         run = await _workflow.load_run(
             run_id=input_data.run_id,
             course_id=input_data.course_id,
             stage="outline",
             command_id=command_id,
         )
-        version = await _workflow.generate_outline(
+        return await _workflow.generate_outline(
             run=run,
             command_id=command_id or "",
             course_id=input_data.course_id,
@@ -164,11 +215,14 @@ async def course_generate_outline_command(
             model=input_data.model,
             prompt_version=input_data.prompt_version,
         )
+
+    try:
+        version = await _execute_course_operation(input_data, operation)
+    except _TerminalAdapterFailure:
+        raise
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
         await _permanent_failure(input_data, exc)
         raise ValueError(str(exc)) from exc
-    except AdapterError as exc:
-        await _handle_adapter_failure(input_data, exc)
     return CourseCommandOutput(
         success=True, run_id=input_data.run_id, artifact_id=str(version.id)
     )
@@ -179,14 +233,15 @@ async def course_generate_chapter_command(
     input_data: CourseChapterInput,
 ) -> CourseCommandOutput:
     command_id = _command_id(input_data)
-    try:
+
+    async def operation():
         run = await _workflow.load_run(
             run_id=input_data.run_id,
             course_id=input_data.course_id,
             stage="chapter_content",
             command_id=command_id,
         )
-        chapter = await _workflow.generate_chapter(
+        return await _workflow.generate_chapter(
             run=run,
             command_id=command_id or "",
             course_id=input_data.course_id,
@@ -195,11 +250,14 @@ async def course_generate_chapter_command(
             model=input_data.model,
             prompt_version=input_data.prompt_version,
         )
+
+    try:
+        chapter = await _execute_course_operation(input_data, operation)
+    except _TerminalAdapterFailure:
+        raise
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
         await _permanent_failure(input_data, exc)
         raise ValueError(str(exc)) from exc
-    except AdapterError as exc:
-        await _handle_adapter_failure(input_data, exc)
     return CourseCommandOutput(
         success=True, run_id=input_data.run_id, artifact_id=str(chapter.id)
     )
@@ -210,14 +268,15 @@ async def course_review_chapter_command(
     input_data: CourseChapterInput,
 ) -> CourseCommandOutput:
     command_id = _command_id(input_data)
-    try:
+
+    async def operation():
         run = await _workflow.load_run(
             run_id=input_data.run_id,
             course_id=input_data.course_id,
             stage="review",
             command_id=command_id,
         )
-        chapter, findings = await _workflow.review_chapter(
+        return await _workflow.review_chapter(
             run=run,
             command_id=command_id or "",
             course_id=input_data.course_id,
@@ -226,11 +285,14 @@ async def course_review_chapter_command(
             model=input_data.model,
             prompt_version=input_data.prompt_version,
         )
+
+    try:
+        chapter, findings = await _execute_course_operation(input_data, operation)
+    except _TerminalAdapterFailure:
+        raise
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
         await _permanent_failure(input_data, exc)
         raise ValueError(str(exc)) from exc
-    except AdapterError as exc:
-        await _handle_adapter_failure(input_data, exc)
     return CourseCommandOutput(
         success=True,
         run_id=input_data.run_id,

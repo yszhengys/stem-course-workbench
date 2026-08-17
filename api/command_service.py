@@ -52,7 +52,6 @@ class CommandService:
             status = await get_command_status(job_id)
             framework_status = status.status if status else "unknown"
             run_status = {
-                "new": "queued",
                 "running": "running",
                 "completed": "succeeded",
                 "failed": "failed",
@@ -65,7 +64,13 @@ class CommandService:
                     UPDATE course_generation_run
                     SET status = $run_status, error_message = $error_message
                     WHERE command = $command
-                      AND status IN ['queued', 'running'];
+                      AND (
+                        (status = 'queued' AND $run_status IN
+                          ['running', 'succeeded', 'failed', 'cancelled'])
+                        OR
+                        (status = 'running' AND $run_status IN
+                          ['succeeded', 'failed', 'cancelled'])
+                      );
                     """,
                     {
                         "run_status": run_status,

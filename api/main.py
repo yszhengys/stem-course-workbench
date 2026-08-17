@@ -21,6 +21,7 @@ from loguru import logger
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from api.auth import PasswordAuthMiddleware
+from api.course_command_registry import ensure_course_commands_registered
 from api.middleware import MaxBodySizeMiddleware, get_max_upload_size_bytes
 from api.routers import (
     auth,
@@ -120,13 +121,11 @@ def _cors_headers(request: Request) -> dict[str, str]:
     return headers
 
 
-# Import commands to register them in the API process
-try:
-    import commands  # noqa: F401
-
-    logger.info("Commands imported in API process")
-except Exception as e:
-    logger.error(f"Failed to import commands in API process: {e}")
+# Import and assert the complete registry before serving an API process. A missing
+# worker command is a startup error, not a degraded mode: accepted jobs would
+# otherwise queue forever.
+ensure_course_commands_registered()
+logger.info("Commands imported and Course registry verified in API process")
 
 
 async def _wait_for_database(migration_manager: AsyncMigrationManager) -> None:
