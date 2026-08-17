@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseZhCN } from '../course';
 
 export const zhCN = {
   common: {
@@ -217,6 +218,7 @@ export const zhCN = {
     manage: "管理",
     sources: "来源",
     notebooks: "笔记本",
+    courses: "课程",
     askAndSearch: "询问与搜索",
     podcasts: "播客",
     models: "模型",
@@ -968,6 +970,7 @@ export const zhCN = {
     decryptionError: "解密错误",
     decryptionErrorDescription: "此凭证的 API 密钥无法解密。加密密钥可能已更改。请删除此凭证并使用正确的密钥重新创建。",
   },
+  course: courseZhCN,
   setupBanner: {
     encryptionRequired: "未配置加密密钥",
     encryptionRequiredDescription: "请设置 OPEN_NOTEBOOK_ENCRYPTION_KEY 环境变量以启用安全凭据存储。",

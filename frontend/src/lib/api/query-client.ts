@@ -45,4 +45,6 @@ export const QUERY_KEYS = {
   courseFindings: (id: string, chapterKey?: string) => ['courses', id, 'findings', chapterKey] as const,
   courseProgress: (id: string) => ['courses', id, 'progress'] as const,
   courseNotes: (id: string) => ['courses', id, 'notes'] as const,
+  courseLabs: (id: string, chapterKey: string) => ['courses', id, 'chapters', chapterKey, 'labs'] as const,
+  courseAttempts: (id: string, chapterKey: string) => ['courses', id, 'chapters', chapterKey, 'attempts'] as const,
 }

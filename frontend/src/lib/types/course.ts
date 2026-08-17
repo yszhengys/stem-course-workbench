@@ -120,14 +120,65 @@ export const labControlSchema = z.object({
 }).strict().refine((control) => control.min < control.max, 'Invalid control bounds')
   .refine((control) => control.value >= control.min && control.value <= control.max, 'Control value outside bounds')
 
+const labDomainSchema = z.record(
+  z.string().min(1).max(100),
+  z.tuple([finiteNumber, finiteNumber])
+).superRefine((domain, context) => {
+  if (Object.keys(domain).length > 8) {
+    context.addIssue({ code: 'custom', message: 'Too many Lab domain variables' })
+  }
+  for (const [key, [minimum, maximum]] of Object.entries(domain)) {
+    if (minimum >= maximum || Math.abs(minimum) > 1_000_000 || Math.abs(maximum) > 1_000_000) {
+      context.addIssue({ code: 'custom', path: [key], message: 'Invalid Lab domain bounds' })
+    }
+  }
+})
+
+function validateBoundedLabValue(value: unknown, context: z.RefinementCtx, depth = 0): void {
+  if (depth > 5) {
+    context.addIssue({ code: 'custom', message: 'Lab object nesting is too deep' })
+    return
+  }
+  if (typeof value === 'string') {
+    if (value.length > 4000) context.addIssue({ code: 'custom', message: 'Lab object string is too long' })
+    return
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || Math.abs(value) > 1_000_000) {
+      context.addIssue({ code: 'custom', message: 'Lab object number is outside the safe range' })
+    }
+    return
+  }
+  if (value === null || typeof value === 'boolean') return
+  if (Array.isArray(value)) {
+    if (value.length > 64) context.addIssue({ code: 'custom', message: 'Lab object array is too large' })
+    value.forEach((item) => validateBoundedLabValue(item, context, depth + 1))
+    return
+  }
+  if (typeof value === 'object') {
+    const entries = Object.entries(value)
+    if (entries.length > 32) context.addIssue({ code: 'custom', message: 'Lab object has too many fields' })
+    for (const [key, item] of entries) {
+      if (!key || key.length > 100) context.addIssue({ code: 'custom', message: 'Lab object key is invalid' })
+      validateBoundedLabValue(item, context, depth + 1)
+    }
+    return
+  }
+  context.addIssue({ code: 'custom', message: 'Lab object contains an unsupported value' })
+}
+
+const labObjectsSchema = z.array(z.record(z.string(), z.unknown())).max(8).superRefine((objects, context) => {
+  objects.forEach((object) => validateBoundedLabValue(object, context))
+})
+
 const labBase = {
   key: z.string().min(1).max(100),
   title: z.string().min(1).max(300),
   anchor_ids: z.array(z.string()).max(100),
   expressions: z.array(z.string().min(1).max(500)).max(8),
-  domain: z.record(z.string(), z.tuple([finiteNumber, finiteNumber])),
+  domain: labDomainSchema,
   controls: z.array(labControlSchema).max(8),
-  objects: z.array(z.record(z.string(), z.unknown())).max(8),
+  objects: labObjectsSchema,
 }
 
 export const labSpecSchema = z.discriminatedUnion('kind', [
@@ -136,7 +187,22 @@ export const labSpecSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('vector_field'), ...labBase }).strict(),
   z.object({ kind: z.literal('geometry'), ...labBase }).strict(),
   z.object({ kind: z.literal('kinematics'), ...labBase }).strict(),
-])
+]).superRefine((spec, context) => {
+  const count = spec.expressions.length
+  if (spec.kind === 'function_plot' && count < 1) {
+    context.addIssue({ code: 'custom', path: ['expressions'], message: 'A function plot requires at least one expression' })
+  }
+  if (['parametric_curve', 'vector_field', 'kinematics'].includes(spec.kind) && count !== 2) {
+    context.addIssue({ code: 'custom', path: ['expressions'], message: 'This Lab requires exactly two expressions' })
+  }
+  if (spec.kind === 'geometry' && count !== 0) {
+    context.addIssue({ code: 'custom', path: ['expressions'], message: 'Geometry Labs do not accept expressions' })
+  }
+  const keys = spec.controls.map((control) => control.key)
+  if (new Set(keys).size !== keys.length) {
+    context.addIssue({ code: 'custom', path: ['controls'], message: 'Lab control keys must be unique' })
+  }
+})
 export type LabSpec = z.infer<typeof labSpecSchema>
 
 export const chapterSectionSchema = z.object({
@@ -255,6 +321,40 @@ export const courseNoteSchema = z.object({
 }).strict()
 export type CourseNote = z.infer<typeof courseNoteSchema>
 
+export const courseLabSchema = z.object({
+  id: recordId,
+  lab_key: z.string().min(1),
+  lab_type: z.enum(['function_plot', 'parametric_curve', 'vector_field', 'geometry', 'kinematics']),
+  spec: labSpecSchema,
+}).strict()
+export type CourseLab = z.infer<typeof courseLabSchema>
+
+export const courseAttemptSchema = z.object({
+  id: recordId,
+  lab: recordId,
+  answers: z.record(z.string(), z.unknown()),
+  status: z.string(),
+  result: z.record(z.string(), z.unknown()).nullable(),
+  course: recordId.nullable(),
+  course_version: recordId.nullable(),
+  chapter: recordId.nullable(),
+  chapter_key: z.string().nullable(),
+  exercise_key: z.string().nullable(),
+  answer: z.string().nullable(),
+  hints_used: z.number().int().nonnegative().nullable(),
+  answer_revealed: z.boolean().nullable(),
+  transfer_completed: z.boolean().nullable(),
+  orphan_status: z.string().nullable(),
+  ...courseRecordDates,
+}).strict()
+export type CourseAttempt = z.infer<typeof courseAttemptSchema>
+
+export const courseAttemptWithLabSchema = z.object({
+  lab_key: z.string().min(1),
+  attempt: courseAttemptSchema,
+}).strict()
+export type CourseAttemptWithLab = z.infer<typeof courseAttemptWithLabSchema>
+
 export const eligibleCourseSourceSchema = z.object({
   source_id: recordId,
   title: z.string().nullable().optional(),
@@ -262,7 +362,17 @@ export const eligibleCourseSourceSchema = z.object({
   kind: z.enum(['pdf', 'pptx']),
   role: sourceRoleSchema.nullable(),
   associated: z.boolean(),
-}).strict()
+}).strict().superRefine((source, context) => {
+  const filename = source.filename.toLowerCase()
+  const expected = source.kind === 'pdf' ? '.pdf' : '.pptx'
+  if (!filename.endsWith(expected)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['filename'],
+      message: `Expected a ${expected} file`,
+    })
+  }
+})
 export type EligibleCourseSource = z.infer<typeof eligibleCourseSourceSchema>
 
 export const courseModelOptionSchema = z.object({
@@ -312,7 +422,6 @@ export interface BuildEvidenceRequest {
 
 export interface GenerateOutlineRequest {
   anchor_ids: string[]
-  available_lab_keys: string[]
   prompt_version: string
   model: ModelSelection
   force: boolean
@@ -323,4 +432,13 @@ export interface GenerateChapterRequest {
   prompt_version: string
   model: ModelSelection
   force: boolean
+}
+
+export interface CreateCourseAttemptRequest {
+  answers: Record<string, unknown>
+  exercise_key?: string
+  answer?: string
+  hints_used?: number
+  answer_revealed?: boolean
+  transfer_completed?: boolean
 }

@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseFrFR } from '../course';
 
 export const frFR = {
   common: {
@@ -217,6 +218,7 @@ export const frFR = {
     manage: "Gérer",
     sources: "Sources",
     notebooks: "Carnets",
+    courses: "Cours",
     askAndSearch: "Demander et rechercher",
     podcasts: "Podcasts",
     models: "Modèles",
@@ -968,6 +970,7 @@ export const frFR = {
     decryptionError: "Erreur de déchiffrement",
     decryptionErrorDescription: "La clé API de cette configuration n'a pas pu être déchiffrée. La clé de chiffrement a peut-être changé. Supprimez cette configuration et recréez-la avec la bonne clé.",
   },
+  course: courseFrFR,
   setupBanner: {
     encryptionRequired: "Clé de chiffrement non configurée",
     encryptionRequiredDescription: "Définissez la variable d'environnement OPEN_NOTEBOOK_ENCRYPTION_KEY pour activer le stockage sécurisé des identifiants.",

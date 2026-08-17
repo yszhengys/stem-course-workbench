@@ -62,6 +62,17 @@ describe('Course V2 contracts', () => {
     })).toThrow()
   })
 
+  it('rejects legacy PPT files even when mislabeled as PDF', () => {
+    expect(() => eligibleCourseSourceSchema.parse({
+      source_id: 'source:legacy',
+      title: 'Legacy deck',
+      filename: 'slides.ppt',
+      kind: 'pdf',
+      role: null,
+      associated: false,
+    })).toThrow()
+  })
+
   it('keeps an unconfigured model visible but unselectable', () => {
     const result = courseModelOptionsSchema.parse({
       defaults: {

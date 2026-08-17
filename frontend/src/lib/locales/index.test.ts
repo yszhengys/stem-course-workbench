@@ -64,6 +64,26 @@ describe('Locale Parity', () => {
       expect(extra, `Extra keys in ${code}: ${extra.join(', ')}`).toEqual([])
     },
   )
+
+  it.each(locales.map(([code, resource]) => [code, resource] as const))(
+    '%s should expose an independent, visibly localized Course workflow',
+    (code, resource) => {
+      const course = resource.translation.course
+      expect(course).not.toBe(enUS.course)
+      for (const key of [
+        'listTitle',
+        'newTitle',
+        'sourceAndEvidence',
+        'generateOutline',
+        'chapterGeneration',
+        'reviewAndPublish',
+        'notes',
+        'learningRecord',
+      ] as const) {
+        expect(course[key], `${code} did not localize course.${key}`).not.toBe(enUS.course[key])
+      }
+    },
+  )
 })
 
 describe('Placeholder Parity', () => {

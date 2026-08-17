@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build --webpack",
     "start": "node start-server.js",
     "lint": "eslint src/",
     "test": "vitest run",
@@ -43,6 +43,7 @@
     "i18next-browser-languagedetector": "^8.2.0",
     "katex": "^0.16.47",
     "lucide-react": "^0.525.0",
+    "mathjs": "^15.2.0",
     "next": "^16.2.6",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",

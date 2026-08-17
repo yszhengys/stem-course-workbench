@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseEsES } from '../course';
 
 export const esES = {
   common: {
@@ -217,6 +218,7 @@ export const esES = {
     manage: "Gestionar",
     sources: "Fuentes",
     notebooks: "Cuadernos",
+    courses: "Cursos",
     askAndSearch: "Preguntar y buscar",
     podcasts: "Podcasts",
     models: "Modelos",
@@ -969,6 +971,7 @@ export const esES = {
     decryptionError: "Error de desencriptación",
     decryptionErrorDescription: "La clave API de esta credencial no pudo ser desencriptada. La clave de encriptación puede haber cambiado. Elimina esta credencial y créala de nuevo con la clave correcta.",
   },
+  course: courseEsES,
   setupBanner: {
     encryptionRequired: "Clave de encriptación no configurada",
     encryptionRequiredDescription: "Establece la variable de entorno OPEN_NOTEBOOK_ENCRYPTION_KEY para habilitar el almacenamiento seguro de credenciales.",

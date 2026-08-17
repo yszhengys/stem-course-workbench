@@ -1,15 +1,20 @@
 import { z } from 'zod'
 
 import { apiClient } from '@/lib/api/client'
+import { SAFE_LAB_PROPOSAL_KEYS } from '@/lib/course/lab-proposals'
 import {
   BuildEvidenceRequest,
+  courseAttemptSchema,
+  courseAttemptWithLabSchema,
   courseFindingSchema,
   courseJobSchema,
+  courseLabSchema,
   courseModelOptionsSchema,
   courseNoteSchema,
   courseSchema,
   courseVersionSchema,
   CreateCourseRequest,
+  CreateCourseAttemptRequest,
   eligibleCourseSourceSchema,
   evidenceAnchorSchema,
   GenerateChapterRequest,
@@ -62,7 +67,10 @@ export const courseApi = {
   },
 
   async generateOutline(courseId: string, request: GenerateOutlineRequest) {
-    const response = await apiClient.post(`/courses/${pathId(courseId)}/outline/generate`, request)
+    const response = await apiClient.post(`/courses/${pathId(courseId)}/outline/generate`, {
+      ...request,
+      available_lab_keys: [...SAFE_LAB_PROPOSAL_KEYS],
+    })
     return courseJobSchema.parse(response.data)
   },
 
@@ -99,6 +107,40 @@ export const courseApi = {
     return chapterSchema.parse(response.data)
   },
 
+  async listChapterLabs(courseId: string, chapterKey: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/labs`
+    )
+    return z.array(courseLabSchema).parse(response.data)
+  },
+
+  async listChapterAttempts(courseId: string, chapterKey: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/attempts`
+    )
+    return z.array(courseAttemptWithLabSchema).parse(response.data)
+  },
+
+  async createChapterAttempt(
+    courseId: string,
+    chapterKey: string,
+    labKey: string,
+    request: CreateCourseAttemptRequest
+  ) {
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/labs/${pathId(labKey)}/attempts`,
+      request
+    )
+    return courseAttemptSchema.parse(response.data)
+  },
+
+  async publishChapter(courseId: string, chapterKey: string) {
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/publish`
+    )
+    return chapterSchema.parse(response.data)
+  },
+
   async listFindings(courseId: string, chapterKey?: string) {
     const response = await apiClient.get(`/courses/${pathId(courseId)}/findings`, {
       params: chapterKey ? { chapter_key: chapterKey } : undefined,
@@ -124,12 +166,16 @@ export const courseApi = {
   },
 
   async updateProgress(courseId: string, request: {
-    chapter?: string | null
     chapter_key?: string | null
     block_key?: string | null
     status: string
   }) {
-    const response = await apiClient.put(`/courses/${pathId(courseId)}/progress`, request)
+    const payload = {
+      chapter_key: request.chapter_key ?? null,
+      block_key: request.block_key ?? null,
+      status: request.status,
+    }
+    const response = await apiClient.put(`/courses/${pathId(courseId)}/progress`, payload)
     return progressSchema.parse(response.data)
   },
 
@@ -139,17 +185,33 @@ export const courseApi = {
   },
 
   async createNote(courseId: string, request: {
-    chapter?: string | null
     chapter_key?: string | null
     block_key?: string | null
     content: string
   }) {
-    const response = await apiClient.post(`/courses/${pathId(courseId)}/notes`, request)
+    const payload = {
+      chapter_key: request.chapter_key ?? null,
+      block_key: request.block_key ?? null,
+      content: request.content,
+    }
+    const response = await apiClient.post(`/courses/${pathId(courseId)}/notes`, payload)
     return courseNoteSchema.parse(response.data)
   },
 
   async deleteNote(courseId: string, noteId: string) {
     await apiClient.delete(`/courses/${pathId(courseId)}/notes/${pathId(noteId)}`)
+  },
+
+  async reattachNote(
+    courseId: string,
+    noteId: string,
+    request: { chapter_key: string; block_key: string }
+  ) {
+    const response = await apiClient.patch(
+      `/courses/${pathId(courseId)}/notes/${pathId(noteId)}`,
+      request
+    )
+    return courseNoteSchema.parse(response.data)
   },
 
   async retrievalContext(courseId: string, anchorIds: string[]) {

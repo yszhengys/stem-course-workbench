@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseBnIN } from '../course';
 
 export const bnIN = {
   common: {
@@ -217,6 +218,7 @@ export const bnIN = {
     manage: "ব্যবস্থাপনা",
     sources: "উৎসগুলি",
     notebooks: "নোটবুকগুলি",
+    courses: "কোর্স",
     askAndSearch: "জিজ্ঞাসা ও অনুসন্ধান",
     podcasts: "পডকাস্ট",
     models: "মডেলগুলি",
@@ -969,6 +971,7 @@ export const bnIN = {
     decryptionError: "ডিক্রিপশন ত্রুটি",
     decryptionErrorDescription: "এই শংসাপত্রের API কী ডিক্রিপ্ট করা যায়নি। এনক্রিপশন কী পরিবর্তন হয়ে থাকতে পারে। এই শংসাপত্রটি মুছে সঠিক কী দিয়ে পুনরায় তৈরি করুন।",
   },
+  course: courseBnIN,
   setupBanner: {
     encryptionRequired: "এনক্রিপশন কী কনফিগার করা হয়নি",
     encryptionRequiredDescription: "নিরাপদ credential স্টোরেজ সক্ষম করতে OPEN_NOTEBOOK_ENCRYPTION_KEY environment variable সেট করুন।",

@@ -7,6 +7,7 @@ import { useTranslation } from '@/lib/hooks/use-translation'
 import type {
   BuildEvidenceRequest,
   CreateCourseRequest,
+  CreateCourseAttemptRequest,
   GenerateChapterRequest,
   GenerateOutlineRequest,
 } from '@/lib/types/course'
@@ -107,6 +108,24 @@ export function useCourseNotes(courseId: string) {
     queryKey: QUERY_KEYS.courseNotes(courseId),
     queryFn: () => courseApi.listNotes(courseId),
     enabled: Boolean(courseId),
+    retry: false,
+  })
+}
+
+export function useCourseLabs(courseId: string, chapterKey: string, enabled = true) {
+  return useQuery({
+    queryKey: QUERY_KEYS.courseLabs(courseId, chapterKey),
+    queryFn: () => courseApi.listChapterLabs(courseId, chapterKey),
+    enabled: Boolean(courseId && chapterKey) && enabled,
+    retry: false,
+  })
+}
+
+export function useCourseAttempts(courseId: string, chapterKey: string, enabled = true) {
+  return useQuery({
+    queryKey: QUERY_KEYS.courseAttempts(courseId, chapterKey),
+    queryFn: () => courseApi.listChapterAttempts(courseId, chapterKey),
+    enabled: Boolean(courseId && chapterKey) && enabled,
     retry: false,
   })
 }
@@ -256,6 +275,53 @@ export function useDeleteCourseNote(courseId: string) {
     mutationFn: (noteId: string) => courseApi.deleteNote(courseId, noteId),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: QUERY_KEYS.courseNotes(courseId) })
+      feedback.success()
+    },
+    onError: feedback.error,
+  })
+}
+
+export function useReattachCourseNote(courseId: string) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: ({ noteId, ...request }: {
+      noteId: string
+      chapter_key: string
+      block_key: string
+    }) => courseApi.reattachNote(courseId, noteId, request),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: QUERY_KEYS.courseNotes(courseId) })
+      feedback.success()
+    },
+    onError: feedback.error,
+  })
+}
+
+export function useCreateCourseAttempt(courseId: string, chapterKey: string) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: ({ labKey, request }: { labKey: string; request: CreateCourseAttemptRequest }) =>
+      courseApi.createChapterAttempt(courseId, chapterKey, labKey, request),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: QUERY_KEYS.courseAttempts(courseId, chapterKey) })
+      feedback.success()
+    },
+    onError: feedback.error,
+  })
+}
+
+export function usePublishCourseChapter(courseId: string, chapterKey: string) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: () => courseApi.publishChapter(courseId, chapterKey),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: QUERY_KEYS.course(courseId) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseChapter(courseId, chapterKey) }),
+      ])
       feedback.success()
     },
     onError: feedback.error,

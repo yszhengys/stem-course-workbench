@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseCaES } from '../course';
 
 export const caES = {
   common: {
@@ -217,6 +218,7 @@ export const caES = {
     manage: "Gestiona",
     sources: "Fonts",
     notebooks: "Quaderns",
+    courses: "Cursos",
     askAndSearch: "Pregunta i cerca",
     podcasts: "Podcasts",
     models: "Models",
@@ -968,6 +970,7 @@ export const caES = {
     decryptionError: "Error de desencriptació",
     decryptionErrorDescription: "No s'ha pogut desencriptar la clau de l'API d'aquesta credencial. La clau d'encriptació pot haver canviat. Suprimeix aquesta credencial i torna-la a crear amb la clau correcta.",
   },
+  course: courseCaES,
   setupBanner: {
     encryptionRequired: "Clau de xifratge no configurada",
     encryptionRequiredDescription: "Estableix la variable d'entorn OPEN_NOTEBOOK_ENCRYPTION_KEY per habilitar l'emmagatzematge segur de credencials.",

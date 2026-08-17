@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseTrTR } from '../course';
 
 export const trTR = {
   common: {
@@ -217,6 +218,7 @@ export const trTR = {
     manage: "Yönet",
     sources: "Kaynaklar",
     notebooks: "Defterler",
+    courses: "Kurslar",
     askAndSearch: "Sor ve Ara",
     podcasts: "Podcastler",
     models: "Modeller",
@@ -968,6 +970,7 @@ export const trTR = {
     decryptionError: "Şifre Çözme Hatası",
     decryptionErrorDescription: "Bu kimlik bilgisinin API anahtarı çözülemedi. Şifreleme anahtarı değişmiş olabilir. Bu kimlik bilgisini silin ve doğru anahtarla yeniden oluşturun.",
   },
+  course: courseTrTR,
   setupBanner: {
     encryptionRequired: "Şifreleme anahtarı yapılandırılmadı",
     encryptionRequiredDescription: "Güvenli kimlik bilgisi depolamayı etkinleştirmek için OPEN_NOTEBOOK_ENCRYPTION_KEY ortam değişkenini ayarlayın.",

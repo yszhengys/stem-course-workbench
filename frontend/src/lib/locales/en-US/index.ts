@@ -1,3 +1,5 @@
+import { courseEN } from '../course'
+
 export const enUS = {
   common: {
     search: "Search...",
@@ -215,6 +217,7 @@ export const enUS = {
     manage: "Manage",
     sources: "Sources",
     notebooks: "Notebooks",
+    courses: "Courses",
     askAndSearch: "Ask and Search",
     podcasts: "Podcasts",
     models: "Models",
@@ -967,6 +970,7 @@ export const enUS = {
     decryptionError: "Decryption Error",
     decryptionErrorDescription: "This credential's API key could not be decrypted. The encryption key may have changed. Delete this credential and re-create it with the correct key.",
   },
+  course: courseEN,
   setupBanner: {
     encryptionRequired: "Encryption key not configured",
     encryptionRequiredDescription: "Set the OPEN_NOTEBOOK_ENCRYPTION_KEY environment variable to enable secure credential storage.",
