@@ -183,15 +183,43 @@ def test_generated_text_allows_math_angles_and_inline_tildes():
         key="inner-product",
         title="Inner products",
         markdown=(
-            r"Compare <x,y> with <v> and \langle x,y\rangle. "
+            r"Compare <u>, <v>, <X>, <x|y>, <f(x)>, <x,y>, "
+            r"and \langle x,y\rangle. "
             "Three inline tildes ~~~ are ordinary prose."
         ),
         anchor_ids=["anchor:one"],
     )
 
     assert "<x,y>" in section.markdown
+    assert "<u>" in section.markdown
     assert "<v>" in section.markdown
+    assert "<X>" in section.markdown
+    assert "<x|y>" in section.markdown
+    assert "<f(x)>" in section.markdown
     assert r"\langle x,y\rangle" in section.markdown
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        "<script>alert(1)</script>",
+        "<svg><circle /></svg>",
+        '<iframe src="https://example.test"></iframe>',
+        '<object data="payload"></object>',
+        "<style>body { display: none; }</style>",
+        '<course-widget data-value="1"></course-widget>',
+        '<x onclick="alert(1)">',
+        '<f(x) onmouseover="alert(1)">',
+    ],
+)
+def test_generated_text_rejects_html_elements_custom_elements_and_attributes(unsafe):
+    with pytest.raises(ValidationError, match="code or HTML"):
+        ChapterSection(
+            key="unsafe-html",
+            title="Unsafe HTML",
+            markdown=unsafe,
+            anchor_ids=["anchor:one"],
+        )
 
 
 @pytest.mark.parametrize(
@@ -281,7 +309,7 @@ def test_escalation_merge_rejects_out_of_scope_item_or_anchor():
     )
     bad_anchor = original.model_copy(update={"anchor_ids": ["anchor:two"]})
 
-    with pytest.raises(ValueError, match="item keys"):
+    with pytest.raises(ValueError, match="finding identities"):
         CourseGenerationService.merge_escalation_findings(
             [original], ReviewArtifact(findings=[bad_item]), known_anchor_ids={"anchor:one"}
         )

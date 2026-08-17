@@ -26,13 +26,14 @@ from open_notebook.course.model_adapters import FakeCourseModelAdapter
 def _finding(
     key: str,
     *,
+    kind: str = "review",
     severity: str = "high",
     status: str = "open",
     anchors: list[str] | None = None,
     reason: str | None = None,
 ) -> ValidationFinding:
     return ValidationFinding(
-        kind="review",
+        kind=kind,  # type: ignore[arg-type]
         severity=severity,  # type: ignore[arg-type]
         status=status,  # type: ignore[arg-type]
         item_key=key,
@@ -463,6 +464,45 @@ def test_unit_parse_failures_are_only_manual_check(produced, oracle):
     assert unit_findings[0].status == "manual_check"
 
 
+@pytest.mark.parametrize(
+    ("produced", "oracle", "expected_unit"),
+    [
+        (None, None, None),
+        ("", "", ("manual_check", "high")),
+        (None, "meter", ("manual_check", "high")),
+        ("meter", None, ("manual_check", "high")),
+        ("meter", "second", ("open", "error")),
+        ("meter / / second", "meter", ("manual_check", "high")),
+    ],
+)
+def test_formula_parse_failure_still_runs_unit_oracle(
+    produced, oracle, expected_unit
+):
+    artifact = _chapter()
+    artifact.formulas[0].latex = r"\tan{x}"
+    artifact.formulas[0].unit_expression = produced
+    artifact.formulas[0].oracle_unit_expression = oracle
+
+    findings = CourseGenerationService.validate_chapter(artifact, {"anchor:one"})
+    assert any(
+        finding.kind == "formula"
+        and finding.item_key == "square"
+        and finding.status == "manual_check"
+        for finding in findings
+    )
+    unit_findings = [
+        finding
+        for finding in findings
+        if finding.kind == "unit" and finding.item_key == "square"
+    ]
+
+    if expected_unit is None:
+        assert unit_findings == []
+    else:
+        assert len(unit_findings) == 1
+        assert (unit_findings[0].status, unit_findings[0].severity) == expected_unit
+
+
 def test_direction_reference_frame_boundary_and_limit_rules():
     findings = CourseGenerationService.validate_physics_rules(
         [
@@ -637,7 +677,9 @@ async def test_escalation_uses_one_grounded_unresolved_eligibility_rule():
     ungrounded = _finding("ungrounded", anchors=[])
     resolved = _finding("resolved", status="resolved", anchors=["anchor:resolved"])
 
-    assert not service.requires_escalation([ungrounded, resolved])
+    assert not service.requires_escalation(
+        [ungrounded, resolved], known_anchor_ids={"anchor:resolved"}
+    )
     unchanged = await service.escalate(
         course_id="course:one",
         chapter_key="limits",
@@ -676,6 +718,61 @@ async def test_escalation_uses_one_grounded_unresolved_eligibility_rule():
     assert '"item_key":"resolved"' not in call.prompt
 
 
+def test_unknown_citation_findings_are_manual_and_not_escalation_eligible():
+    artifact = _chapter()
+    artifact.sections[0].anchor_ids = ["anchor:missing"]
+
+    findings = CourseGenerationService.validate_chapter(artifact, {"anchor:one"})
+    citation = next(
+        finding
+        for finding in findings
+        if finding.kind == "citation" and finding.item_key == "definition"
+    )
+
+    assert citation.status == "manual_check"
+    assert not CourseGenerationService.requires_escalation(
+        [citation], known_anchor_ids={"anchor:one"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_escalation_sends_valid_subset_when_citation_anchor_is_unknown():
+    resolved = _finding(
+        "valid", kind="formula", status="resolved", anchors=["anchor:valid"]
+    )
+    fake = FakeCourseModelAdapter(ReviewArtifact(findings=[resolved]))
+    service = CourseGenerationService(adapter=fake)
+    valid = _finding("valid", kind="formula", anchors=["anchor:valid"])
+    invalid_citation = _finding(
+        "invalid-citation",
+        kind="citation",
+        severity="error",
+        status="manual_check",
+        anchors=["anchor:missing"],
+    )
+
+    assert service.requires_escalation(
+        [valid, invalid_citation], known_anchor_ids={"anchor:valid"}
+    )
+    result = await service.escalate(
+        course_id="course:one",
+        chapter_key="limits",
+        findings=[valid, invalid_citation],
+        evidence_by_anchor={"anchor:valid": "validated evidence"},
+        model=ModelSelection(
+            adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
+        ),
+    )
+
+    assert [(finding.kind, finding.status) for finding in result.findings] == [
+        ("formula", "resolved"),
+        ("citation", "manual_check"),
+    ]
+    call = fake.calls[0]
+    assert call.request.anchor_ids == ["anchor:valid"]
+    assert "anchor:missing" not in call.prompt
+
+
 def test_escalation_eligibility_uses_publication_resolution_policy():
     acknowledged_error = _finding(
         "error",
@@ -693,12 +790,14 @@ def test_escalation_eligibility_uses_publication_resolution_policy():
         update={"resolution_reason": "Accepted with rationale"}
     )
 
-    assert CourseGenerationService.requires_escalation([acknowledged_error])
     assert CourseGenerationService.requires_escalation(
-        [acknowledged_high_without_reason]
+        [acknowledged_error], known_anchor_ids={"anchor:error"}
+    )
+    assert CourseGenerationService.requires_escalation(
+        [acknowledged_high_without_reason], known_anchor_ids={"anchor:high"}
     )
     assert not CourseGenerationService.requires_escalation(
-        [acknowledged_high_with_reason]
+        [acknowledged_high_with_reason], known_anchor_ids={"anchor:high"}
     )
 
 
@@ -717,6 +816,41 @@ def test_escalation_merge_preserves_unrelated_findings():
         ("high", "resolved"),
         ("warning", "open"),
     ]
+
+
+def test_escalation_merge_matches_kind_and_item_identity():
+    original = [
+        _finding("shared", kind="formula"),
+        _finding("shared", kind="unit"),
+    ]
+    escalation = ReviewArtifact(
+        findings=[
+            _finding("shared", kind="formula", status="resolved", reason="fixed")
+        ]
+    )
+
+    merged = CourseGenerationService.merge_escalation_findings(
+        original, escalation, known_anchor_ids={"anchor:one"}
+    )
+
+    assert [(finding.kind, finding.status) for finding in merged] == [
+        ("formula", "resolved"),
+        ("unit", "open"),
+    ]
+
+
+def test_escalation_merge_rejects_duplicate_response_identities():
+    original = [_finding("shared", kind="formula")]
+    duplicate = _finding(
+        "shared", kind="formula", status="resolved", reason="fixed"
+    )
+
+    with pytest.raises(ValueError, match="duplicate finding identities"):
+        CourseGenerationService.merge_escalation_findings(
+            original,
+            ReviewArtifact(findings=[duplicate, duplicate.model_copy()]),
+            known_anchor_ids={"anchor:one"},
+        )
 
 
 @pytest.mark.parametrize(

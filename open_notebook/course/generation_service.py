@@ -66,13 +66,17 @@ class CourseGenerationService:
         return True
 
     @staticmethod
-    def _eligible_for_escalation(finding: ValidationFinding) -> bool:
+    def _eligible_for_escalation(
+        finding: ValidationFinding, known_anchor_ids: set[str]
+    ) -> bool:
         high_risk = (
             finding.severity in {"high", "error"}
             or finding.status == "uncertain"
         )
+        anchors = set(finding.anchor_ids)
         return (
-            bool(finding.anchor_ids)
+            bool(anchors)
+            and anchors.issubset(known_anchor_ids)
             and not CourseGenerationService._resolved_for_publication(finding)
             and high_risk
         )
@@ -238,10 +242,11 @@ class CourseGenerationService:
         model: ModelSelection,
         prompt_version: str = "v1",
     ) -> ReviewArtifact:
+        known_anchor_ids = set(evidence_by_anchor)
         selected = [
             finding
             for finding in findings
-            if self._eligible_for_escalation(finding)
+            if self._eligible_for_escalation(finding, known_anchor_ids)
         ]
         if not selected:
             return ReviewArtifact(findings=findings)
@@ -605,6 +610,7 @@ class CourseGenerationService:
                     ValidationFinding(
                         kind="citation",
                         severity="error",
+                        status="manual_check",
                         item_key=item_key,
                         anchor_ids=unknown,
                         message=f"Unknown evidence anchors: {', '.join(unknown)}",
@@ -625,42 +631,12 @@ class CourseGenerationService:
                         message=str(exc),
                     )
                 )
-                continue
-            substitutions_are_finite = all(
-                math.isfinite(value) for value in formula.oracle_substitutions.values()
-            )
-            if not substitutions_are_finite:
-                findings.append(
-                    ValidationFinding(
-                        kind="formula",
-                        severity="high",
-                        status="manual_check",
-                        item_key=formula.key,
-                        anchor_ids=formula.anchor_ids,
-                        message="Formula oracle substitutions must be finite.",
-                    )
-                )
-            elif formula.oracle_expression is None:
-                findings.append(
-                    ValidationFinding(
-                        kind="formula",
-                        severity="high",
-                        status="manual_check",
-                        item_key=formula.key,
-                        anchor_ids=formula.anchor_ids,
-                        message="Formula is missing its independent oracle expression.",
-                    )
-                )
             else:
-                try:
-                    oracle_expression = cls._parse_safe_expression(
-                        formula.oracle_expression
-                    )
-                    difference = (actual_expression - oracle_expression).subs(
-                        formula.oracle_substitutions
-                    )
-                    equivalent = bool(difference.equals(0))
-                except Exception:
+                substitutions_are_finite = all(
+                    math.isfinite(value)
+                    for value in formula.oracle_substitutions.values()
+                )
+                if not substitutions_are_finite:
                     findings.append(
                         ValidationFinding(
                             kind="formula",
@@ -668,20 +644,53 @@ class CourseGenerationService:
                             status="manual_check",
                             item_key=formula.key,
                             anchor_ids=formula.anchor_ids,
-                            message="Formula oracle could not be evaluated.",
+                            message="Formula oracle substitutions must be finite.",
+                        )
+                    )
+                elif formula.oracle_expression is None:
+                    findings.append(
+                        ValidationFinding(
+                            kind="formula",
+                            severity="high",
+                            status="manual_check",
+                            item_key=formula.key,
+                            anchor_ids=formula.anchor_ids,
+                            message="Formula is missing its independent oracle expression.",
                         )
                     )
                 else:
-                    if not equivalent:
+                    try:
+                        oracle_expression = cls._parse_safe_expression(
+                            formula.oracle_expression
+                        )
+                        difference = (actual_expression - oracle_expression).subs(
+                            formula.oracle_substitutions
+                        )
+                        equivalent = bool(difference.equals(0))
+                    except Exception:
                         findings.append(
                             ValidationFinding(
                                 kind="formula",
-                                severity="error",
+                                severity="high",
+                                status="manual_check",
                                 item_key=formula.key,
                                 anchor_ids=formula.anchor_ids,
-                                message="Formula does not match its oracle expression.",
+                                message="Formula oracle could not be evaluated.",
                             )
                         )
+                    else:
+                        if not equivalent:
+                            findings.append(
+                                ValidationFinding(
+                                    kind="formula",
+                                    severity="error",
+                                    item_key=formula.key,
+                                    anchor_ids=formula.anchor_ids,
+                                    message=(
+                                        "Formula does not match its oracle expression."
+                                    ),
+                                )
+                            )
             findings.extend(
                 cls._validate_unit_oracle(
                     item_key=formula.key,
@@ -895,9 +904,13 @@ class CourseGenerationService:
             raise PublicationBlocked(f"Cannot publish with blocking findings: {kinds}")
 
     @staticmethod
-    def requires_escalation(findings: Iterable[ValidationFinding]) -> bool:
+    def requires_escalation(
+        findings: Iterable[ValidationFinding], *, known_anchor_ids: set[str]
+    ) -> bool:
         return any(
-            CourseGenerationService._eligible_for_escalation(finding)
+            CourseGenerationService._eligible_for_escalation(
+                finding, known_anchor_ids
+            )
             for finding in findings
         )
 
@@ -906,27 +919,51 @@ class CourseGenerationService:
         original: list[ValidationFinding],
         escalation: ReviewArtifact,
         *,
-        known_anchor_ids: set[str] | None = None,
+        known_anchor_ids: set[str],
     ) -> list[ValidationFinding]:
-        original_by_item = {finding.item_key: finding for finding in original}
-        unexpected_items = sorted(
+        original_by_identity = {
+            (finding.kind, finding.item_key): finding for finding in original
+        }
+        response_identities = [
+            (finding.kind, finding.item_key) for finding in escalation.findings
+        ]
+        seen_identities: set[tuple[str, str]] = set()
+        duplicate_identities: set[tuple[str, str]] = set()
+        for identity in response_identities:
+            if identity in seen_identities:
+                duplicate_identities.add(identity)
+            seen_identities.add(identity)
+        if duplicate_identities:
+            rendered = ", ".join(
+                f"{kind}:{item_key}"
+                for kind, item_key in sorted(duplicate_identities)
+            )
+            raise ValueError(
+                f"Escalation contains duplicate finding identities: {rendered}"
+            )
+        unexpected_identities = sorted(
             {
-                finding.item_key
+                (finding.kind, finding.item_key)
                 for finding in escalation.findings
-                if finding.item_key not in original_by_item
+                if (finding.kind, finding.item_key) not in original_by_identity
             }
         )
-        if unexpected_items:
+        if unexpected_identities:
+            rendered = ", ".join(
+                f"{kind}:{item_key}" for kind, item_key in unexpected_identities
+            )
             raise ValueError(
-                "Escalation contains unknown item keys: "
-                + ", ".join(unexpected_items)
+                "Escalation contains unknown finding identities: " + rendered
             )
         out_of_scope_anchors = sorted(
             {
                 anchor_id
                 for finding in escalation.findings
                 for anchor_id in finding.anchor_ids
-                if anchor_id not in set(original_by_item[finding.item_key].anchor_ids)
+                if anchor_id
+                not in set(
+                    original_by_identity[(finding.kind, finding.item_key)].anchor_ids
+                )
             }
         )
         if out_of_scope_anchors:
@@ -934,22 +971,26 @@ class CourseGenerationService:
                 "Escalation contains out-of-scope anchors: "
                 + ", ".join(out_of_scope_anchors)
             )
-        if known_anchor_ids is not None:
-            unknown = sorted(
-                {
-                    anchor_id
-                    for finding in escalation.findings
-                    for anchor_id in finding.anchor_ids
-                }
-                - known_anchor_ids
-            )
-            if unknown:
-                raise ValueError(f"Escalation contains unknown anchors: {', '.join(unknown)}")
-        responses = {finding.item_key: finding for finding in escalation.findings}
+        unknown = sorted(
+            {
+                anchor_id
+                for finding in escalation.findings
+                for anchor_id in finding.anchor_ids
+            }
+            - known_anchor_ids
+        )
+        if unknown:
+            raise ValueError(f"Escalation contains unknown anchors: {', '.join(unknown)}")
+        responses = {
+            (finding.kind, finding.item_key): finding
+            for finding in escalation.findings
+        }
         merged: list[ValidationFinding] = []
         for finding in original:
-            replacement = responses.get(finding.item_key)
-            eligible = CourseGenerationService._eligible_for_escalation(finding)
+            replacement = responses.get((finding.kind, finding.item_key))
+            eligible = CourseGenerationService._eligible_for_escalation(
+                finding, known_anchor_ids
+            )
             if replacement is None or not eligible:
                 merged.append(finding)
                 continue

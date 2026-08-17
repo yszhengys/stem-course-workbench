@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from html.parser import HTMLParser
 from typing import Annotated, Generic, Literal, TypeAlias, TypeVar, Union
 
 from pydantic import (
@@ -25,19 +26,79 @@ ProvenanceLabel: TypeAlias = Literal[
 ]
 
 _COMMONMARK_FENCE = re.compile(r"(?m)^[ \t]{0,3}(?:`{3,}|~{3,})")
-_MATH_ANGLE_NOTATION = re.compile(
-    r"<(?:[A-Za-z]\s*,\s*)+[A-Za-z]\s*>|<v>", re.IGNORECASE
+_ANGLE_TOKEN = re.compile(r"<[^<>\r\n]+>")
+_MATH_SINGLE_SYMBOL = re.compile(r"[A-Za-z]")
+_MATH_INNER_PRODUCT = re.compile(
+    r"[A-Za-z][A-Za-z0-9_]*(?:\s*[,|]\s*[A-Za-z][A-Za-z0-9_]*)+"
 )
-_HTML_ELEMENT = re.compile(r"<[/!]?[A-Za-z][^>]*>")
+_MATH_FUNCTION_VALUE = re.compile(
+    r"[A-Za-z][A-Za-z0-9_]*\([A-Za-z0-9_+*/^.,|\- \t]*\)"
+)
+
+
+def _is_math_angle_token(token: str) -> bool:
+    inner = token[1:-1].strip()
+    return any(
+        pattern.fullmatch(inner)
+        for pattern in (
+            _MATH_SINGLE_SYMBOL,
+            _MATH_INNER_PRODUCT,
+            _MATH_FUNCTION_VALUE,
+        )
+    )
+
+
+class _HTMLMarkupDetector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.has_markup = False
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        self.has_markup = True
+
+    def handle_startendtag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        self.has_markup = True
+
+    def handle_endtag(self, tag: str) -> None:
+        self.has_markup = True
+
+    def handle_comment(self, data: str) -> None:
+        self.has_markup = True
+
+    def handle_decl(self, decl: str) -> None:
+        self.has_markup = True
+
+    def handle_pi(self, data: str) -> None:
+        self.has_markup = True
+
+    def unknown_decl(self, data: str) -> None:
+        self.has_markup = True
+
+
+def _contains_html(value: str) -> bool:
+    without_math_angles = _ANGLE_TOKEN.sub(
+        lambda match: "" if _is_math_angle_token(match.group()) else match.group(),
+        value,
+    )
+    parser = _HTMLMarkupDetector()
+    try:
+        parser.feed(without_math_angles)
+        parser.close()
+    except Exception:
+        return True
+    return parser.has_markup
 
 
 def _validate_generated_text(value: str) -> str:
     lowered = value.lower()
-    without_math_angles = _MATH_ANGLE_NOTATION.sub("", value)
     if (
         _COMMONMARK_FENCE.search(value)
         or "javascript:" in lowered
-        or _HTML_ELEMENT.search(without_math_angles)
+        or _contains_html(value)
     ):
         raise ValueError("generated text must not contain executable code or HTML")
     return value
