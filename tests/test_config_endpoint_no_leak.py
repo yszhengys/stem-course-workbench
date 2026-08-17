@@ -13,6 +13,7 @@ contract in so a future edit can't reintroduce the leak by, e.g., adding
 `"error": db_health.get("error")` to the response dict.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -74,3 +75,35 @@ class TestConfigEndpointDoesNotLeakDbErrors:
         depends on."""
         response = client.get("/api/config")
         assert response.status_code != 401
+
+
+@pytest.mark.asyncio
+async def test_slow_optional_version_check_has_a_short_budget(monkeypatch):
+    from api.routers import config
+
+    never_finishes = asyncio.Event()
+
+    async def slow_github(*_args, **_kwargs):
+        await never_finishes.wait()
+
+    monkeypatch.setattr(config, "get_version_from_github_async", slow_github)
+    monkeypatch.setattr(config, "repo_query", AsyncMock(return_value=[{"result": 1}]))
+    monkeypatch.setattr(
+        config,
+        "_version_cache",
+        {
+            "latest_version": None,
+            "has_update": False,
+            "timestamp": 0,
+            "check_failed": False,
+        },
+    )
+
+    response = await asyncio.wait_for(
+        config.get_config(request=None),
+        timeout=config.VERSION_CHECK_TIMEOUT_SECONDS + 0.25,
+    )
+
+    assert response["dbStatus"] == "online"
+    assert response["latestVersion"] is None
+    assert response["hasUpdate"] is False

@@ -26,6 +26,10 @@ _version_cache: dict = {
 # Cache TTL in seconds (24 hours)
 VERSION_CACHE_TTL = 24 * 60 * 60
 
+# GitHub is optional metadata. It must never hold first paint behind a slow or
+# offline network; the local database health result is the startup contract.
+VERSION_CHECK_TIMEOUT_SECONDS = 0.5
+
 
 def get_version() -> str:
     """Read version from pyproject.toml"""
@@ -139,7 +143,20 @@ async def get_config(request: Request):
     has_update = False
 
     try:
-        latest_version, has_update = await get_latest_version_cached(current_version)
+        latest_version, has_update = await asyncio.wait_for(
+            get_latest_version_cached(current_version),
+            timeout=VERSION_CHECK_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.debug("Optional GitHub version check exceeded its startup budget")
+        _version_cache.update(
+            {
+                "latest_version": None,
+                "has_update": False,
+                "timestamp": time.time(),
+                "check_failed": True,
+            }
+        )
     except Exception as e:
         # Extra safety: ensure version check never breaks the config endpoint
         logger.error(f"Unexpected error during version check: {e}")
