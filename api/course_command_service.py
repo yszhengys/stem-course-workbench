@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,7 +24,10 @@ from open_notebook.course.models import (
     CourseValidationFinding,
     CourseVersion,
 )
-from open_notebook.course.workflow_service import CourseWorkflowService
+from open_notebook.course.workflow_service import (
+    CourseWorkflowService,
+    generation_input_hash,
+)
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Notebook, Source
 from open_notebook.exceptions import NotFoundError
@@ -55,16 +56,6 @@ class CourseJobSubmission:
 async def _lock_for(input_hash: str) -> asyncio.Lock:
     async with _claim_locks_guard:
         return _claim_locks.setdefault(input_hash, asyncio.Lock())
-
-
-def _canonical_hash(value: dict[str, Any]) -> str:
-    payload = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
 
 
 class CourseCommandService:
@@ -107,27 +98,43 @@ class CourseCommandService:
         return row
 
     @staticmethod
-    async def _find_unbound_command(run_id: str) -> str | None:
+    async def _find_unbound_command(
+        run_id: str,
+        *,
+        command_name: str,
+        queue_args: dict[str, Any],
+    ) -> str | None:
         rows = await repo_query(
             "SELECT * FROM command WHERE app = 'open_notebook' "
             "AND args.run_id = $run_id ORDER BY created DESC LIMIT 1;",
             {"run_id": run_id},
         )
-        if not rows or not rows[0].get("id"):
+        if not rows:
             return None
-        return str(rows[0]["id"])
+        candidate = rows[0]
+        if (
+            candidate.get("name") != command_name
+            or candidate.get("args") != queue_args
+            or not candidate.get("id")
+        ):
+            return None
+        return str(candidate["id"])
 
     @staticmethod
     async def _bind_command(run_id: str, command_id: str) -> None:
-        await repo_query(
+        rows = await repo_query(
             """
-            UPDATE $run_id SET command = $command_id;
+            UPDATE $run_id SET command = $command_id
+            WHERE command = NONE OR command = $command_id
+            RETURN AFTER;
             """,
             {
                 "run_id": ensure_record_id(run_id),
                 "command_id": ensure_record_id(command_id),
             },
         )
+        if not rows:
+            raise ValueError("Course generation run was claimed by another command")
 
     async def _ensure_bound(
         self,
@@ -138,10 +145,14 @@ class CourseCommandService:
     ) -> CourseJobSubmission:
         run_id = str(row["id"])
         command_id = row.get("command")
+        queue_args = {**command_args, "run_id": run_id}
         if not command_id:
-            command_id = await self._find_unbound_command(run_id)
+            command_id = await self._find_unbound_command(
+                run_id,
+                command_name=command_name,
+                queue_args=queue_args,
+            )
         if not command_id:
-            queue_args = {**command_args, "run_id": run_id}
             command_id = await asyncio.to_thread(
                 submit_command,
                 "open_notebook",
@@ -174,20 +185,18 @@ class CourseCommandService:
         force: bool = False,
     ) -> CourseJobSubmission:
         selection = ModelSelection.model_validate(model)
-        key = {
-            "course_id": course_id,
-            "stage": stage,
-            "course_version_id": course_version_id,
-            "chapter_id": chapter_id,
-            "chapter_key": chapter_key,
-            "prompt_version": prompt_version,
-            "model": selection.model_dump(mode="json"),
-            # Ordering is intentional: changing evidence order changes the prompt.
-            "anchor_ids": anchor_ids,
-            "source_hashes": dict(sorted(source_hashes.items())),
-            "stable_args": command_args,
-        }
-        input_hash = _canonical_hash(key)
+        input_hash = generation_input_hash(
+            course_id=course_id,
+            stage=stage,
+            command_args=command_args,
+            model=selection,
+            prompt_version=prompt_version,
+            anchor_ids=anchor_ids,
+            source_hashes=source_hashes,
+            course_version_id=course_version_id,
+            chapter_id=chapter_id,
+            chapter_key=chapter_key,
+        )
         claim_lock = await _lock_for(input_hash)
         async with claim_lock:
             rows = await repo_query(

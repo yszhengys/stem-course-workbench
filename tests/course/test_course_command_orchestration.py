@@ -201,6 +201,229 @@ def test_permanent_adapter_failures_are_classified_without_retry(message: str) -
     )
 
 
+def test_worker_recomputes_claim_hash_and_rejects_reordered_queue_anchors() -> None:
+    import hashlib
+
+    from open_notebook.course.contracts import ModelSelection
+    from open_notebook.course.models import CourseGenerationRun
+    from open_notebook.course.workflow_service import CourseWorkflowService
+
+    selection = ModelSelection(
+        adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
+    )
+    command_args = {
+        "course_id": "course:abc",
+        "anchor_ids": ["anchor:a", "anchor:b"],
+        "available_lab_keys": ["lab-1"],
+        "prompt_version": "v1",
+        "model": selection.model_dump(mode="json"),
+    }
+    key = {
+        "course_id": "course:abc",
+        "stage": "outline",
+        "course_version_id": None,
+        "chapter_id": None,
+        "chapter_key": None,
+        "prompt_version": "v1",
+        "model": selection.model_dump(mode="json"),
+        "anchor_ids": ["anchor:a", "anchor:b"],
+        "source_hashes": {"source:a": "a" * 64},
+        "stable_args": command_args,
+    }
+    expected = hashlib.sha256(
+        json.dumps(
+            key,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    run = CourseGenerationRun(
+        id="course_generation_run:one",
+        course="course:abc",
+        stage="outline",
+        adapter=selection.adapter,
+        model=selection.model,
+        reasoning_effort=selection.reasoning_effort,
+        prompt_version="v1",
+        input_hash=expected,
+    )
+    CourseWorkflowService.validate_run_claim(
+        run,
+        command_args=command_args,
+        model=selection,
+        prompt_version="v1",
+        anchor_ids=["anchor:a", "anchor:b"],
+        source_hashes={"source:a": "a" * 64},
+    )
+    reordered_args = {
+        **command_args,
+        "anchor_ids": ["anchor:b", "anchor:a"],
+    }
+    with pytest.raises(ValueError, match="claim hash"):
+        CourseWorkflowService.validate_run_claim(
+            run,
+            command_args=reordered_args,
+            model=selection,
+            prompt_version="v1",
+            anchor_ids=["anchor:b", "anchor:a"],
+            source_hashes={"source:a": "a" * 64},
+        )
+
+
+@pytest.mark.parametrize(
+    "tampered_args",
+    [
+        {
+            "course_id": "course:abc",
+            "source_id": "source:other",
+            "role": "PRIMARY",
+        },
+        {
+            "course_id": "course:abc",
+            "source_id": "source:abc",
+            "role": "SUPPLEMENT",
+        },
+    ],
+)
+def test_worker_claim_hash_rejects_source_or_role_tamper(
+    tampered_args: dict[str, str],
+) -> None:
+    from open_notebook.course.contracts import ModelSelection
+    from open_notebook.course.models import CourseGenerationRun
+    from open_notebook.course.workflow_service import (
+        CourseWorkflowService,
+        generation_input_hash,
+    )
+
+    model = ModelSelection(adapter="open_notebook", model="docling")
+    expected_args = {
+        "course_id": "course:abc",
+        "source_id": "source:abc",
+        "role": "PRIMARY",
+    }
+    run = CourseGenerationRun(
+        id="course_generation_run:evidence",
+        course="course:abc",
+        stage="evidence",
+        adapter=model.adapter,
+        model=model.model,
+        prompt_version="evidence-v1",
+        input_hash=generation_input_hash(
+            course_id="course:abc",
+            stage="evidence",
+            command_args=expected_args,
+            model=model,
+            prompt_version="evidence-v1",
+            anchor_ids=[],
+            source_hashes={"source:abc": "a" * 64},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="claim hash"):
+        CourseWorkflowService.validate_run_claim(
+            run,
+            command_args=tampered_args,
+            model=model,
+            prompt_version="evidence-v1",
+            anchor_ids=[],
+            source_hashes={"source:abc": "a" * 64},
+        )
+
+
+def test_worker_claim_hash_rejects_available_lab_key_tamper() -> None:
+    from open_notebook.course.contracts import ModelSelection
+    from open_notebook.course.models import CourseGenerationRun
+    from open_notebook.course.workflow_service import (
+        CourseWorkflowService,
+        generation_input_hash,
+    )
+
+    model = ModelSelection(
+        adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
+    )
+    expected_args = {
+        "course_id": "course:abc",
+        "anchor_ids": ["anchor:a"],
+        "available_lab_keys": ["lab-1"],
+        "prompt_version": "v1",
+        "model": model.model_dump(mode="json"),
+    }
+    run = CourseGenerationRun(
+        id="course_generation_run:outline",
+        course="course:abc",
+        stage="outline",
+        adapter=model.adapter,
+        model=model.model,
+        reasoning_effort=model.reasoning_effort,
+        prompt_version="v1",
+        input_hash=generation_input_hash(
+            course_id="course:abc",
+            stage="outline",
+            command_args=expected_args,
+            model=model,
+            prompt_version="v1",
+            anchor_ids=["anchor:a"],
+            source_hashes={"source:abc": "a" * 64},
+        ),
+    )
+
+    with pytest.raises(ValueError, match="claim hash"):
+        CourseWorkflowService.validate_run_claim(
+            run,
+            command_args={**expected_args, "available_lab_keys": ["lab-2"]},
+            model=model,
+            prompt_version="v1",
+            anchor_ids=["anchor:a"],
+            source_hashes={"source:abc": "a" * 64},
+        )
+
+
+def test_artifact_replay_identity_is_unique_per_run_but_stable_for_replay() -> None:
+    from open_notebook.course.models import CourseGenerationRun
+    from open_notebook.course.workflow_service import artifact_replay_hash
+
+    def run(run_id: str) -> CourseGenerationRun:
+        return CourseGenerationRun(
+            id=run_id,
+            course="course:abc",
+            stage="outline",
+            adapter="codex_cli",
+            model="gpt-5.6-sol",
+            reasoning_effort="max",
+            prompt_version="v1",
+            input_hash="a" * 64,
+        )
+
+    first = run("course_generation_run:first")
+    second = run("course_generation_run:second")
+
+    assert artifact_replay_hash(first) == artifact_replay_hash(first)
+    assert artifact_replay_hash(first) != artifact_replay_hash(second)
+
+
+def test_succeeded_replay_fails_closed_on_output_hash_mismatch() -> None:
+    from open_notebook.course.models import CourseGenerationRun
+    from open_notebook.course.workflow_service import CourseWorkflowService
+
+    run = CourseGenerationRun(
+        id="course_generation_run:one",
+        course="course:abc",
+        stage="outline",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        status="succeeded",
+        prompt_version="v1",
+        input_hash="a" * 64,
+        output_hash="b" * 64,
+        command="command:one",
+    )
+
+    with pytest.raises(ValueError, match="output hash mismatch"):
+        CourseWorkflowService.verify_completed_output(run, {"title": "tampered"})
+
+
 @pytest.mark.asyncio
 async def test_persistent_active_run_dedupe_and_ordered_key(monkeypatch) -> None:
     import api.course_command_service as module
@@ -310,6 +533,237 @@ async def test_unbound_run_recovers_submitted_command_after_crash(monkeypatch) -
     recovered = await module.CourseCommandService().submit_stage(**kwargs)
     assert recovered.command_id == "command:cmd1"
     assert store.submit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unbound_recovery_rejects_tampered_command_name_or_args(
+    monkeypatch,
+) -> None:
+    import api.course_command_service as module
+
+    store = _FakeQueueStore()
+    monkeypatch.setattr(module, "repo_query", store.query)
+    monkeypatch.setattr(module, "submit_command", store.submit)
+    service = module.CourseCommandService()
+    kwargs = {
+        "course_id": "course:abc",
+        "stage": "evidence",
+        "command_name": "course_build_evidence",
+        "command_args": {
+            "course_id": "course:abc",
+            "source_id": "source:a",
+            "role": "PRIMARY",
+        },
+        "model": {"adapter": "open_notebook", "model": "docling"},
+        "prompt_version": "evidence-v1",
+        "anchor_ids": [],
+        "source_hashes": {"source:a": "a" * 64},
+    }
+    original_query = store.query
+
+    async def crash_before_binding(statement, variables=None):
+        if statement.lstrip().startswith("UPDATE $run_id SET command"):
+            raise RuntimeError("crash after command creation")
+        return await original_query(statement, variables)
+
+    monkeypatch.setattr(module, "repo_query", crash_before_binding)
+    with pytest.raises(RuntimeError, match="crash after command creation"):
+        await service.submit_stage(**kwargs)
+
+    store.commands["command:cmd1"]["name"] = "course_generate_outline"
+    dict(store.commands["command:cmd1"]["args"])["role"] = "SUPPLEMENT"
+    tampered_args = dict(store.commands["command:cmd1"]["args"])
+    tampered_args["role"] = "SUPPLEMENT"
+    store.commands["command:cmd1"]["args"] = tampered_args
+    monkeypatch.setattr(module, "repo_query", original_query)
+
+    recovered = await module.CourseCommandService().submit_stage(**kwargs)
+
+    assert recovered.command_id == "command:cmd2"
+    assert store.submit_count == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_atomically_claims_unbound_run_after_full_preflight(
+    monkeypatch,
+) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.contracts import ModelSelection
+    from open_notebook.course.models import Course, CourseGenerationRun
+
+    source_hash = "a" * 64
+    model = ModelSelection(adapter="open_notebook", model="docling")
+    command_args = {
+        "course_id": "course:abc",
+        "source_id": "source:abc",
+        "role": "PRIMARY",
+    }
+    run = CourseGenerationRun(
+        id="course_generation_run:one",
+        course="course:abc",
+        stage="evidence",
+        adapter=model.adapter,
+        model=model.model,
+        status="queued",
+        prompt_version="evidence-v1",
+        input_hash=module.generation_input_hash(
+            course_id="course:abc",
+            stage="evidence",
+            command_args=command_args,
+            model=model,
+            prompt_version="evidence-v1",
+            anchor_ids=[],
+            source_hashes={"source:abc": source_hash},
+        ),
+    )
+    course = Course(
+        id="course:abc",
+        title="Physics",
+        notebook="notebook:abc",
+        source_ids=["source:abc"],
+        primary_source_ids=["source:abc"],
+    )
+    workflow = module.CourseWorkflowService()
+    monkeypatch.setattr(module.Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(workflow, "_source_hash", AsyncMock(return_value=source_hash))
+    monkeypatch.setattr(module.Course, "save", AsyncMock(return_value=None))
+    monkeypatch.setattr(module.CourseGenerationRun, "save", AsyncMock(return_value=None))
+
+    async def bind_query(statement, variables=None):
+        if "SET command = $command_id" not in statement:
+            raise AssertionError(statement)
+        assert run.command is None
+        run.command = str(variables["command_id"])
+        run.status = "running"
+        return [run.model_dump(mode="json")]
+
+    monkeypatch.setattr(module, "repo_query", bind_query)
+
+    async def build_after_binding(**kwargs):
+        del kwargs
+        assert run.command == "command:cmd1"
+        assert run.status == "running"
+        return []
+
+    monkeypatch.setattr(workflow.evidence, "build", build_after_binding)
+
+    await workflow.build_evidence(
+        run=run,
+        command_id="command:cmd1",
+        course_id="course:abc",
+        source_id="source:abc",
+        role="PRIMARY",
+    )
+
+    assert run.status == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_api_binding_fails_if_a_different_command_claimed_the_run(
+    monkeypatch,
+) -> None:
+    import api.course_command_service as module
+
+    query = AsyncMock(return_value=[])
+    monkeypatch.setattr(module, "repo_query", query)
+
+    with pytest.raises(ValueError, match="claimed by another command"):
+        await module.CourseCommandService._bind_command(
+            "course_generation_run:one", "command:api"
+        )
+
+    assert "command = NONE OR command = $command_id" in query.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_command_load_failure_terminalizes_its_unbound_run(monkeypatch) -> None:
+    import commands.course_commands as module
+
+    workflow = SimpleNamespace(
+        load_run=AsyncMock(side_effect=ValueError("claim mismatch")),
+        fail_run_reference=AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(module, "_workflow", workflow)
+    request = module.CourseEvidenceInput.model_validate(
+        {
+            "run_id": "course_generation_run:one",
+            "course_id": "course:abc",
+            "source_id": "source:abc",
+            "role": "PRIMARY",
+            "execution_context": {
+                "command_id": "command:cmd1",
+                "execution_started_at": "2026-08-18T00:00:00Z",
+                "app_name": "open_notebook",
+                "command_name": "course_build_evidence",
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="claim mismatch"):
+        await module.course_build_evidence_command(request)
+
+    workflow.fail_run_reference.assert_awaited_once_with(
+        run_id="course_generation_run:one",
+        command_id="command:cmd1",
+        message="claim mismatch",
+    )
+
+
+@pytest.mark.asyncio
+async def test_mismatched_prebound_command_cannot_terminalize_the_owner_run(
+    monkeypatch,
+) -> None:
+    import commands.course_commands as command_module
+    import open_notebook.course.workflow_service as workflow_module
+    from open_notebook.course.models import CourseGenerationRun
+
+    run = CourseGenerationRun(
+        id="course_generation_run:one",
+        course="course:abc",
+        stage="evidence",
+        adapter="open_notebook",
+        model="docling",
+        status="queued",
+        prompt_version="evidence-v1",
+        input_hash="a" * 64,
+        command="command:right",
+    )
+    monkeypatch.setattr(
+        workflow_module.CourseGenerationRun,
+        "get",
+        AsyncMock(return_value=run),
+    )
+
+    async def conditional_failure(statement, variables=None):
+        assert "command = NONE OR command = $command_id" in statement
+        if run.command in {None, str(variables["command_id"])}:
+            run.status = "cancelled"
+        return []
+
+    monkeypatch.setattr(workflow_module, "repo_query", conditional_failure)
+    monkeypatch.setattr(
+        command_module, "_workflow", workflow_module.CourseWorkflowService()
+    )
+    request = command_module.CourseEvidenceInput.model_validate(
+        {
+            "run_id": "course_generation_run:one",
+            "course_id": "course:abc",
+            "source_id": "source:abc",
+            "role": "PRIMARY",
+            "execution_context": {
+                "command_id": "command:wrong",
+                "execution_started_at": "2026-08-18T00:00:00Z",
+                "app_name": "open_notebook",
+                "command_name": "course_build_evidence",
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="binding mismatch"):
+        await command_module.course_build_evidence_command(request)
+
+    assert run.command == "command:right"
+    assert run.status == "queued"
 
 
 @pytest.mark.asyncio
@@ -449,6 +903,203 @@ async def test_worker_grounding_preserves_order_and_rejects_tampering(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
+    monkeypatch,
+) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.contracts import CourseOutlineArtifact, ModelSelection
+    from open_notebook.course.evidence_service import EvidenceService
+    from open_notebook.course.generation_service import CourseGenerationService
+    from open_notebook.course.model_adapters import FakeCourseModelAdapter
+    from open_notebook.course.models import Course, CourseGenerationRun, CourseVersion
+
+    source_hash = "a" * 64
+    anchor = EvidenceService().make_anchor(
+        course_id="course:force",
+        source_id="source:force",
+        source_sha256=source_hash,
+        kind="pdf_page",
+        index=1,
+        block_key="one",
+        quote="grounded",
+        source_role="PRIMARY",
+    )
+    course = Course(
+        id="course:force",
+        title="Physics",
+        notebook="notebook:force",
+        status="indexing",
+        source_ids=["source:force"],
+        primary_source_ids=["source:force"],
+    )
+    artifact = CourseOutlineArtifact(
+        title="Physics",
+        chapters=[
+            {
+                "key": "one",
+                    "title": "One",
+                    "purpose": "Learn.",
+                    "objective_keys": ["concept"],
+                    "anchor_ids": [anchor.anchor_id],
+            }
+        ],
+        concepts=[
+            {"key": "concept", "label": "Concept", "anchor_ids": [anchor.anchor_id]}
+        ],
+    )
+    adapter = FakeCourseModelAdapter(artifact)
+    workflow = module.CourseWorkflowService(
+        generation=CourseGenerationService(adapter=adapter)
+    )
+    versions: list[CourseVersion] = []
+
+    async def save_version(self):
+        if self.id is None:
+            self.id = f"course_version:v{len(versions) + 1}"
+        if not any(item.id == self.id for item in versions):
+            versions.append(self)
+
+    async def query(statement, variables=None):
+        variables = variables or {}
+        if "FROM course_evidence_anchor" in statement:
+            return [anchor.model_dump(mode="json")]
+        if "FROM course_version WHERE" in statement:
+            return [
+                item.model_dump(mode="json")
+                for item in versions
+                if item.input_hash == variables["hash"]
+            ]
+        raise AssertionError(statement)
+
+    async def activate(run, command_id):
+        run.command = command_id
+        if run.status == "queued":
+            run.status = "running"
+        return run
+
+    monkeypatch.setattr(module, "repo_query", query)
+    monkeypatch.setattr(module.Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(
+        module.CourseVersion,
+        "get",
+        AsyncMock(side_effect=lambda version_id: next(v for v in versions if v.id == version_id)),
+    )
+    monkeypatch.setattr(module.Course, "versions", AsyncMock(return_value=versions))
+    monkeypatch.setattr(module.Course, "save", AsyncMock(return_value=None))
+    monkeypatch.setattr(module.CourseVersion, "save", save_version)
+    monkeypatch.setattr(module.CourseGenerationRun, "save", AsyncMock(return_value=None))
+    monkeypatch.setattr(workflow, "_source_hash", AsyncMock(return_value=source_hash))
+    monkeypatch.setattr(workflow, "activate_run", activate)
+    model = ModelSelection(
+        adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
+    )
+    command_args = {
+        "course_id": "course:force",
+        "anchor_ids": [anchor.anchor_id],
+        "available_lab_keys": [],
+        "prompt_version": "v1",
+        "model": model.model_dump(mode="json"),
+    }
+    logical_hash = module.generation_input_hash(
+        course_id="course:force",
+        stage="outline",
+        command_args=command_args,
+        model=model,
+        prompt_version="v1",
+        anchor_ids=[anchor.anchor_id],
+        source_hashes={"source:force": source_hash},
+    )
+
+    def run(run_id: str) -> CourseGenerationRun:
+        return CourseGenerationRun(
+            id=run_id,
+            course="course:force",
+            stage="outline",
+            adapter=model.adapter,
+            model=model.model,
+            reasoning_effort=model.reasoning_effort,
+            status="running",
+            prompt_version="v1",
+            input_hash=logical_hash,
+        )
+
+    first_run = run("course_generation_run:first")
+    second_run = run("course_generation_run:second")
+    first = await workflow.generate_outline(
+        run=first_run,
+        command_id="command:first",
+        course_id="course:force",
+        anchor_ids=[anchor.anchor_id],
+        available_lab_keys=[],
+        model=model,
+        prompt_version="v1",
+    )
+    second = await workflow.generate_outline(
+        run=second_run,
+        command_id="command:second",
+        course_id="course:force",
+        anchor_ids=[anchor.anchor_id],
+        available_lab_keys=[],
+        model=model,
+        prompt_version="v1",
+    )
+    replayed_first = await workflow.generate_outline(
+        run=first_run,
+        command_id="command:first",
+        course_id="course:force",
+        anchor_ids=[anchor.anchor_id],
+        available_lab_keys=[],
+        model=model,
+        prompt_version="v1",
+    )
+
+    assert [item.version_no for item in versions] == [1, 2]
+    assert len(adapter.calls) == 2
+    assert replayed_first.id == first.id
+    assert first.id != second.id
+    assert course.outline_version_id == second.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("persisted_status", "expected_transitions"),
+    [
+        ("draft", ["generating", "reviewing"]),
+        ("generating", ["reviewing"]),
+    ],
+)
+async def test_chapter_mid_save_replay_converges_to_reviewing(
+    monkeypatch,
+    persisted_status: str,
+    expected_transitions: list[str],
+) -> None:
+    from open_notebook.course.models import Chapter
+    from open_notebook.course.workflow_service import CourseWorkflowService
+
+    chapter = Chapter(
+        id="chapter:one",
+        course_version="course_version:one",
+        chapter_no=1,
+        title="One",
+        chapter_key="one",
+        status=persisted_status,
+    )
+    transitions: list[str] = []
+
+    async def transition(self, target: str) -> None:
+        assert self is chapter
+        transitions.append(target)
+        chapter.status = target
+
+    monkeypatch.setattr(Chapter, "transition_to", transition)
+
+    await CourseWorkflowService.advance_chapter_to_reviewing(chapter)
+
+    assert transitions == expected_transitions
+    assert chapter.status == "reviewing"
+
+
+@pytest.mark.asyncio
 async def test_exact_approval_gate_precedes_chapter_model_call(monkeypatch) -> None:
     import open_notebook.course.workflow_service as module
     from open_notebook.course.models import Course, CourseGenerationRun, CourseVersion
@@ -488,6 +1139,7 @@ async def test_exact_approval_gate_precedes_chapter_model_call(monkeypatch) -> N
     with pytest.raises(ValueError, match="not approved"):
         await workflow.generate_chapter(
             run=run,
+            command_id="command:one",
             course_id="course:abc",
             chapter_key="one",
             anchor_ids=["anchor:a"],
@@ -684,6 +1336,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     versions: list[CourseVersion] = []
     chapters: list[Chapter] = []
     labs: list[Lab] = []
+    link_refreshes: list[str] = []
 
     async def save_course(self):
         return None
@@ -691,16 +1344,19 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     async def save_version(self):
         if self.id is None:
             self.id = f"course_version:v{len(versions) + 1}"
+        if not any(item.id == self.id for item in versions):
             versions.append(self)
 
     async def save_chapter(self):
         if self.id is None:
             self.id = f"chapter:c{len(chapters) + 1}"
+        if not any(item.id == self.id for item in chapters):
             chapters.append(self)
 
     async def save_lab(self):
         if self.id is None:
             self.id = f"lab:l{len(labs) + 1}"
+        if not any(item.id == self.id for item in labs):
             labs.append(self)
 
     async def save_run(self):
@@ -738,8 +1394,15 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
                 if item.input_hash == variables["hash"]
             ]
         if "SELECT * FROM lab WHERE" in statement:
-            return [item.model_dump(mode="json") for item in labs]
+            return [
+                item.model_dump(mode="json")
+                for item in labs
+                if item.chapter == str(variables["chapter"])
+            ]
         if "course_validation_finding" in statement:
+            return []
+        if statement.lstrip().startswith("UPDATE course_note"):
+            link_refreshes.append(str(variables["chapter_key"]))
             return []
         if statement.lstrip().startswith("UPDATE"):
             return []
@@ -762,6 +1425,13 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     workflow = module.CourseWorkflowService(
         generation=CourseGenerationService(adapter=adapter)
     )
+    async def activate(run, command_id):
+        run.command = command_id
+        if run.status == "queued":
+            run.status = "running"
+        return run
+
+    monkeypatch.setattr(workflow, "activate_run", activate)
     monkeypatch.setattr(workflow, "_source_hash", AsyncMock(return_value=source_hash))
     monkeypatch.setattr(
         workflow.evidence, "build", AsyncMock(return_value=[anchor])
@@ -769,6 +1439,12 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     selection = ModelSelection(
         adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
     )
+    evidence_selection = ModelSelection(adapter="open_notebook", model="docling")
+    evidence_args = {
+        "course_id": "course:e2e",
+        "source_id": "source:e2e",
+        "role": "PRIMARY",
+    }
     evidence_run = CourseGenerationRun(
         id="course_generation_run:evidence",
         course="course:e2e",
@@ -777,16 +1453,41 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         model="docling",
         status="running",
         prompt_version="evidence-v1",
-        input_hash="0" * 64,
+        input_hash=module.generation_input_hash(
+            course_id="course:e2e",
+            stage="evidence",
+            command_args=evidence_args,
+            model=evidence_selection,
+            prompt_version="evidence-v1",
+            anchor_ids=[],
+            source_hashes={"source:e2e": source_hash},
+        ),
     )
     built = await workflow.build_evidence(
         run=evidence_run,
+        command_id="command:evidence",
+        course_id="course:e2e",
+        source_id="source:e2e",
+        role="PRIMARY",
+    )
+    replayed_evidence = await workflow.build_evidence(
+        run=evidence_run,
+        command_id="command:evidence",
         course_id="course:e2e",
         source_id="source:e2e",
         role="PRIMARY",
     )
     assert [item.anchor_id for item in built] == [anchor.anchor_id]
+    assert [item.anchor_id for item in replayed_evidence] == [anchor.anchor_id]
+    assert workflow.evidence.build.await_count == 1
     assert course.status == "indexing"
+    outline_args = {
+        "course_id": "course:e2e",
+        "anchor_ids": [anchor.anchor_id],
+        "available_lab_keys": ["limit-plot"],
+        "prompt_version": "v1",
+        "model": selection.model_dump(mode="json"),
+    }
     outline_run = CourseGenerationRun(
         id="course_generation_run:outline",
         course="course:e2e",
@@ -796,10 +1497,19 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         reasoning_effort=selection.reasoning_effort,
         status="running",
         prompt_version="v1",
-        input_hash="1" * 64,
+        input_hash=module.generation_input_hash(
+            course_id="course:e2e",
+            stage="outline",
+            command_args=outline_args,
+            model=selection,
+            prompt_version="v1",
+            anchor_ids=[anchor.anchor_id],
+            source_hashes={"source:e2e": source_hash},
+        ),
     )
     version = await workflow.generate_outline(
         run=outline_run,
+        command_id="command:outline",
         course_id="course:e2e",
         anchor_ids=[anchor.anchor_id],
         available_lab_keys=["limit-plot"],
@@ -808,6 +1518,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     )
     await workflow.generate_outline(
         run=outline_run,
+        command_id="command:outline",
         course_id="course:e2e",
         anchor_ids=[anchor.anchor_id],
         available_lab_keys=["limit-plot"],
@@ -820,6 +1531,13 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         "course:e2e", str(version.id), "确认大纲"
     )
     adapter.output = chapter_artifact
+    chapter_args = {
+        "course_id": "course:e2e",
+        "chapter_key": "limits",
+        "anchor_ids": [anchor.anchor_id],
+        "prompt_version": "v1",
+        "model": selection.model_dump(mode="json"),
+    }
     chapter_run = CourseGenerationRun(
         id="course_generation_run:chapter",
         course="course:e2e",
@@ -831,10 +1549,21 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         reasoning_effort=selection.reasoning_effort,
         status="running",
         prompt_version="v1",
-        input_hash="2" * 64,
+        input_hash=module.generation_input_hash(
+            course_id="course:e2e",
+            stage="chapter_content",
+            command_args=chapter_args,
+            model=selection,
+            prompt_version="v1",
+            anchor_ids=[anchor.anchor_id],
+            source_hashes={"source:e2e": source_hash},
+            course_version_id=str(version.id),
+            chapter_key="limits",
+        ),
     )
     chapter = await workflow.generate_chapter(
         run=chapter_run,
+        command_id="command:chapter",
         course_id="course:e2e",
         chapter_key="limits",
         anchor_ids=[anchor.anchor_id],
@@ -843,20 +1572,58 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     )
     await workflow.generate_chapter(
         run=chapter_run,
+        command_id="command:chapter",
         course_id="course:e2e",
         chapter_key="limits",
         anchor_ids=[anchor.anchor_id],
         model=selection,
         prompt_version="v1",
     )
-    assert len(adapter.calls) == 2
-    assert len(chapters) == 1
-    assert len(labs) == 1
+    forced_chapter_run = chapter_run.model_copy(
+        update={
+            "id": "course_generation_run:chapter-force",
+            "status": "running",
+            "command": None,
+            "output_hash": None,
+        }
+    )
+    second_chapter = await workflow.generate_chapter(
+        run=forced_chapter_run,
+        command_id="command:chapter-force",
+        course_id="course:e2e",
+        chapter_key="limits",
+        anchor_ids=[anchor.anchor_id],
+        model=selection,
+        prompt_version="v1",
+    )
+    replayed_first_chapter = await workflow.generate_chapter(
+        run=chapter_run,
+        command_id="command:chapter",
+        course_id="course:e2e",
+        chapter_key="limits",
+        anchor_ids=[anchor.anchor_id],
+        model=selection,
+        prompt_version="v1",
+    )
+    assert len(adapter.calls) == 3
+    assert [item.version_no for item in chapters] == [1, 2]
+    assert len(labs) == 2
+    assert link_refreshes == ["limits", "limits"]
+    assert replayed_first_chapter.id == chapter.id
+    assert second_chapter.id != chapter.id
+    chapter = second_chapter
 
     adapter.output = ReviewArtifact(findings=[])
     review_selection = ModelSelection(
         adapter="codex_cli", model="gpt-5.6-luna", reasoning_effort="max"
     )
+    review_args = {
+        "course_id": "course:e2e",
+        "chapter_key": "limits",
+        "anchor_ids": [anchor.anchor_id],
+        "prompt_version": "v1",
+        "model": review_selection.model_dump(mode="json"),
+    }
     review_run = CourseGenerationRun(
         id="course_generation_run:review",
         course="course:e2e",
@@ -869,10 +1636,22 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         reasoning_effort=review_selection.reasoning_effort,
         status="running",
         prompt_version="v1",
-        input_hash="3" * 64,
+        input_hash=module.generation_input_hash(
+            course_id="course:e2e",
+            stage="review",
+            command_args=review_args,
+            model=review_selection,
+            prompt_version="v1",
+            anchor_ids=[anchor.anchor_id],
+            source_hashes={"source:e2e": source_hash},
+            course_version_id=str(version.id),
+            chapter_id=str(chapter.id),
+            chapter_key="limits",
+        ),
     )
     reviewed, findings = await workflow.review_chapter(
         run=review_run,
+        command_id="command:review",
         course_id="course:e2e",
         chapter_key="limits",
         anchor_ids=[anchor.anchor_id],
@@ -881,6 +1660,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     )
     await workflow.review_chapter(
         run=review_run,
+        command_id="command:review",
         course_id="course:e2e",
         chapter_key="limits",
         anchor_ids=[anchor.anchor_id],
@@ -888,10 +1668,33 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         prompt_version="v1",
     )
     assert findings == []
-    assert len(adapter.calls) == 3
+    assert len(adapter.calls) == 4
     assert reviewed.status == "ready"
 
     published = await CourseService.publish_chapter(
         "course:e2e", str(version.id), str(chapter.id)
     )
     assert published.status == "published"
+    side_effect_counts = (len(adapter.calls), len(labs), len(link_refreshes))
+    replayed_published = await workflow.generate_chapter(
+        run=forced_chapter_run,
+        command_id="command:chapter-force",
+        course_id="course:e2e",
+        chapter_key="limits",
+        anchor_ids=[anchor.anchor_id],
+        model=selection,
+        prompt_version="v1",
+    )
+    replayed_review, replayed_findings = await workflow.review_chapter(
+        run=review_run,
+        command_id="command:review",
+        course_id="course:e2e",
+        chapter_key="limits",
+        anchor_ids=[anchor.anchor_id],
+        model=review_selection,
+        prompt_version="v1",
+    )
+    assert replayed_published.id == published.id
+    assert replayed_review.id == published.id
+    assert replayed_findings == []
+    assert (len(adapter.calls), len(labs), len(link_refreshes)) == side_effect_counts

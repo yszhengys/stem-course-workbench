@@ -76,8 +76,14 @@ def _command_id(input_data: StrictCourseCommandInput) -> str | None:
     return str(context.command_id) if context else None
 
 
-async def _permanent_failure(run, exc: Exception) -> None:
-    await _workflow.fail_run(run, str(exc))
+async def _permanent_failure(
+    input_data: StrictCourseCommandInput, exc: Exception
+) -> None:
+    await _workflow.fail_run_reference(
+        run_id=input_data.run_id,
+        command_id=_command_id(input_data) or "",
+        message=str(exc),
+    )
 
 
 def _is_permanent_adapter_failure(exc: AdapterError) -> bool:
@@ -98,10 +104,10 @@ def _is_permanent_adapter_failure(exc: AdapterError) -> bool:
 
 
 async def _handle_adapter_failure(
-    run, exc: AdapterError
+    input_data: StrictCourseCommandInput, exc: AdapterError
 ) -> NoReturn:
     if _is_permanent_adapter_failure(exc):
-        await _permanent_failure(run, exc)
+        await _permanent_failure(input_data, exc)
         raise ValueError(str(exc)) from exc
     raise exc
 
@@ -110,24 +116,26 @@ async def _handle_adapter_failure(
 async def course_build_evidence_command(
     input_data: CourseEvidenceInput,
 ) -> CourseCommandOutput:
-    run = await _workflow.load_run(
-        run_id=input_data.run_id,
-        course_id=input_data.course_id,
-        stage="evidence",
-        command_id=_command_id(input_data),
-    )
+    command_id = _command_id(input_data)
     try:
+        run = await _workflow.load_run(
+            run_id=input_data.run_id,
+            course_id=input_data.course_id,
+            stage="evidence",
+            command_id=command_id,
+        )
         anchors = await _workflow.build_evidence(
             run=run,
+            command_id=command_id or "",
             course_id=input_data.course_id,
             source_id=input_data.source_id,
             role=input_data.role,
         )
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
-        await _permanent_failure(run, exc)
+        await _permanent_failure(input_data, exc)
         raise ValueError(str(exc)) from exc
     except AdapterError as exc:
-        await _handle_adapter_failure(run, exc)
+        await _handle_adapter_failure(input_data, exc)
     return CourseCommandOutput(
         success=True,
         run_id=input_data.run_id,
@@ -139,15 +147,17 @@ async def course_build_evidence_command(
 async def course_generate_outline_command(
     input_data: CourseOutlineInput,
 ) -> CourseCommandOutput:
-    run = await _workflow.load_run(
-        run_id=input_data.run_id,
-        course_id=input_data.course_id,
-        stage="outline",
-        command_id=_command_id(input_data),
-    )
+    command_id = _command_id(input_data)
     try:
+        run = await _workflow.load_run(
+            run_id=input_data.run_id,
+            course_id=input_data.course_id,
+            stage="outline",
+            command_id=command_id,
+        )
         version = await _workflow.generate_outline(
             run=run,
+            command_id=command_id or "",
             course_id=input_data.course_id,
             anchor_ids=input_data.anchor_ids,
             available_lab_keys=input_data.available_lab_keys,
@@ -155,10 +165,10 @@ async def course_generate_outline_command(
             prompt_version=input_data.prompt_version,
         )
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
-        await _permanent_failure(run, exc)
+        await _permanent_failure(input_data, exc)
         raise ValueError(str(exc)) from exc
     except AdapterError as exc:
-        await _handle_adapter_failure(run, exc)
+        await _handle_adapter_failure(input_data, exc)
     return CourseCommandOutput(
         success=True, run_id=input_data.run_id, artifact_id=str(version.id)
     )
@@ -168,15 +178,17 @@ async def course_generate_outline_command(
 async def course_generate_chapter_command(
     input_data: CourseChapterInput,
 ) -> CourseCommandOutput:
-    run = await _workflow.load_run(
-        run_id=input_data.run_id,
-        course_id=input_data.course_id,
-        stage="chapter_content",
-        command_id=_command_id(input_data),
-    )
+    command_id = _command_id(input_data)
     try:
+        run = await _workflow.load_run(
+            run_id=input_data.run_id,
+            course_id=input_data.course_id,
+            stage="chapter_content",
+            command_id=command_id,
+        )
         chapter = await _workflow.generate_chapter(
             run=run,
+            command_id=command_id or "",
             course_id=input_data.course_id,
             chapter_key=input_data.chapter_key,
             anchor_ids=input_data.anchor_ids,
@@ -184,10 +196,10 @@ async def course_generate_chapter_command(
             prompt_version=input_data.prompt_version,
         )
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
-        await _permanent_failure(run, exc)
+        await _permanent_failure(input_data, exc)
         raise ValueError(str(exc)) from exc
     except AdapterError as exc:
-        await _handle_adapter_failure(run, exc)
+        await _handle_adapter_failure(input_data, exc)
     return CourseCommandOutput(
         success=True, run_id=input_data.run_id, artifact_id=str(chapter.id)
     )
@@ -197,15 +209,17 @@ async def course_generate_chapter_command(
 async def course_review_chapter_command(
     input_data: CourseChapterInput,
 ) -> CourseCommandOutput:
-    run = await _workflow.load_run(
-        run_id=input_data.run_id,
-        course_id=input_data.course_id,
-        stage="review",
-        command_id=_command_id(input_data),
-    )
+    command_id = _command_id(input_data)
     try:
+        run = await _workflow.load_run(
+            run_id=input_data.run_id,
+            course_id=input_data.course_id,
+            stage="review",
+            command_id=command_id,
+        )
         chapter, findings = await _workflow.review_chapter(
             run=run,
+            command_id=command_id or "",
             course_id=input_data.course_id,
             chapter_key=input_data.chapter_key,
             anchor_ids=input_data.anchor_ids,
@@ -213,10 +227,10 @@ async def course_review_chapter_command(
             prompt_version=input_data.prompt_version,
         )
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
-        await _permanent_failure(run, exc)
+        await _permanent_failure(input_data, exc)
         raise ValueError(str(exc)) from exc
     except AdapterError as exc:
-        await _handle_adapter_failure(run, exc)
+        await _handle_adapter_failure(input_data, exc)
     return CourseCommandOutput(
         success=True,
         run_id=input_data.run_id,
