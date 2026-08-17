@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tanstack/react-query'
 import { useCallback, useMemo } from 'react'
-import { sourcesApi } from '@/lib/api/sources'
+import { sourcesApi, type SourceSortField } from '@/lib/api/sources'
 import { QUERY_KEYS } from '@/lib/api/query-client'
 import { useToast } from '@/lib/hooks/use-toast'
 import { useTranslation } from '@/lib/hooks/use-translation'
@@ -14,6 +14,7 @@ import {
 } from '@/lib/types/api'
 
 const NOTEBOOK_SOURCES_PAGE_SIZE = 30
+const ALL_SOURCES_PAGE_SIZE = 30
 
 export function useSources(notebookId?: string) {
   return useQuery({
@@ -70,6 +71,61 @@ export function useNotebookSources(notebookId: string) {
     isLoading: query.isLoading,
     isFetchingNextPage: query.isFetchingNextPage,
     hasNextPage: query.hasNextPage,
+    fetchNextPage: query.fetchNextPage,
+    refetch,
+    error: query.error,
+  }
+}
+
+/**
+ * All-sources page list: scroll-based infinite loading with sortable fields.
+ * Preserves the sources page's original semantics — fresh fetch on mount and
+ * on every sort change (staleTime 0, no window-focus refetch, no retry), and
+ * lives under the ['sources'] prefix so mutations that invalidate it refresh
+ * the page automatically.
+ */
+export function useAllSourcesPage(sortBy: SourceSortField, sortOrder: 'asc' | 'desc') {
+  const queryClient = useQueryClient()
+
+  const query = useInfiniteQuery({
+    queryKey: ['sources', 'page', sortBy, sortOrder],
+    queryFn: async ({ pageParam = 0 }) => {
+      const data = await sourcesApi.list({
+        limit: ALL_SOURCES_PAGE_SIZE,
+        offset: pageParam,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+      })
+      return {
+        sources: data,
+        nextOffset:
+          data.length === ALL_SOURCES_PAGE_SIZE
+            ? pageParam + data.length
+            : undefined,
+      }
+    },
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => lastPage.nextOffset,
+    staleTime: 0,
+    refetchOnWindowFocus: false,
+    retry: false,
+  })
+
+  // Flatten all pages into a single array (memoized to prevent re-renders)
+  const sources: SourceListResponse[] = useMemo(
+    () => query.data?.pages.flatMap((page) => page.sources) ?? [],
+    [query.data?.pages]
+  )
+
+  const refetch = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['sources', 'page'] })
+  }, [queryClient])
+
+  return {
+    sources,
+    isLoading: query.isLoading,
+    isFetchingNextPage: query.isFetchingNextPage,
+    hasNextPage: !!query.hasNextPage,
     fetchNextPage: query.fetchNextPage,
     refetch,
     error: query.error,

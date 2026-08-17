@@ -28,6 +28,9 @@ export function useAuth() {
           if (required) {
             checkAuth()
           }
+        }).catch(() => {
+          // The store already logs the failure and sets authRequired/error;
+          // swallowing here only prevents an unhandled-rejection.
         })
       } else if (authRequired) {
         // Auth is required, check credentials

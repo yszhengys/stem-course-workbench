@@ -18,7 +18,7 @@ Usage:
 from typing import Any, ClassVar, Dict, List, Optional
 
 from loguru import logger
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.base import ObjectModel
@@ -56,7 +56,7 @@ class Credential(ObjectModel):
 
     name: str
     provider: str
-    modalities: List[str] = []
+    modalities: List[str] = Field(default_factory=list)
     api_key: Optional[SecretStr] = None
     decryption_error: Optional[str] = None
     base_url: Optional[str] = None

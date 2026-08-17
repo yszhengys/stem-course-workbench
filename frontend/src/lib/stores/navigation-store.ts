@@ -11,16 +11,26 @@ interface NavigationState {
       timestamp?: number
     }
   }
+  hasHydrated: boolean
+  setHasHydrated: (hydrated: boolean) => void
   setReturnTo: (path: string, label: string, preserveState?: object) => void
   clearReturnTo: () => void
   getReturnPath: () => string
   getReturnLabel: () => string
 }
 
+// sessionStorage cannot be mirrored to the server (it is per-tab), so unlike
+// the cookie-backed preference stores this one hydrates client-side with
+// skipHydration + hasHydrated: SSR and the first client render both use the
+// defaults (no mismatch), then the stored per-tab value applies. Consumers
+// render the fallback ("Back to Sources") until hasHydrated is true.
 export const useNavigationStore = create<NavigationState>()(
   persist(
     (set, get) => ({
       returnTo: undefined,
+      hasHydrated: false,
+
+      setHasHydrated: (hydrated: boolean) => set({ hasHydrated: hydrated }),
 
       setReturnTo: (path, label, preserveState) => set({
         returnTo: {
@@ -35,15 +45,17 @@ export const useNavigationStore = create<NavigationState>()(
 
       clearReturnTo: () => set({ returnTo: undefined }),
 
+      // Pure getters: staleness is handled by falling back without mutating
+      // the store — a set() here used to run during render (React warning /
+      // re-render loop risk). The stale entry is simply overwritten on the
+      // next setReturnTo.
       getReturnPath: () => {
-        const state = get()
-        const returnTo = state.returnTo
+        const returnTo = get().returnTo
 
         // Check if context is stale (older than 1 hour)
         if (returnTo?.preserveState?.timestamp) {
           const isStale = Date.now() - returnTo.preserveState.timestamp > 3600000
           if (isStale) {
-            set({ returnTo: undefined })
             return '/sources'
           }
         }
@@ -52,14 +64,12 @@ export const useNavigationStore = create<NavigationState>()(
       },
 
       getReturnLabel: () => {
-        const state = get()
-        const returnTo = state.returnTo
+        const returnTo = get().returnTo
 
         // Check if context is stale (older than 1 hour)
         if (returnTo?.preserveState?.timestamp) {
           const isStale = Date.now() - returnTo.preserveState.timestamp > 3600000
           if (isStale) {
-            set({ returnTo: undefined })
             return 'Back to Sources'
           }
         }
@@ -69,6 +79,10 @@ export const useNavigationStore = create<NavigationState>()(
     }),
     {
       name: 'navigation-storage',
+      skipHydration: true,
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true)
+      },
       storage: {
         getItem: (name: string) => {
           try {

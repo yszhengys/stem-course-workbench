@@ -11,9 +11,9 @@ export const queryClient = new QueryClient({
       retry: (failureCount, error) => !isNotFoundError(error) && failureCount < 2,
       refetchOnWindowFocus: false,
     },
-    mutations: {
-      retry: 1,
-    },
+    // Mutations must never auto-retry (project rule: no automatic request
+    // retry) — a retried POST/DELETE duplicates side effects (sources,
+    // podcast jobs). TanStack Query's default is 0; nothing to configure.
   },
 })
 

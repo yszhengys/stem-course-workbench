@@ -73,10 +73,61 @@ export function useAsk() {
       const decoder = new TextDecoder()
       let buffer = ''
 
+      // Handle one complete `data: ` line. Buffer discipline above (keep the
+      // last incomplete line between reads) is unchanged; incomplete trailing
+      // JSON is still silently skipped by the SyntaxError catch.
+      const handleLine = (line: string) => {
+        if (!line.startsWith('data: ')) return
+        try {
+          const jsonStr = line.slice(6).trim()
+          if (!jsonStr) return
+
+          const data: AskStreamEvent = JSON.parse(jsonStr)
+
+          if (data.type === 'strategy') {
+            setState(prev => ({
+              ...prev,
+              strategy: {
+                reasoning: data.reasoning || '',
+                searches: data.searches || []
+              }
+            }))
+          } else if (data.type === 'answer') {
+            setState(prev => ({
+              ...prev,
+              answers: [...prev.answers, data.content || '']
+            }))
+          } else if (data.type === 'final_answer') {
+            setState(prev => ({
+              ...prev,
+              finalAnswer: data.content || '',
+              isStreaming: false
+            }))
+          } else if (data.type === 'complete') {
+            setState(prev => ({
+              ...prev,
+              isStreaming: false
+            }))
+          } else if (data.type === 'error') {
+            throw new Error(data.message || 'Stream error occurred')
+          }
+        } catch (e) {
+          if (e instanceof SyntaxError) {
+            console.error('Error parsing SSE data:', e, 'Line:', line)
+            // Don't throw - continue processing other lines
+          } else {
+            throw e
+          }
+        }
+      }
+
       while (true) {
         const { done, value } = await reader.read()
 
         if (done) {
+          // Flush a final complete line that arrived without a trailing
+          // newline — it would otherwise be lost.
+          handleLine(buffer)
           break
         }
 
@@ -87,49 +138,7 @@ export function useAsk() {
         buffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const jsonStr = line.slice(6).trim()
-              if (!jsonStr) continue
-
-              const data: AskStreamEvent = JSON.parse(jsonStr)
-
-              if (data.type === 'strategy') {
-                setState(prev => ({
-                  ...prev,
-                  strategy: {
-                    reasoning: data.reasoning || '',
-                    searches: data.searches || []
-                  }
-                }))
-              } else if (data.type === 'answer') {
-                setState(prev => ({
-                  ...prev,
-                  answers: [...prev.answers, data.content || '']
-                }))
-              } else if (data.type === 'final_answer') {
-                setState(prev => ({
-                  ...prev,
-                  finalAnswer: data.content || '',
-                  isStreaming: false
-                }))
-              } else if (data.type === 'complete') {
-                setState(prev => ({
-                  ...prev,
-                  isStreaming: false
-                }))
-              } else if (data.type === 'error') {
-                throw new Error(data.message || 'Stream error occurred')
-              }
-            } catch (e) {
-              if (e instanceof SyntaxError) {
-                console.error('Error parsing SSE data:', e, 'Line:', line)
-                // Don't throw - continue processing other lines
-              } else {
-                throw e
-              }
-            }
-          }
+          handleLine(line)
         }
       }
 

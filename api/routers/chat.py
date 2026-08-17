@@ -147,7 +147,7 @@ async def create_session(request: CreateSessionRequest):
         # Create new session
         session = ChatSession(
             title=request.title
-            or f"Chat Session {asyncio.get_event_loop().time():.0f}",
+            or f"Chat Session {asyncio.get_running_loop().time():.0f}",
             model_override=request.model_override,
         )
         await session.save()

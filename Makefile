@@ -6,9 +6,9 @@
 # Get version from pyproject.toml
 VERSION := $(shell grep -m1 version pyproject.toml | cut -d'"' -f2)
 
-# Image names for both registries
-DOCKERHUB_IMAGE := lfnovo/open_notebook
-GHCR_IMAGE := ghcr.io/lfnovo/open-notebook
+# Image names for both registries (fork namespace — do not push to upstream lfnovo images)
+DOCKERHUB_IMAGE := yszhengys/stem-course-workbench
+GHCR_IMAGE := ghcr.io/yszhengys/stem-course-workbench
 
 # Build platforms
 PLATFORMS := linux/amd64,linux/arm64
@@ -73,7 +73,7 @@ docker-build-local:
 		-t $(DOCKERHUB_IMAGE):local \
 		.
 	@echo "✅ Built $(DOCKERHUB_IMAGE):$(VERSION) and $(DOCKERHUB_IMAGE):local"
-	@echo "Run with: docker run -p 5055:5055 -p 3000:3000 $(DOCKERHUB_IMAGE):local"
+	@echo "Run with: docker run -p 5055:5055 -p 8502:8502 $(DOCKERHUB_IMAGE):local"
 
 # Build and push version tags ONLY (no latest) for both regular and single images
 docker-push: docker-buildx-prepare
@@ -175,11 +175,12 @@ worker-restart: worker-stop
 # === Service Management ===
 start-all:
 	@echo "🚀 Starting Open Notebook (Database + API + Worker + Frontend)..."
+	@test -f .env || (echo "❌ No .env file — run: cp .env.example .env  (host runs need SURREAL_URL=ws://127.0.0.1:8000/rpc)"; exit 1)
 	@echo "📊 Starting SurrealDB..."
-	@docker compose -f docker-compose.dev.yml up -d surrealdb
+	@docker compose up -d surrealdb
 	@sleep 3
 	@echo "🔧 Starting API backend..."
-	@uv run run_api.py &
+	@uv run --env-file .env run_api.py &
 	@sleep 3
 	@echo "⚙️ Starting background worker..."
 	@uv run --env-file .env surreal-commands-worker --import-modules commands --max-tasks "$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}" &
@@ -193,10 +194,16 @@ start-all:
 
 stop-all:
 	@echo "🛑 Stopping all Open Notebook services..."
-	@pkill -f "next dev" || true
-	@pkill -f "surreal-commands-worker" || true
+	@# Kill API parents first: uvicorn --reload respawns its child if only the
+	@# port-holder dies. Then release the standard frontend/API ports. Caveat:
+	@# the name-based pkill also matches other checkouts of this repo on the
+	@# same host — when several checkouts share a machine, prefer stopping via
+	@# dev-init.sh (Ctrl+C), which only touches what it started.
 	@pkill -f "run_api.py" || true
 	@pkill -f "uvicorn api.main:app" || true
+	@lsof -t -i :5055 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
+	@lsof -t -i :3000 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
+	@pkill -f "surreal-commands-worker" || true
 	@docker compose down
 	@echo "✅ All services stopped!"
 
@@ -205,11 +212,11 @@ status:
 	@echo "Database (SurrealDB):"
 	@docker compose ps surrealdb 2>/dev/null || echo "  ❌ Not running"
 	@echo "API Backend:"
-	@pgrep -f "run_api.py\|uvicorn api.main:app" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
+	@lsof -t -i :5055 -sTCP:LISTEN >/dev/null 2>&1 && echo "  ✅ Running (port 5055)" || echo "  ❌ Not running"
 	@echo "Background Worker:"
 	@pgrep -f "surreal-commands-worker" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
 	@echo "Next.js Frontend:"
-	@pgrep -f "next dev" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
+	@lsof -t -i :3000 -sTCP:LISTEN >/dev/null 2>&1 && echo "  ✅ Running (port 3000)" || echo "  ❌ Not running"
 
 # === Documentation Export ===
 export-docs:

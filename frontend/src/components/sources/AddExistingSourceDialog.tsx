@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useDebounce } from 'use-debounce'
 import { Search, Link2, LoaderIcon, FileText, Link as LinkIcon, Upload } from 'lucide-react'
 import {
@@ -39,9 +40,30 @@ export function AddExistingSourceDialog({
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedSearchQuery] = useDebounce(searchQuery, 300)
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([])
-  const [allSources, setAllSources] = useState<SourceListResponse[]>([])
   const [filteredSources, setFilteredSources] = useState<SourceListResponse[]>([])
   const [isSearching, setIsSearching] = useState(false)
+
+  // All-sources list via React Query (replaces the manual loadAllSources):
+  // lives under the ['sources'] prefix so create/delete invalidations refresh
+  // it, and refetches each time the dialog opens (staleTime 0).
+  const allSourcesQuery = useQuery({
+    queryKey: ['sources', 'all'],
+    queryFn: () =>
+      sourcesApi.list({
+        limit: 100,
+        offset: 0,
+        sort_by: 'created',
+        sort_order: 'desc',
+      }),
+    enabled: open,
+    staleTime: 0,
+    retry: false,
+  })
+  const allSources = useMemo(
+    () => allSourcesQuery.data ?? [],
+    [allSourcesQuery.data]
+  )
+  const isLoadingAll = allSourcesQuery.isPending
 
   // Get sources already in this notebook
   const { data: currentNotebookSources } = useSources(notebookId)
@@ -51,26 +73,6 @@ export function AddExistingSourceDialog({
   )
 
   const addSources = useAddSourcesToNotebook()
-
-  const loadAllSources = useCallback(async () => {
-    try {
-      setIsSearching(true)
-      // Use sources API directly to get all sources (max 100 per API limit)
-      const sources = await sourcesApi.list({
-        limit: 100,
-        offset: 0,
-        sort_by: 'created',
-        sort_order: 'desc',
-      })
-
-      setAllSources(sources)
-      setFilteredSources(sources)
-    } catch (error) {
-      console.error('Error loading sources:', error)
-    } finally {
-      setIsSearching(false)
-    }
-  }, [])
 
   const performSearch = useCallback(async () => {
     if (!debouncedSearchQuery.trim()) {
@@ -114,13 +116,6 @@ export function AddExistingSourceDialog({
       setIsSearching(false)
     }
   }, [debouncedSearchQuery, allSources])
-
-  // Load all sources initially
-  useEffect(() => {
-    if (open) {
-      loadAllSources()
-    }
-  }, [open, loadAllSources])
 
   // Filter sources when search query changes
   useEffect(() => {
@@ -203,14 +198,14 @@ export function AddExistingSourceDialog({
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-10"
             />
-            {isSearching && (
+            {(isSearching || isLoadingAll) && (
               <LoaderIcon className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
             )}
           </div>
 
           {/* Source List */}
           <ScrollArea className="h-[400px] border rounded-md">
-            {isSearching && filteredSources.length === 0 ? (
+            {(isSearching || isLoadingAll) && filteredSources.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-[200px] text-muted-foreground">
                 <LoaderIcon className="h-12 w-12 mb-2 animate-spin" />
                 <p>{t('common.loading')}</p>
