@@ -1,4 +1,4 @@
-.PHONY: run frontend check ruff database lint api start-all stop-all status clean-cache worker worker-start worker-stop worker-restart
+.PHONY: run frontend check ruff database lint api start-all stop-all status clean-cache worker worker-start
 .PHONY: docker-buildx-prepare docker-buildx-clean docker-buildx-reset
 .PHONY: docker-push docker-push-latest docker-release docker-build-local tag export-docs
 .PHONY: release-test release-stack release-stack-down
@@ -154,69 +154,25 @@ full:
 
 
 api:
-	uv run --env-file .env run_api.py
+	API_RELOAD=false ./.tools/bin/uv run --env-file .env python run_api.py
 
-.PHONY: worker worker-start worker-stop worker-restart
+.PHONY: worker worker-start
 
 worker: worker-start
 
 worker-start:
 	@echo "Starting surreal-commands worker..."
-	uv run --env-file .env surreal-commands-worker --import-modules commands --max-tasks "$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}"
-
-worker-stop:
-	@echo "Stopping surreal-commands worker..."
-	pkill -f "surreal-commands-worker" || true
-
-worker-restart: worker-stop
-	@sleep 2
-	@$(MAKE) worker-start
+	./.tools/bin/uv run --env-file .env surreal-commands-worker --import-modules commands --max-tasks "$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}"
 
 # === Service Management ===
 start-all:
-	@echo "🚀 Starting Open Notebook (Database + API + Worker + Frontend)..."
-	@test -f .env || (echo "❌ No .env file — run: cp .env.example .env  (host runs need SURREAL_URL=ws://127.0.0.1:8000/rpc)"; exit 1)
-	@echo "📊 Starting SurrealDB..."
-	@docker compose up -d surrealdb
-	@sleep 3
-	@echo "🔧 Starting API backend..."
-	@uv run --env-file .env run_api.py &
-	@sleep 3
-	@echo "⚙️ Starting background worker..."
-	@uv run --env-file .env surreal-commands-worker --import-modules commands --max-tasks "$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}" &
-	@sleep 2
-	@echo "🌐 Starting Next.js frontend..."
-	@echo "✅ All services started!"
-	@echo "📱 Frontend: http://localhost:3000"
-	@echo "🔗 API: http://localhost:5055"
-	@echo "📚 API Docs: http://localhost:5055/docs"
-	cd frontend && npm run dev
+	./scripts/course-workbench.sh start
 
 stop-all:
-	@echo "🛑 Stopping all Open Notebook services..."
-	@# Kill API parents first: uvicorn --reload respawns its child if only the
-	@# port-holder dies. Then release the standard frontend/API ports. Caveat:
-	@# the name-based pkill also matches other checkouts of this repo on the
-	@# same host — when several checkouts share a machine, prefer stopping via
-	@# dev-init.sh (Ctrl+C), which only touches what it started.
-	@pkill -f "run_api.py" || true
-	@pkill -f "uvicorn api.main:app" || true
-	@lsof -t -i :5055 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
-	@lsof -t -i :3000 -sTCP:LISTEN 2>/dev/null | xargs kill 2>/dev/null || true
-	@pkill -f "surreal-commands-worker" || true
-	@docker compose down
-	@echo "✅ All services stopped!"
+	./scripts/course-workbench.sh stop
 
 status:
-	@echo "📊 Open Notebook Service Status:"
-	@echo "Database (SurrealDB):"
-	@docker compose ps surrealdb 2>/dev/null || echo "  ❌ Not running"
-	@echo "API Backend:"
-	@lsof -t -i :5055 -sTCP:LISTEN >/dev/null 2>&1 && echo "  ✅ Running (port 5055)" || echo "  ❌ Not running"
-	@echo "Background Worker:"
-	@pgrep -f "surreal-commands-worker" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
-	@echo "Next.js Frontend:"
-	@lsof -t -i :3000 -sTCP:LISTEN >/dev/null 2>&1 && echo "  ✅ Running (port 3000)" || echo "  ❌ Not running"
+	./scripts/course-workbench.sh status
 
 # === Documentation Export ===
 export-docs:
