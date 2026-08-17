@@ -18,6 +18,25 @@ ProvenanceLabel: TypeAlias = Literal[
 ]
 
 
+def _validate_generated_text(value: str) -> str:
+    lowered = value.lower()
+    if (
+        "```" in value
+        or "javascript:" in lowered
+        or re.search(r"<[/!]?[A-Za-z][^>]*>", value)
+    ):
+        raise ValueError("generated text must not contain executable code or HTML")
+    return value
+
+
+def _validate_generated_texts(values: list[str]) -> list[str]:
+    return [_validate_generated_text(value) for value in values]
+
+
+def _validate_optional_generated_text(value: str | None) -> str | None:
+    return _validate_generated_text(value) if value is not None else None
+
+
 class SourceLocator(CourseContract):
     source_id: str = Field(min_length=1)
     kind: Literal["pdf_page", "pptx_slide"]
@@ -66,6 +85,8 @@ class ConceptNode(CourseContract):
     label: str = Field(min_length=1, max_length=300)
     anchor_ids: list[str] = Field(min_length=1, max_length=100)
 
+    _safe_label = field_validator("label")(_validate_generated_text)
+
 
 class DependencyEdge(CourseContract):
     from_key: str = Field(min_length=1, max_length=100)
@@ -81,12 +102,16 @@ class OutlineChapter(CourseContract):
     anchor_ids: list[str] = Field(min_length=1, max_length=100)
     lab_keys: list[str] = Field(default_factory=list, max_length=20)
 
+    _safe_text = field_validator("title", "purpose")(_validate_generated_text)
+
 
 class CourseOutlineArtifact(CourseContract):
     title: str = Field(min_length=1, max_length=300)
     chapters: list[OutlineChapter] = Field(min_length=1, max_length=200)
     concepts: list[ConceptNode] = Field(default_factory=list, max_length=1000)
     dependency_edges: list[DependencyEdge] = Field(default_factory=list, max_length=2000)
+
+    _safe_title = field_validator("title")(_validate_generated_text)
 
     @model_validator(mode="after")
     def graph_is_well_formed(self) -> "CourseOutlineArtifact":
@@ -129,9 +154,15 @@ class FormulaArtifact(CourseContract):
     meaning: str = Field(min_length=1, max_length=2000)
     anchor_ids: list[str] = Field(min_length=1, max_length=100)
     unit_expression: str | None = Field(default=None, max_length=500)
+    oracle_unit_expression: str | None = Field(default=None, max_length=500)
     provenance: ProvenanceLabel = "derived"
     oracle_expression: str | None = Field(default=None, max_length=1000)
     oracle_substitutions: dict[str, float] = Field(default_factory=dict, max_length=20)
+
+    _safe_text = field_validator("latex", "meaning")(_validate_generated_text)
+    _safe_optional_text = field_validator(
+        "unit_expression", "oracle_unit_expression", "oracle_expression"
+    )(_validate_optional_generated_text)
 
 
 class WorkedExampleArtifact(CourseContract):
@@ -143,7 +174,15 @@ class WorkedExampleArtifact(CourseContract):
     oracle_expression: str | None = Field(default=None, max_length=1000)
     oracle_values: dict[str, float] = Field(default_factory=dict, max_length=20)
     oracle_answer: float | None = None
+    unit_expression: str | None = Field(default=None, max_length=500)
+    oracle_unit_expression: str | None = Field(default=None, max_length=500)
     provenance: ProvenanceLabel = "derived"
+
+    _safe_text = field_validator("prompt", "answer")(_validate_generated_text)
+    _safe_steps = field_validator("steps")(_validate_generated_texts)
+    _safe_optional_text = field_validator(
+        "oracle_expression", "unit_expression", "oracle_unit_expression"
+    )(_validate_optional_generated_text)
 
 
 class ExerciseArtifact(CourseContract):
@@ -159,6 +198,14 @@ class ExerciseArtifact(CourseContract):
     oracle_answer: float | None = None
     provenance: ProvenanceLabel = "pedagogical"
 
+    _safe_text = field_validator(
+        "prompt", "answer", "transfer_task"
+    )(_validate_generated_text)
+    _safe_hints = field_validator("hints")(_validate_generated_texts)
+    _safe_oracle_expression = field_validator("oracle_expression")(
+        _validate_optional_generated_text
+    )
+
 
 def _validate_bounded_lab_value(value: object, *, depth: int = 0) -> None:
     if depth > 5:
@@ -166,6 +213,7 @@ def _validate_bounded_lab_value(value: object, *, depth: int = 0) -> None:
     if isinstance(value, str):
         if len(value) > 4000:
             raise ValueError("lab object string is too long")
+        _validate_generated_text(value)
         return
     if value is None or isinstance(value, (bool, int, float)):
         if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -198,6 +246,11 @@ class LabControl(CourseContract):
     value: float = Field(ge=-1_000_000, le=1_000_000)
     step: float | None = Field(default=None, gt=0, le=1_000_000)
 
+    @field_validator("label")
+    @classmethod
+    def label_is_safe(cls, value: str | None) -> str | None:
+        return _validate_optional_generated_text(value)
+
 
 class LabSpec(CourseContract):
     """Common bounded, declarative lab payload; never contains executable code."""
@@ -212,11 +265,14 @@ class LabSpec(CourseContract):
     controls: list[LabControl] = Field(default_factory=list, max_length=8)
     objects: list[dict[str, object]] = Field(default_factory=list, max_length=8)
 
+    _safe_title = field_validator("title")(_validate_generated_text)
+
     @field_validator("expressions")
     @classmethod
     def expressions_are_bounded(cls, values: list[str]) -> list[str]:
         forbidden = ("__", "import", "eval", "exec", "Function", "window", ";")
         for expression in values:
+            _validate_generated_text(expression)
             if not 1 <= len(expression) <= 500 or any(
                 token in expression for token in forbidden
             ):
@@ -300,13 +356,9 @@ class ChapterSection(CourseContract):
     @field_validator("markdown")
     @classmethod
     def markdown_is_content_only(cls, value: str) -> str:
-        lowered = value.lower()
-        if "```" in value or any(
-            token in lowered
-            for token in ("<script", "<iframe", "<object", "javascript:")
-        ) or re.search(r"<[/!]?[A-Za-z][^>]*>", value):
-            raise ValueError("chapter sections must not contain executable code or HTML")
-        return value
+        return _validate_generated_text(value)
+
+    _safe_title = field_validator("title")(_validate_generated_text)
 
 
 class ChapterArtifact(CourseContract):
@@ -325,6 +377,16 @@ class ChapterArtifact(CourseContract):
     quick_reference: list[str] = Field(default_factory=list, max_length=100)
     citations: list[str] = Field(default_factory=list, max_length=500)
 
+    _safe_purpose = field_validator("purpose")(_validate_generated_text)
+    _safe_text_lists = field_validator(
+        "prerequisites",
+        "objectives",
+        "definitions",
+        "misconceptions",
+        "pitfalls",
+        "quick_reference",
+    )(_validate_generated_texts)
+
 
 class ValidationFinding(CourseContract):
     kind: Literal["citation", "formula", "unit", "numeric", "physics", "lab", "review"]
@@ -337,6 +399,13 @@ class ValidationFinding(CourseContract):
     message: str = Field(min_length=1, max_length=4000)
     reviewer_run_id: str | None = None
     resolution_reason: str | None = Field(default=None, max_length=2000)
+
+    _safe_message = field_validator("message")(_validate_generated_text)
+
+    @field_validator("resolution_reason")
+    @classmethod
+    def resolution_reason_is_safe(cls, value: str | None) -> str | None:
+        return _validate_optional_generated_text(value)
 
 
 class ReviewArtifact(CourseContract):

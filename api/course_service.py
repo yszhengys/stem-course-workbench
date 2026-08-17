@@ -148,8 +148,9 @@ class CourseService:
                 "adapter": "open_notebook",
                 "model": str(model.id),
                 "reasoning_effort": None,
-                "optional": False,
+                "optional": model.provider == "deepseek",
                 "configured": True,
+                "selectable": True,
                 "name": model.name,
                 "provider": model.provider,
             }
@@ -157,20 +158,24 @@ class CourseService:
                 configured_models,
                 key=lambda item: (item.provider, item.name, str(item.id)),
             )
+            if model.id is not None
         )
         deepseek_configured = any(
             model.provider == "deepseek" and model.name == "deepseek-v4-pro"
             for model in configured_models
         )
-        options.append(
-            {
-                "adapter": "open_notebook",
-                "model": "deepseek-v4-pro",
-                "reasoning_effort": None,
-                "optional": True,
-                "configured": deepseek_configured,
-            }
-        )
+        if not deepseek_configured:
+            options.append(
+                {
+                    "adapter": "open_notebook",
+                    "model": None,
+                    "display_name": "deepseek-v4-pro",
+                    "reasoning_effort": None,
+                    "optional": True,
+                    "configured": False,
+                    "selectable": False,
+                }
+            )
         return {
             "defaults": {
                 stage: selection.model_dump(mode="json")

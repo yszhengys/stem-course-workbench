@@ -66,6 +66,30 @@ class EvidenceService:
     _quote_hash = quote_sha256
 
     @staticmethod
+    def deterministic_anchor_id(
+        *,
+        course_id: str,
+        source_id: str,
+        source_sha256: str,
+        kind: str,
+        index: int,
+        block_key: str,
+        quote_sha256: str,
+    ) -> str:
+        stable_key = "|".join(
+            [
+                course_id,
+                source_id,
+                source_sha256,
+                kind,
+                str(index),
+                block_key,
+                quote_sha256,
+            ]
+        )
+        return f"anchor:{hashlib.sha256(stable_key.encode()).hexdigest()[:32]}"
+
+    @staticmethod
     def sha256_file(file_path: Path) -> str:
         digest = hashlib.sha256()
         with file_path.open("rb") as handle:
@@ -301,18 +325,15 @@ class EvidenceService:
     ) -> CourseEvidenceAnchor:
         normalized_quote = self.normalize_text(quote)
         quote_hash = self.quote_sha256(normalized_quote)
-        stable_key = "|".join(
-            [
-                course_id,
-                source_id,
-                source_sha256,
-                kind,
-                str(index),
-                block_key,
-                quote_hash,
-            ]
+        anchor_id = self.deterministic_anchor_id(
+            course_id=course_id,
+            source_id=source_id,
+            source_sha256=source_sha256,
+            kind=kind,
+            index=index,
+            block_key=block_key,
+            quote_sha256=quote_hash,
         )
-        anchor_id = f"anchor:{hashlib.sha256(stable_key.encode()).hexdigest()[:32]}"
         return CourseEvidenceAnchor(
             course=course_id,
             source=source_id,
@@ -379,6 +400,19 @@ class EvidenceService:
         if cls.quote_sha256(anchor.locator.quote) != anchor.quote_sha256:
             raise EvidenceInputError(
                 f"Evidence anchor {anchor.anchor_id} has a quote hash mismatch."
+            )
+        expected_anchor_id = cls.deterministic_anchor_id(
+            course_id=course_id,
+            source_id=anchor.source,
+            source_sha256=source_hash,
+            kind=anchor.locator.kind,
+            index=anchor.locator.index,
+            block_key=anchor.locator.block_key,
+            quote_sha256=anchor.quote_sha256,
+        )
+        if anchor.anchor_id != expected_anchor_id:
+            raise EvidenceInputError(
+                f"Evidence anchor {anchor.anchor_id} has an anchor ID mismatch."
             )
 
     @classmethod

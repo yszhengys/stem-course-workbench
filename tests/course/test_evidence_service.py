@@ -285,6 +285,32 @@ def test_integrity_helpers_reject_changed_quote_or_source_hash():
         )
 
 
+@pytest.mark.parametrize("tamper", ["quote_and_hash", "locator"])
+def test_integrity_recomputes_full_deterministic_anchor_id(tamper: str):
+    service = EvidenceService(data_root=Path("/tmp/course-evidence-test"))
+    source_hash = hashlib.sha256(b"original").hexdigest()
+    anchor = service.make_anchor(
+        course_id="course:one",
+        source_id="source:one",
+        source_sha256=source_hash,
+        kind="pdf_page",
+        index=1,
+        block_key="block",
+        quote="Grounded quote",
+        source_role="PRIMARY",
+    )
+    if tamper == "quote_and_hash":
+        anchor.locator.quote = "Replacement quote"
+        anchor.quote_sha256 = service.quote_sha256(anchor.locator.quote)
+    else:
+        anchor.locator.index = 2
+
+    with pytest.raises(EvidenceInputError, match="anchor ID"):
+        service.validate_anchor_integrity(
+            anchor, course_id="course:one", source_hash=source_hash
+        )
+
+
 def test_retrieval_context_contains_only_valid_current_selected_anchors():
     service = EvidenceService(data_root=Path("/tmp/course-evidence-test"))
     source_hash = hashlib.sha256(b"original").hexdigest()

@@ -1,4 +1,5 @@
 import hashlib
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -61,10 +62,12 @@ async def test_course_model_options_keep_defaults_and_deepseek_optional(monkeypa
     options = payload["options"]
     assert {
         "adapter": "open_notebook",
-        "model": "deepseek-v4-pro",
+        "model": None,
+        "display_name": "deepseek-v4-pro",
         "reasoning_effort": None,
         "optional": True,
         "configured": False,
+        "selectable": False,
     } in options
     assert any(
         option["adapter"] == "open_notebook"
@@ -90,8 +93,47 @@ async def test_course_model_options_keep_defaults_and_deepseek_optional(monkeypa
     )
 
 
+@pytest.mark.asyncio
+async def test_configured_deepseek_option_uses_real_id_and_stays_optional(monkeypatch):
+    configured = [
+        SimpleNamespace(
+            id="model:deepseek-v4-pro",
+            name="deepseek-v4-pro",
+            provider="deepseek",
+        )
+    ]
+
+    async def language_models(_model_type: str):
+        return configured
+
+    monkeypatch.setattr(
+        "api.course_service.Model.get_models_by_type", language_models
+    )
+    options = (await CourseService.get_model_options())["options"]
+    deepseek = [
+        option
+        for option in options
+        if option.get("provider") == "deepseek"
+        or option.get("display_name") == "deepseek-v4-pro"
+    ]
+
+    assert deepseek == [
+        {
+            "adapter": "open_notebook",
+            "model": "model:deepseek-v4-pro",
+            "reasoning_effort": None,
+            "optional": True,
+            "configured": True,
+            "selectable": True,
+            "name": "deepseek-v4-pro",
+            "provider": "deepseek",
+        }
+    ]
+    assert all(option.get("model") != "deepseek-v4-pro" for option in options)
+
+
 def test_generation_hash_helpers_are_canonical_and_do_not_expose_input():
-    expected_input = hashlib.sha256(b"outline\nanchor:one").hexdigest()
+    expected_input = hashlib.sha256(b'["outline","anchor:one"]').hexdigest()
     expected_output = hashlib.sha256(b'{"a":1,"b":2}').hexdigest()
 
     assert CourseGenerationService.input_hash("outline", "anchor:one") == expected_input
@@ -100,6 +142,9 @@ def test_generation_hash_helpers_are_canonical_and_do_not_expose_input():
         == expected_output
     )
     assert "anchor:one" not in expected_input
+    assert CourseGenerationService.input_hash(
+        "a\nb", "c"
+    ) != CourseGenerationService.input_hash("a", "b\nc")
 
 
 def test_chapter_section_rejects_code_fences_and_arbitrary_html():
@@ -113,6 +158,42 @@ def test_chapter_section_rejects_code_fences_and_arbitrary_html():
             )
     with pytest.raises(ValidationError, match="anchor_ids"):
         ChapterSection(key="ungrounded", title="Ungrounded", markdown="A claim.")
+
+
+@pytest.mark.parametrize(
+    ("path", "unsafe"),
+    [
+        (("purpose",), "```python\nprint(1)\n```"),
+        (("definitions", 0), "<b>definition</b>"),
+        (("formulas", 0, "meaning"), "<svg onload=alert(1)></svg>"),
+        (("formulas", 0, "oracle_expression"), "<math>x</math>"),
+        (("formulas", 0, "unit_expression"), "```unit```"),
+        (("worked_examples", 0, "prompt"), "<script>x()</script>"),
+        (("worked_examples", 0, "steps", 0), "```js\nx()\n```"),
+        (("worked_examples", 0, "answer"), "<iframe src=x></iframe>"),
+        (("worked_examples", 0, "oracle_expression"), "<code>a+b</code>"),
+        (("exercises", 0, "prompt"), "<object>payload</object>"),
+        (("exercises", 0, "hints", 0), "```sh\nrun\n```"),
+        (("exercises", 0, "answer"), "<em>answer</em>"),
+        (("exercises", 0, "transfer_task"), "javascript:run()"),
+        (("exercises", 0, "oracle_expression"), "<span>x</span>"),
+        (("pitfalls", 0), "<div>pitfall</div>"),
+        (("quick_reference", 0), "```code```"),
+    ],
+)
+def test_all_generated_chapter_text_rejects_code_and_html(path, unsafe):
+    from tests.course.test_generation_service_core import _chapter
+
+    payload = deepcopy(_chapter().model_dump(mode="python"))
+    target = payload
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = unsafe
+
+    from open_notebook.course.contracts import ChapterArtifact
+
+    with pytest.raises(ValidationError, match="code or HTML"):
+        ChapterArtifact.model_validate(payload)
 
 
 def test_outline_rejects_duplicate_proposed_lab_keys():

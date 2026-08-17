@@ -295,6 +295,23 @@ async def test_open_notebook_passes_exact_selected_model_without_fallback(monkey
 
 
 @pytest.mark.asyncio
+async def test_open_notebook_rejects_display_name_before_provision(monkeypatch):
+    async def provision(*_args, **_kwargs):
+        raise AssertionError("display names must not reach provisioning")
+
+    monkeypatch.setattr(
+        "open_notebook.course.model_adapters.provision_langchain_model", provision
+    )
+
+    with pytest.raises(AdapterError, match="registered model ID"):
+        await OpenNotebookModelAdapter().generate(
+            _request("open_notebook", "deepseek-v4-pro"),
+            Output,
+            prompt="prompt",
+        )
+
+
+@pytest.mark.asyncio
 async def test_ollama_passes_exact_model_and_structured_format(monkeypatch):
     calls: dict[str, object] = {}
 

@@ -80,6 +80,7 @@ def _chapter() -> ChapterArtifact:
                 anchor_ids=["anchor:one"],
                 unit_expression="meter / second",
                 provenance="adapted",
+                oracle_expression="x^2",
             )
         ],
         worked_examples=[
@@ -167,6 +168,43 @@ def test_outline_requires_grounded_dag_prerequisites_and_proposed_labs():
     with pytest.raises(ValueError, match="Lab"):
         service.validate_outline(valid, {"anchor:one"}, available_lab_keys=set())
 
+    with pytest.raises(TypeError):
+        service.validate_outline(valid, {"anchor:one"})  # type: ignore[call-arg]
+
+
+@pytest.mark.asyncio
+async def test_outline_generation_requires_and_applies_approved_lab_set():
+    payload = {
+        "title": "Course",
+        "chapters": [
+            {
+                "key": "one",
+                "title": "One",
+                "purpose": "Purpose",
+                "objective_keys": ["concept"],
+                "anchor_ids": ["anchor:one"],
+                "lab_keys": ["unapproved"],
+            }
+        ],
+        "concepts": [
+            {"key": "concept", "label": "Concept", "anchor_ids": ["anchor:one"]}
+        ],
+    }
+    service = CourseGenerationService(adapter=FakeCourseModelAdapter(payload))
+
+    with pytest.raises(ValueError, match="Lab"):
+        await service.generate_outline(
+            course_id="course:one",
+            anchor_ids=["anchor:one"],
+            evidence=["[anchor:one]: fact"],
+            available_lab_keys=set(),
+            model=ModelSelection(
+                adapter="codex_cli",
+                model="gpt-5.6-sol",
+                reasoning_effort="max",
+            ),
+        )
+
 
 def test_grounded_context_validates_selected_anchor_integrity():
     anchor, source_hash = _anchor()
@@ -215,6 +253,50 @@ def test_sympy_equivalence_substitution_and_unparseable_manual_check():
     assert any(f.kind == "formula" and f.status == "manual_check" for f in findings)
 
 
+def test_supported_latex_fraction_is_parsed_not_marked_manual_check():
+    service = CourseGenerationService()
+    assert service.formulas_equivalent(r"\frac{x^2}{2}", "x^2 / 2")
+
+    artifact = _chapter()
+    artifact.formulas[0].latex = r"\frac{x^2}{2}"
+    artifact.formulas[0].oracle_expression = "x^2 / 2"
+
+    assert not any(
+        finding.kind == "formula"
+        for finding in service.validate_chapter(artifact, {"anchor:one"})
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value", "kind", "item_key"),
+    [
+        ("formula", "oracle_expression", None, "formula", "square"),
+        ("formula", "oracle_expression", r"\bad-oracle", "formula", "square"),
+        ("example", "oracle_expression", None, "numeric", "example"),
+        ("example", "oracle_values", {}, "numeric", "example"),
+        ("example", "oracle_answer", None, "numeric", "example"),
+        ("example", "oracle_expression", r"\bad-oracle", "numeric", "example"),
+    ],
+)
+def test_formula_and_worked_example_oracles_fail_closed(
+    target, field, value, kind, item_key
+):
+    artifact = _chapter()
+    item = artifact.formulas[0] if target == "formula" else artifact.worked_examples[0]
+    setattr(item, field, value)
+
+    findings = CourseGenerationService().validate_chapter(
+        artifact, {"anchor:one"}
+    )
+
+    assert any(
+        finding.kind == kind
+        and finding.item_key == item_key
+        and finding.status == "manual_check"
+        for finding in findings
+    )
+
+
 def test_pint_dimensions_and_numeric_recomputation():
     service = CourseGenerationService()
     assert service.units_compatible("meter / second", "kilometer / hour")
@@ -224,6 +306,25 @@ def test_pint_dimensions_and_numeric_recomputation():
     artifact.worked_examples[0].oracle_answer = 5
     findings = service.validate_chapter(artifact, {"anchor:one"})
     assert any(f.kind == "numeric" and f.severity == "error" for f in findings)
+
+
+def test_chapter_validation_checks_formula_and_example_dimension_oracles():
+    service = CourseGenerationService()
+    artifact = _chapter()
+    artifact.formulas[0].oracle_unit_expression = "second"
+    artifact.worked_examples[0].unit_expression = "meter"
+    artifact.worked_examples[0].oracle_unit_expression = "second"
+
+    findings = service.validate_chapter(artifact, {"anchor:one"})
+
+    assert {
+        (finding.kind, finding.item_key, finding.severity)
+        for finding in findings
+        if finding.kind == "unit"
+    } == {
+        ("unit", "square", "error"),
+        ("unit", "example", "error"),
+    }
 
 
 def test_direction_reference_frame_boundary_and_limit_rules():
@@ -277,6 +378,41 @@ def test_publishability_resolution_and_warning_acknowledgement_reason():
         )
 
 
+def test_publishability_requires_status_specific_resolution_policy():
+    service = CourseGenerationService()
+
+    with pytest.raises(PublicationBlocked, match="error"):
+        service.assert_publishable(
+            [
+                _finding(
+                    "error",
+                    severity="error",
+                    status="acknowledged",
+                    reason="Reviewed but not fixed",
+                )
+            ]
+        )
+    with pytest.raises(PublicationBlocked, match="high"):
+        service.assert_publishable(
+            [_finding("high", status="acknowledged")]
+        )
+    service.assert_publishable(
+        [
+            _finding(
+                "high",
+                status="acknowledged",
+                reason="Accepted with documented rationale",
+            ),
+            _finding(
+                "warning",
+                severity="warning",
+                status="resolved",
+                reason="Corrected",
+            ),
+        ]
+    )
+
+
 @pytest.mark.asyncio
 async def test_escalation_sends_only_high_or_uncertain_and_needed_anchors():
     fake = FakeCourseModelAdapter(
@@ -325,3 +461,43 @@ def test_escalation_merge_preserves_unrelated_findings():
         ("high", "resolved"),
         ("warning", "open"),
     ]
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        _finding("high", severity="info", status="open"),
+        _finding("high", status="resolved").model_copy(update={"anchor_ids": []}),
+    ],
+)
+def test_escalation_merge_never_downgrades_or_ungrounds_blocker(replacement):
+    original = [_finding("high", anchors=["anchor:one"])]
+
+    merged = CourseGenerationService.merge_escalation_findings(
+        original,
+        ReviewArtifact(findings=[replacement]),
+        known_anchor_ids={"anchor:one", "anchor:two"},
+    )
+
+    assert merged == original
+
+
+def test_escalation_merge_replaces_only_findings_eligible_for_escalation():
+    original = [
+        _finding("high"),
+        _finding("warning", severity="warning"),
+    ]
+    response = ReviewArtifact(
+        findings=[
+            _finding(
+                "warning",
+                severity="warning",
+                status="acknowledged",
+                reason="not selected",
+            )
+        ]
+    )
+
+    assert CourseGenerationService.merge_escalation_findings(
+        original, response, known_anchor_ids={"anchor:one"}
+    ) == original

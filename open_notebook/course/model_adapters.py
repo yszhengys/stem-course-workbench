@@ -220,6 +220,13 @@ class OpenNotebookModelAdapter(CourseModelAdapter):
         *,
         prompt: str,
     ) -> OutputT:
+        if (
+            request.model.adapter != "open_notebook"
+            or not request.model.model.startswith("model:")
+        ):
+            raise AdapterError(
+                "Open Notebook Course generation requires a registered model ID."
+            )
         try:
             model = await provision_langchain_model(
                 "", request.model.model, default_type="language"

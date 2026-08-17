@@ -104,6 +104,7 @@ class CourseGenerationService:
         course_id: str,
         anchor_ids: list[str],
         evidence: Iterable[str],
+        available_lab_keys: set[str],
         model: ModelSelection,
         prompt_version: str = "v1",
     ) -> CourseOutlineArtifact:
@@ -116,7 +117,7 @@ class CourseGenerationService:
             schema_name="course_outline",
         )
         adapter = self.adapter or build_adapter(model)
-        return await adapter.generate(
+        generated = await adapter.generate(
             request,
             CourseOutlineArtifact,
             prompt=self.prompt_for(
@@ -125,6 +126,11 @@ class CourseGenerationService:
                 "Return a grounded outline and acyclic concept dependency graph.",
                 format_instructions=self._format_instructions(CourseOutlineArtifact),
             ),
+        )
+        return self.validate_outline(
+            generated,
+            set(anchor_ids),
+            available_lab_keys=available_lab_keys,
         )
 
     async def generate_chapter(
@@ -257,7 +263,7 @@ class CourseGenerationService:
         artifact: CourseOutlineArtifact | dict[str, Any],
         known_anchor_ids: set[str],
         *,
-        available_lab_keys: set[str] | None = None,
+        available_lab_keys: set[str],
     ) -> CourseOutlineArtifact:
         outline = (
             artifact
@@ -289,13 +295,12 @@ class CourseGenerationService:
                     raise ValueError(f"Unknown prerequisite chapter: {prerequisite}")
                 if chapter_positions[prerequisite] >= chapter_positions[chapter.key]:
                     raise ValueError("A prerequisite chapter must appear earlier")
-            if available_lab_keys is not None:
-                unknown_labs = set(chapter.lab_keys) - available_lab_keys
-                if unknown_labs:
-                    raise ValueError(
-                        "Lab is not in the approved proposal set: "
-                        + ", ".join(sorted(unknown_labs))
-                    )
+            unknown_labs = set(chapter.lab_keys) - available_lab_keys
+            if unknown_labs:
+                raise ValueError(
+                    "Lab is not in the approved proposal set: "
+                    + ", ".join(sorted(unknown_labs))
+                )
         cited = {
             anchor_id
             for chapter in outline.chapters
@@ -363,11 +368,64 @@ class CourseGenerationService:
             raise ValueError("Grounded chapter items require evidence anchors")
 
     @staticmethod
-    def _parse_safe_expression(expression: str) -> Any:
-        clean = expression.strip().replace("^", "**")
+    def _braced_group(value: str, start: int) -> tuple[str, int]:
+        if start >= len(value) or value[start] != "{":
+            raise ValueError("LaTeX command requires a braced argument")
+        depth = 0
+        for index in range(start, len(value)):
+            if value[index] == "{":
+                depth += 1
+            elif value[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return value[start + 1 : index], index + 1
+        raise ValueError("LaTeX command has an unclosed argument")
+
+    @classmethod
+    def _normalize_latex_subset(cls, expression: str) -> str:
+        value = expression.strip().replace(r"\left", "").replace(r"\right", "")
+        while r"\frac" in value:
+            start = value.index(r"\frac")
+            cursor = start + len(r"\frac")
+            while cursor < len(value) and value[cursor].isspace():
+                cursor += 1
+            numerator, cursor = cls._braced_group(value, cursor)
+            while cursor < len(value) and value[cursor].isspace():
+                cursor += 1
+            denominator, end = cls._braced_group(value, cursor)
+            replacement = (
+                f"(({cls._normalize_latex_subset(numerator)})/"
+                f"({cls._normalize_latex_subset(denominator)}))"
+            )
+            value = value[:start] + replacement + value[end:]
+        while r"\sqrt" in value:
+            start = value.index(r"\sqrt")
+            cursor = start + len(r"\sqrt")
+            while cursor < len(value) and value[cursor].isspace():
+                cursor += 1
+            radicand, end = cls._braced_group(value, cursor)
+            replacement = f"sqrt({cls._normalize_latex_subset(radicand)})"
+            value = value[:start] + replacement + value[end:]
+        replacements = {
+            r"\cdot": "*",
+            r"\times": "*",
+            r"\pi": "pi",
+            r"\sin": "sin",
+            r"\cos": "cos",
+            r"\log": "log",
+        }
+        for latex, normalized in replacements.items():
+            value = value.replace(latex, normalized)
+        value = value.replace("{", "(").replace("}", ")")
+        if "\\" in value:
+            raise ValueError("Formula contains an unsupported LaTeX command")
+        return value
+
+    @classmethod
+    def _parse_safe_expression(cls, expression: str) -> Any:
+        clean = cls._normalize_latex_subset(expression).replace("^", "**")
         if (
             not clean
-            or "\\" in clean
             or "__" in clean
             or not re.fullmatch(r"[A-Za-z0-9_+\-*/().,\s]+", clean)
         ):
@@ -444,7 +502,7 @@ class CourseGenerationService:
 
         for formula in artifact.formulas:
             try:
-                cls._parse_safe_expression(formula.latex)
+                actual_expression = cls._parse_safe_expression(formula.latex)
             except ValueError as exc:
                 findings.append(
                     ValidationFinding(
@@ -457,20 +515,48 @@ class CourseGenerationService:
                     )
                 )
                 continue
-            if formula.oracle_expression and not cls.formulas_equivalent(
-                formula.latex,
-                formula.oracle_expression,
-                substitutions=formula.oracle_substitutions,
-            ):
+            if formula.oracle_expression is None:
                 findings.append(
                     ValidationFinding(
                         kind="formula",
-                        severity="error",
+                        severity="high",
+                        status="manual_check",
                         item_key=formula.key,
                         anchor_ids=formula.anchor_ids,
-                        message="Formula does not match its oracle expression.",
+                        message="Formula is missing its independent oracle expression.",
                     )
                 )
+            else:
+                try:
+                    oracle_expression = cls._parse_safe_expression(
+                        formula.oracle_expression
+                    )
+                    difference = (actual_expression - oracle_expression).subs(
+                        formula.oracle_substitutions
+                    )
+                    equivalent = bool(difference.equals(0))
+                except Exception:
+                    findings.append(
+                        ValidationFinding(
+                            kind="formula",
+                            severity="high",
+                            status="manual_check",
+                            item_key=formula.key,
+                            anchor_ids=formula.anchor_ids,
+                            message="Formula oracle could not be evaluated.",
+                        )
+                    )
+                else:
+                    if not equivalent:
+                        findings.append(
+                            ValidationFinding(
+                                kind="formula",
+                                severity="error",
+                                item_key=formula.key,
+                                anchor_ids=formula.anchor_ids,
+                                message="Formula does not match its oracle expression.",
+                            )
+                        )
             if formula.unit_expression:
                 try:
                     UNIT_REGISTRY.parse_expression(formula.unit_expression)
@@ -485,19 +571,94 @@ class CourseGenerationService:
                             message="Unit expression could not be parsed.",
                         )
                     )
+            if formula.oracle_unit_expression:
+                if formula.unit_expression is None:
+                    findings.append(
+                        ValidationFinding(
+                            kind="unit",
+                            severity="high",
+                            status="manual_check",
+                            item_key=formula.key,
+                            anchor_ids=formula.anchor_ids,
+                            message="Formula unit oracle has no produced unit to compare.",
+                        )
+                    )
+                elif not cls.units_compatible(
+                    formula.unit_expression, formula.oracle_unit_expression
+                ):
+                    findings.append(
+                        ValidationFinding(
+                            kind="unit",
+                            severity="error",
+                            item_key=formula.key,
+                            anchor_ids=formula.anchor_ids,
+                            message="Formula unit is dimensionally incompatible with its oracle.",
+                        )
+                    )
 
-        oracle_items: list[WorkedExampleArtifact | ExerciseArtifact] = [
-            *artifact.worked_examples,
-            *artifact.exercises,
-        ]
+        oracle_items: list[WorkedExampleArtifact | ExerciseArtifact] = []
+        for example in artifact.worked_examples:
+            if (
+                example.oracle_expression is None
+                or not example.oracle_values
+                or example.oracle_answer is None
+            ):
+                findings.append(
+                    ValidationFinding(
+                        kind="numeric",
+                        severity="high",
+                        status="manual_check",
+                        item_key=example.key,
+                        anchor_ids=example.anchor_ids,
+                        message="Worked example is missing its independent numeric oracle.",
+                    )
+                )
+            else:
+                oracle_items.append(example)
+        for exercise in artifact.exercises:
+            supplied = (
+                exercise.oracle_expression is not None
+                or bool(exercise.oracle_values)
+                or exercise.oracle_answer is not None
+            )
+            if supplied:
+                if (
+                    exercise.oracle_expression is None
+                    or not exercise.oracle_values
+                    or exercise.oracle_answer is None
+                ):
+                    findings.append(
+                        ValidationFinding(
+                            kind="numeric",
+                            severity="high",
+                            status="manual_check",
+                            item_key=exercise.key,
+                            anchor_ids=exercise.anchor_ids,
+                            message="Exercise has an incomplete numeric oracle.",
+                        )
+                    )
+                else:
+                    oracle_items.append(exercise)
         for item in oracle_items:
-            if item.oracle_expression is None or item.oracle_answer is None:
+            expression_text = item.oracle_expression
+            oracle_answer = item.oracle_answer
+            if expression_text is None or oracle_answer is None:
+                findings.append(
+                    ValidationFinding(
+                        kind="numeric",
+                        severity="high",
+                        status="manual_check",
+                        item_key=item.key,
+                        anchor_ids=item.anchor_ids,
+                        message="Numeric oracle became incomplete before evaluation.",
+                    )
+                )
                 continue
             try:
-                expression = cls._parse_safe_expression(item.oracle_expression)
+                expression = cls._parse_safe_expression(expression_text)
                 evaluated = float(N(expression.subs(item.oracle_values)))
-                tolerance = 1e-9 * max(1.0, abs(item.oracle_answer))
-                if not math.isfinite(evaluated) or abs(evaluated - item.oracle_answer) > tolerance:
+                tolerance = 1e-9 * max(1.0, abs(oracle_answer))
+                if not math.isfinite(evaluated) or abs(evaluated - oracle_answer) > tolerance:
                     findings.append(
                         ValidationFinding(
                             kind="numeric",
@@ -505,7 +666,7 @@ class CourseGenerationService:
                             item_key=item.key,
                             anchor_ids=item.anchor_ids,
                             message=(
-                                f"Numeric oracle expected {item.oracle_answer}, got {evaluated}."
+                                f"Numeric oracle expected {oracle_answer}, got {evaluated}."
                             ),
                         )
                     )
@@ -520,6 +681,31 @@ class CourseGenerationService:
                         message="Numeric oracle could not be evaluated.",
                     )
                 )
+        for example in artifact.worked_examples:
+            if example.oracle_unit_expression:
+                if example.unit_expression is None:
+                    findings.append(
+                        ValidationFinding(
+                            kind="unit",
+                            severity="high",
+                            status="manual_check",
+                            item_key=example.key,
+                            anchor_ids=example.anchor_ids,
+                            message="Example unit oracle has no produced unit to compare.",
+                        )
+                    )
+                elif not cls.units_compatible(
+                    example.unit_expression, example.oracle_unit_expression
+                ):
+                    findings.append(
+                        ValidationFinding(
+                            kind="unit",
+                            severity="error",
+                            item_key=example.key,
+                            anchor_ids=example.anchor_ids,
+                            message="Example unit is dimensionally incompatible with its oracle.",
+                        )
+                    )
         for lab in artifact.labs:
             if any("=" in expression and "==" not in expression for expression in lab.expressions):
                 findings.append(
@@ -581,18 +767,23 @@ class CourseGenerationService:
         blocking: list[ValidationFinding] = []
         for finding in findings:
             reason = (finding.resolution_reason or "").strip()
-            if finding.severity == "warning":
-                if finding.status != "acknowledged" or not reason:
+            if finding.status in {"manual_check", "uncertain"}:
+                blocking.append(finding)
+                continue
+            if finding.severity == "error":
+                if finding.status != "resolved":
                     blocking.append(finding)
                 continue
-            if finding.status == "manual_check":
-                blocking.append(finding)
+            if finding.severity == "high":
+                resolved = finding.status == "resolved" or (
+                    finding.status == "acknowledged" and bool(reason)
+                )
+                if not resolved:
+                    blocking.append(finding)
                 continue
-            if finding.severity in {"error", "high"} and finding.status not in {
-                "resolved",
-                "acknowledged",
-            }:
-                blocking.append(finding)
+            if finding.severity == "warning":
+                if finding.status not in {"acknowledged", "resolved"} or not reason:
+                    blocking.append(finding)
         if blocking:
             kinds = ", ".join(
                 f"{finding.severity}:{finding.item_key}" for finding in blocking
@@ -651,13 +842,51 @@ class CourseGenerationService:
             )
             if unknown:
                 raise ValueError(f"Escalation contains unknown anchors: {', '.join(unknown)}")
-        replacements = {finding.item_key: finding for finding in escalation.findings}
-        merged = [replacements.get(finding.item_key, finding) for finding in original]
+        responses = {finding.item_key: finding for finding in escalation.findings}
+        merged: list[ValidationFinding] = []
+        for finding in original:
+            replacement = responses.get(finding.item_key)
+            eligible = (
+                finding.severity in {"high", "error"}
+                or finding.status == "uncertain"
+            )
+            if replacement is None or not eligible:
+                merged.append(finding)
+                continue
+            anchors = set(replacement.anchor_ids)
+            anchors_are_scoped = bool(anchors) and anchors.issubset(
+                set(finding.anchor_ids)
+            )
+            reason = (replacement.resolution_reason or "").strip()
+            if finding.severity == "error" or finding.status == "manual_check":
+                resolving_state = replacement.status == "resolved"
+            elif finding.severity == "high":
+                resolving_state = replacement.status == "resolved" or (
+                    replacement.status == "acknowledged" and bool(reason)
+                )
+            else:
+                resolving_state = replacement.status in {
+                    "resolved",
+                    "acknowledged",
+                } and bool(reason)
+            if not anchors_are_scoped or not resolving_state:
+                merged.append(finding)
+                continue
+            merged.append(
+                replacement.model_copy(
+                    update={"kind": finding.kind, "severity": finding.severity}
+                )
+            )
         return merged
 
     @staticmethod
     def input_hash(*parts: str) -> str:
-        return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+        encoded = json.dumps(
+            list(parts),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     prompt_input_hash = input_hash
 
