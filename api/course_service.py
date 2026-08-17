@@ -465,11 +465,14 @@ class CourseService:
             raise NotFoundError("Attempt ownership mismatch")
         if attempt.course_version and attempt.course_version != lab.course_version:
             raise NotFoundError("Attempt ownership mismatch")
-        if attempt.chapter or attempt.chapter_key or attempt.exercise_key:
+        if attempt.chapter and lab.chapter and attempt.chapter != lab.chapter:
+            raise NotFoundError("Attempt ownership mismatch")
+        chapter_id = attempt.chapter or lab.chapter
+        if chapter_id or attempt.chapter_key or attempt.exercise_key:
             chapter = await _owned_chapter(
                 course_id=version.course,
                 version_id=lab.course_version,
-                chapter_id=attempt.chapter or lab.chapter,
+                chapter_id=chapter_id,
                 chapter_key=attempt.chapter_key,
             )
             if attempt.exercise_key and attempt.exercise_key not in _artifact_keys(

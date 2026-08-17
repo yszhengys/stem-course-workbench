@@ -202,6 +202,125 @@ async def test_version_publish_uses_legal_generating_to_published_transition(mon
     save.assert_awaited_once()
 
 
+def publishable_chapter_records():
+    artifact = {"chapters": [{"key": "limits"}]}
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        status="ready",
+        outline_version_id="course_version:1",
+    )
+    version = CourseVersion(
+        id="course_version:1",
+        course="course:one",
+        version_no=1,
+        status="generating",
+        outline_artifact=artifact,
+        outline_hash=artifact_hash(artifact),
+        approved_at="2026-08-18T00:00:00Z",
+    )
+    chapter = Chapter(
+        id="chapter:one",
+        course_version="course_version:1",
+        chapter_no=1,
+        chapter_key="limits",
+        title="Limits",
+        status="ready",
+        review_status="passed",
+        validation_status="passed",
+    )
+    return course, version, chapter
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed_gate", "expected_error"),
+    [
+        ("version_course_ownership", NotFoundError),
+        ("chapter_version_ownership", NotFoundError),
+        ("ready_status", CourseConflictError),
+        ("review_passed", CourseConflictError),
+        ("validation_passed", CourseConflictError),
+        ("current_approved_version", CourseConflictError),
+        ("approved_timestamp", CourseConflictError),
+        ("server_outline_hash", CourseConflictError),
+    ],
+)
+async def test_publish_chapter_rejects_each_failed_gate(
+    monkeypatch, failed_gate, expected_error
+):
+    course, version, chapter = publishable_chapter_records()
+    if failed_gate == "version_course_ownership":
+        version.course = "course:other"
+    elif failed_gate == "chapter_version_ownership":
+        chapter.course_version = "course_version:other"
+    elif failed_gate == "ready_status":
+        chapter.status = "reviewing"
+    elif failed_gate == "review_passed":
+        chapter.review_status = "pending"
+    elif failed_gate == "validation_passed":
+        chapter.validation_status = "pending"
+    elif failed_gate == "current_approved_version":
+        course.outline_version_id = "course_version:other"
+    elif failed_gate == "approved_timestamp":
+        version.approved_at = None
+    elif failed_gate == "server_outline_hash":
+        version.outline_hash = "0" * 64
+
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
+    save = AsyncMock()
+    monkeypatch.setattr(Chapter, "save", save)
+
+    with pytest.raises(expected_error):
+        await CourseService.publish_chapter(
+            "course:one", "course_version:1", "chapter:one"
+        )
+
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_publish_chapter_returns_terminal_published_chapter_without_save(
+    monkeypatch,
+):
+    course, version, chapter = publishable_chapter_records()
+    chapter.status = "published"
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
+    save = AsyncMock()
+    monkeypatch.setattr(Chapter, "save", save)
+
+    published = await CourseService.publish_chapter(
+        "course:one", "course_version:1", "chapter:one"
+    )
+
+    assert published is chapter
+    assert published.status == "published"
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_publish_chapter_succeeds_after_every_gate_passes(monkeypatch):
+    course, version, chapter = publishable_chapter_records()
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
+    save = AsyncMock()
+    monkeypatch.setattr(Chapter, "save", save)
+
+    published = await CourseService.publish_chapter(
+        "course:one", "course_version:1", "chapter:one"
+    )
+
+    assert published.status == "published"
+    assert published.published_at is not None
+    save.assert_awaited_once()
+
+
 @pytest.fixture
 def client():
     from api.main import app
@@ -425,6 +544,85 @@ async def test_attempt_transition_rejects_exercise_without_owned_chapter(monkeyp
     monkeypatch.setattr(Attempt, "get", AsyncMock(return_value=attempt))
     monkeypatch.setattr(Lab, "get", AsyncMock(return_value=lab))
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    save = AsyncMock()
+    monkeypatch.setattr(Attempt, "save", save)
+
+    with pytest.raises(NotFoundError):
+        await CourseService.transition_attempt("attempt:one", "checked")
+
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_migration_24_attempt_transition_validates_lab_chapter_ownership(
+    monkeypatch,
+):
+    attempt = Attempt(
+        id="attempt:legacy",
+        lab="lab:one",
+        answers={"value": "0"},
+    )
+    lab = Lab(
+        id="lab:one",
+        course_version="course_version:1",
+        chapter="chapter:foreign",
+        lab_type="function_plot",
+        payload={},
+    )
+    version = CourseVersion(
+        id="course_version:1", course="course:one", version_no=1
+    )
+    foreign_chapter = Chapter(
+        id="chapter:foreign",
+        course_version="course_version:other",
+        chapter_no=1,
+        chapter_key="limits",
+        title="Limits",
+    )
+    monkeypatch.setattr(Attempt, "get", AsyncMock(return_value=attempt))
+    monkeypatch.setattr(Lab, "get", AsyncMock(return_value=lab))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=foreign_chapter))
+    save = AsyncMock()
+    monkeypatch.setattr(Attempt, "save", save)
+
+    with pytest.raises(NotFoundError):
+        await CourseService.transition_attempt("attempt:legacy", "checked")
+
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_attempt_transition_rejects_chapter_mismatch_with_lab(monkeypatch):
+    attempt = Attempt(
+        id="attempt:one",
+        lab="lab:one",
+        answers={"value": "0"},
+        course="course:one",
+        course_version="course_version:1",
+        chapter="chapter:one",
+    )
+    lab = Lab(
+        id="lab:one",
+        course_version="course_version:1",
+        chapter="chapter:two",
+        lab_type="function_plot",
+        payload={},
+    )
+    version = CourseVersion(
+        id="course_version:1", course="course:one", version_no=1
+    )
+    attempt_chapter = Chapter(
+        id="chapter:one",
+        course_version="course_version:1",
+        chapter_no=1,
+        chapter_key="limits",
+        title="Limits",
+    )
+    monkeypatch.setattr(Attempt, "get", AsyncMock(return_value=attempt))
+    monkeypatch.setattr(Lab, "get", AsyncMock(return_value=lab))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=attempt_chapter))
     save = AsyncMock()
     monkeypatch.setattr(Attempt, "save", save)
 
