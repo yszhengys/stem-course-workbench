@@ -19,6 +19,7 @@ PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
 COURSE_URL="http://127.0.0.1:3000/courses/new"
 READY_TIMEOUT=${COURSE_WORKBENCH_READY_TIMEOUT:-180}
 POLL_INTERVAL=${COURSE_WORKBENCH_POLL_INTERVAL:-1}
+STOP_POLL_INTERVAL=${COURSE_WORKBENCH_STOP_POLL_INTERVAL:-0.1}
 
 STARTED_DB=0
 STARTED_API=0
@@ -216,6 +217,26 @@ rewrite_env_key() {
     fi
 }
 
+ensure_course_model_permission() {
+    if grep -q '^OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=' "$ENV_FILE"; then
+        return 0
+    fi
+
+    temporary="${ENV_FILE}.tmp.$$"
+    if ! {
+        cat "$ENV_FILE"
+        printf '\n%s\n' 'OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1'
+    } > "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if ! chmod 600 "$temporary" || ! mv "$temporary" "$ENV_FILE"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    say "Enabled user-initiated Course model generation in local configuration."
+}
+
 ensure_env() {
     if [ -L "$ENV_FILE" ]; then
         error "Refusing to use symlinked .env: $ENV_FILE"
@@ -233,7 +254,24 @@ ensure_env() {
             }
             END { print value }
         ' "$ENV_FILE")
-        case "$existing_key" in
+        normalized_key=$(printf '%s\n' "$existing_key" | awk '
+            {
+                value = $0
+                sub(/^[[:space:]]*/, "", value)
+                sub(/[[:space:]]*$/, "", value)
+                first = substr(value, 1, 1)
+                last = substr(value, length(value), 1)
+                if (length(value) >= 2 &&
+                    ((first == "\"" && last == "\"") ||
+                     (first == "\047" && last == "\047"))) {
+                    value = substr(value, 2, length(value) - 2)
+                    sub(/^[[:space:]]*/, "", value)
+                    sub(/[[:space:]]*$/, "", value)
+                }
+                print value
+            }
+        ')
+        case "$normalized_key" in
             ''|*change-me-to-a-secret-string*|*replace-me*|*your-secret*|*CHANGE_ME*)
                 key=$(random_key)
                 if [ "${#key}" -lt 32 ] || ! rewrite_env_key "$ENV_FILE" "$ENV_FILE" "$key"; then
@@ -243,6 +281,10 @@ ensure_env() {
                 say "Secured the local .env encryption key and permissions."
                 ;;
         esac
+        if ! ensure_course_model_permission; then
+            error "Could not add the Course model permission to .env securely."
+            return 1
+        fi
         return 0
     fi
     if [ ! -f "$REPO_ROOT/.env.example" ]; then
@@ -256,6 +298,10 @@ ensure_env() {
     fi
     if ! rewrite_env_key "$REPO_ROOT/.env.example" "$ENV_FILE" "$key"; then
         error "Could not secure .env."
+        return 1
+    fi
+    if ! ensure_course_model_permission; then
+        error "Could not add the Course model permission to .env securely."
         return 1
     fi
     say "Created private local configuration at $ENV_FILE (mode 600)."
@@ -333,6 +379,61 @@ process_started() {
 
 process_group() {
     ps -p "$1" -o pgid= 2>/dev/null | tr -d '[:space:]'
+}
+
+process_group_has_members() {
+    owned_pgid=$1
+    case "$owned_pgid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$owned_pgid" -gt 1 ] || return 1
+    kill -0 "-$owned_pgid" 2>/dev/null
+}
+
+wait_for_process_group_exit() {
+    owned_pgid=$1
+    attempt_limit=$2
+    attempts=0
+    while process_group_has_members "$owned_pgid" && [ "$attempts" -lt "$attempt_limit" ]; do
+        attempts=$((attempts + 1))
+        sleep "$STOP_POLL_INTERVAL"
+    done
+    ! process_group_has_members "$owned_pgid"
+}
+
+terminate_owned_process_group() {
+    owned_pgid=$1
+    case "$owned_pgid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$owned_pgid" -gt 1 ] || return 1
+
+    kill -TERM "-$owned_pgid" 2>/dev/null || true
+    if wait_for_process_group_exit "$owned_pgid" 50; then
+        return 0
+    fi
+
+    kill -KILL "-$owned_pgid" 2>/dev/null || true
+    wait_for_process_group_exit "$owned_pgid" 20
+}
+
+terminate_owned_child() {
+    owned_pid=$1
+    kill -TERM "$owned_pid" 2>/dev/null || true
+    attempts=0
+    while process_alive "$owned_pid" && [ "$attempts" -lt 20 ]; do
+        attempts=$((attempts + 1))
+        sleep "$STOP_POLL_INTERVAL"
+    done
+    if process_alive "$owned_pid"; then
+        kill -KILL "$owned_pid" 2>/dev/null || true
+        attempts=0
+        while process_alive "$owned_pid" && [ "$attempts" -lt 20 ]; do
+            attempts=$((attempts + 1))
+            sleep "$STOP_POLL_INTERVAL"
+        done
+    fi
+    ! process_alive "$owned_pid"
 }
 
 process_cwd() {
@@ -548,24 +649,23 @@ terminate_new_launch() {
         handshake_pid=$(sed -n '1p' "$handshake")
         handshake_pgid=$(sed -n '2p' "$handshake")
     fi
-    actual_pgid=$(process_group "$pid")
-    if [ "$handshake_pid" = "$pid" ] && [ "$handshake_pgid" = "$pid" ] && \
-       [ "$actual_pgid" = "$pid" ]; then
-        kill -TERM "-$pid" 2>/dev/null || true
-        attempts=0
-        while process_alive "$pid" && [ "$attempts" -lt 20 ]; do
-            attempts=$((attempts + 1))
-            sleep 0.05
-        done
-        process_alive "$pid" && kill -KILL "-$pid" 2>/dev/null || true
+    if [ "$handshake_pid" = "$pid" ] && [ "$handshake_pgid" = "$pid" ]; then
+        if ! terminate_owned_process_group "$pid"; then
+            error "$service process group $pid survived TERM and KILL; ownership metadata was preserved."
+            return 1
+        fi
     else
         # `$pid` is the direct child created by this invocation. Without a
         # verified session handshake we may terminate only that PID, not a PGID.
-        kill -TERM "$pid" 2>/dev/null || true
+        if ! terminate_owned_child "$pid"; then
+            error "$service launch process $pid survived TERM and KILL; ownership metadata was preserved."
+            return 1
+        fi
     fi
     rm -f "$handshake"
     cleanup_process_metadata "$service"
     set_started_flag "$service" 0
+    return 0
 }
 
 write_service_metadata() {
@@ -652,7 +752,7 @@ os.execvpe(command[0], command, os.environ)
     done
     PROCESS_REASON="session/argv/executable/cwd/start fingerprint validation failed"
     error "$service did not start as an owned process group: $PROCESS_REASON"
-    terminate_new_launch "$service" "$pid" "$handshake"
+    terminate_new_launch "$service" "$pid" "$handshake" || true
     return 1
 }
 
@@ -756,7 +856,7 @@ course_page_ready() {
         rm -f "$response_file"
         return 1
     fi
-    grep -Eq 'data-course-workbench-ready="(new-course|connection-checking)"' "$response_file"
+    grep -Fq 'data-course-workbench-ready="new-course"' "$response_file"
     result=$?
     rm -f "$response_file"
     return "$result"
@@ -789,17 +889,7 @@ stop_verified_service() {
     pid=$(read_first_line "$(runtime_path "$service" pid)")
     pgid=$(read_first_line "$(runtime_path "$service" pgid)")
     say "Stopping $service process group $pgid..."
-    kill -TERM "-$pgid" 2>/dev/null || true
-    attempts=0
-    while process_alive "$pid" && [ "$attempts" -lt 50 ]; do
-        attempts=$((attempts + 1))
-        sleep 0.1
-    done
-    if process_alive "$pid"; then
-        kill -KILL "-$pgid" 2>/dev/null || true
-        sleep 0.1
-    fi
-    if process_alive "$pid"; then
+    if ! terminate_owned_process_group "$pgid"; then
         error "$service process group $pgid did not stop."
         return 1
     fi
@@ -861,7 +951,7 @@ start_locked() {
     start_frontend || return 1
     wait_for "frontend runtime API configuration" frontend_config_ready || return 1
     if ! wait_for "new-course route and SSR readiness marker" course_page_ready; then
-        error "The frontend answered, but /courses/new did not expose a Course or ConnectionGuard readiness marker. Finish/rebuild the Course UI and retry."
+        error "The frontend answered, but /courses/new did not expose its route-specific new-course readiness marker. Finish/rebuild the Course UI and retry."
         return 1
     fi
 

@@ -248,6 +248,7 @@ def _fake_uv(repo: Path) -> None:
         """#!/usr/bin/env python3
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -287,6 +288,32 @@ if args and args[0] == "run":
         (state / f"pid.{pid}.command").write_text(command, encoding="utf-8")
         (state / f"pid.{pid}.executable").write_text("/fake/uv", encoding="utf-8")
         (state / f"pid.{pid}.start").write_text("Mon Aug 18 01:00:00 2026", encoding="utf-8")
+        if os.environ.get("FAKE_STUBBORN_API_CHILD") == "1":
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    '''
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+state = Path(sys.argv[1])
+pid = os.getpid()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+(state / "api.child").write_text(str(pid), encoding="utf-8")
+(state / "api.child.ready").touch()
+while True:
+    time.sleep(1)
+''',
+                    str(state),
+                ]
+            )
+            deadline = time.monotonic() + 2
+            while not (state / "api.child.ready").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
         print("Application startup complete", flush=True)
     elif "surreal-commands-worker" in args:
         (state / f"pid.{pid}.command").write_text("uv run surreal-commands-worker", encoding="utf-8")
@@ -374,6 +401,31 @@ def _with_ui_contract(env: dict[str, str]) -> dict[str, str]:
     return {**env, "FAKE_UI_CONTRACT_READY": "1"}
 
 
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _wait_for_pid_exit(pid: int, timeout: float = 3) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            return True
+        time.sleep(0.02)
+    return not _pid_is_running(pid)
+
+
+def _force_stop_pid(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    _wait_for_pid_exit(pid)
+
+
 def test_start_creates_secure_env_uses_locked_dependencies_and_is_idempotent(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
@@ -389,6 +441,7 @@ def test_start_creates_secure_env_uses_locked_dependencies_and_is_idempotent(
         if line.startswith("OPEN_NOTEBOOK_ENCRYPTION_KEY=")
     )
     assert key and key != "change-me-to-a-secret-string"
+    assert "OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1" in generated.splitlines()
     assert stat.S_IMODE((repo / ".env").stat().st_mode) == 0o600
     runtime = repo / ".runtime" / "course-workbench"
     assert stat.S_IMODE(runtime.stat().st_mode) == 0o700
@@ -421,7 +474,18 @@ def test_start_creates_secure_env_uses_locked_dependencies_and_is_idempotent(
 
 @pytest.mark.parametrize(
     "existing_key",
-    ["", "change-me-to-a-secret-string", "replace-me", "your-secret-here"],
+    [
+        "",
+        "   ",
+        "\t ",
+        "''",
+        '""',
+        "'   '",
+        '"   "',
+        "change-me-to-a-secret-string",
+        "replace-me",
+        "your-secret-here",
+    ],
 )
 def test_existing_env_is_secured_and_placeholder_key_is_replaced_without_argv_leak(
     fake_repo: tuple[Path, dict[str, str], Path], existing_key: str
@@ -469,6 +533,48 @@ def test_existing_valid_env_key_is_preserved_while_permissions_are_fixed(
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"OPEN_NOTEBOOK_ENCRYPTION_KEY={key}" in env_file.read_text(), result.stdout
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_existing_env_missing_course_model_permission_gets_safe_default(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, _ = fake_repo
+    env = _with_ui_contract(env)
+    key = "valid-existing-key-0123456789abcdef"
+    env_file = repo / ".env"
+    env_file.write_text(
+        f"OPEN_NOTEBOOK_ENCRYPTION_KEY={key}\nKEEP_THIS=value\n",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    assert lines.count("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1") == 1
+    assert f"OPEN_NOTEBOOK_ENCRYPTION_KEY={key}" in lines
+    assert "KEEP_THIS=value" in lines
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_existing_env_explicit_course_model_opt_out_is_preserved(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, _ = fake_repo
+    env = _with_ui_contract(env)
+    env_file = repo / ".env"
+    env_file.write_text(
+        "OPEN_NOTEBOOK_ENCRYPTION_KEY=valid-existing-key-0123456789abcdef\n"
+        "OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=0\n",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    assert lines.count("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=0") == 1
+    assert not any(line == "OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1" for line in lines)
     assert _run(repo, env, "stop").returncode == 0
 
 
@@ -679,6 +785,28 @@ def test_failed_new_process_ownership_is_terminated_and_metadata_cleared(
     assert not (state / "port.5055").exists()
 
 
+def test_failed_launch_reaps_entire_group_when_leader_exits_before_child(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "FAKE_BAD_API_OWNERSHIP": "1",
+        "FAKE_STUBBORN_API_CHILD": "1",
+    }
+
+    try:
+        result = _run(repo, env, "start", "--no-open", timeout=20)
+        assert result.returncode != 0
+        child_pid = int((state / "api.child").read_text(encoding="utf-8"))
+        assert _wait_for_pid_exit(child_pid), result.stdout + result.stderr
+        runtime = repo / ".runtime" / "course-workbench"
+        assert not list(runtime.glob("api.*"))
+    finally:
+        if (state / "api.child").exists():
+            _force_stop_pid(int((state / "api.child").read_text(encoding="utf-8")))
+
+
 @pytest.mark.parametrize("status_code", [204, 302])
 def test_readiness_rejects_non_200_http_status(
     fake_repo: tuple[Path, dict[str, str], Path], status_code: int
@@ -742,14 +870,45 @@ def test_full_readiness_when_task4_contract_exists_opens_new_course_and_uses_def
     assert _run(repo, env, "stop").returncode == 0
 
 
-def test_exact_200_course_route_accepts_ssr_connection_guard_marker(
+def test_exact_200_course_route_rejects_non_course_connection_marker(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, _ = fake_repo
-    env = {**env, "FAKE_UI_CONTRACT_READY": "connection"}
+    env = {
+        **env,
+        "FAKE_UI_CONTRACT_READY": "connection",
+        "COURSE_WORKBENCH_READY_TIMEOUT": "1",
+    }
     result = _run(repo, env, "start", "--no-open")
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert _run(repo, env, "stop").returncode == 0
+    assert result.returncode != 0
+    assert "readiness marker" in (result.stdout + result.stderr)
+
+
+def test_stop_reaps_entire_group_when_leader_exits_before_stubborn_child(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {**_with_ui_contract(env), "FAKE_STUBBORN_API_CHILD": "1"}
+
+    try:
+        started = _run(repo, env, "start", "--no-open")
+        assert started.returncode == 0, started.stdout + started.stderr
+        child_pid = int((state / "api.child").read_text(encoding="utf-8"))
+        assert _pid_is_running(child_pid)
+
+        # Readiness polling may legitimately be slow, but process shutdown has
+        # its own bounded 0.1 s cadence (about 5 s TERM + 2 s KILL maximum).
+        stop_env = {**env, "COURSE_WORKBENCH_POLL_INTERVAL": "1"}
+        stop_started_at = time.monotonic()
+        stopped = _run(repo, stop_env, "stop", timeout=8)
+        assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+        assert time.monotonic() - stop_started_at < 8
+        assert _wait_for_pid_exit(child_pid), stopped.stdout + stopped.stderr
+        runtime = repo / ".runtime" / "course-workbench"
+        assert not list(runtime.glob("api.*"))
+    finally:
+        if (state / "api.child").exists():
+            _force_stop_pid(int((state / "api.child").read_text(encoding="utf-8")))
 
 
 def test_status_is_read_only_and_stop_refuses_unverified_pid(
@@ -844,7 +1003,9 @@ def test_repository_declares_course_ui_startup_contract() -> None:
         encoding="utf-8"
     )
     guard_source = connection_guard.read_text(encoding="utf-8")
-    assert 'data-course-workbench-ready="connection-checking"' in guard_source
+    assert "pathname === '/courses/new' ? 'new-course' : 'connection-checking'" in (
+        guard_source
+    )
     checking_branch = guard_source.split("if (isChecking)", 1)[1].split(
         "// Render children", 1
     )[0]
@@ -853,3 +1014,16 @@ def test_repository_declares_course_ui_startup_contract() -> None:
     config_source = backend_config.read_text(encoding="utf-8")
     assert "VERSION_CHECK_TIMEOUT_SECONDS = 0.5" in config_source
     assert "asyncio.wait_for" in config_source
+
+
+def test_example_env_enables_user_initiated_course_models() -> None:
+    settings = {
+        key: value
+        for line in (PROJECT_ROOT / ".env.example").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line and not line.startswith("#") and "=" in line
+        for key, value in [line.split("=", 1)]
+    }
+
+    assert settings["OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS"] == "1"
