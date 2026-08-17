@@ -1,9 +1,4 @@
 import type { Metadata } from "next";
-import {
-  Bricolage_Grotesque,
-  Instrument_Sans,
-  Spline_Sans_Mono,
-} from "next/font/google";
 import { cookies } from "next/headers";
 import "./globals.css";
 import "katex/dist/katex.min.css";
@@ -16,22 +11,6 @@ import { ConnectionGuard } from "@/components/common/ConnectionGuard";
 import { themeScript } from "@/lib/theme-script";
 import { I18nProvider } from "@/components/providers/I18nProvider";
 import { PREFS_COOKIE, parsePrefs } from "@/lib/stores/prefs-cookie";
-
-const instrumentSans = Instrument_Sans({
-  subsets: ["latin"],
-  variable: "--font-instrument-sans",
-});
-
-const bricolageGrotesque = Bricolage_Grotesque({
-  subsets: ["latin"],
-  weight: ["600", "700"],
-  variable: "--font-bricolage",
-});
-
-const splineSansMono = Spline_Sans_Mono({
-  subsets: ["latin"],
-  variable: "--font-spline-mono",
-});
 
 export const metadata: Metadata = {
   title: "Open Notebook",
@@ -54,9 +33,7 @@ export default async function RootLayout({
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>
-      <body
-        className={`${instrumentSans.variable} ${bricolageGrotesque.variable} ${splineSansMono.variable} font-sans`}
-      >
+      <body className="font-sans">
         <PrefsHydrator initial={initialPrefs}>
           <ErrorBoundary>
             <ThemeProvider>

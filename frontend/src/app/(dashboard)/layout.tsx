@@ -9,12 +9,14 @@ import { ErrorBoundary } from '@/components/common/ErrorBoundary'
 import { ModalProvider } from '@/components/providers/ModalProvider'
 import { CreateDialogsProvider } from '@/lib/hooks/use-create-dialogs'
 import { CommandPalette } from '@/components/common/CommandPalette'
+import { useTranslation } from '@/lib/hooks/use-translation'
 
 export default function DashboardLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
+  const { t } = useTranslation()
   const { isAuthenticated, isLoading } = useAuth()
   const router = useRouter()
   const [hasCheckedAuth, setHasCheckedAuth] = useState(false)
@@ -40,15 +42,29 @@ export default function DashboardLayout({
   // Show loading spinner during initial auth check or while loading
   if (isLoading || !hasCheckedAuth) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div
+        role="status"
+        aria-live="polite"
+        className="min-h-screen flex items-center justify-center gap-3"
+      >
         <LoadingSpinner />
+        <span className="text-sm text-muted-foreground">{t('common.loading')}</span>
       </div>
     )
   }
 
-  // Don't render anything if not authenticated (during redirect)
+  // Keep a visible redirect state rather than returning a blank document.
   if (!isAuthenticated) {
-    return null
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="min-h-screen flex items-center justify-center gap-3"
+      >
+        <LoadingSpinner />
+        <span className="text-sm text-muted-foreground">{t('common.loading')}</span>
+      </div>
+    )
   }
 
   return (
