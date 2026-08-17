@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+from api.course_service import CourseService
 from open_notebook.course import state_machine as sm
 from open_notebook.course.locking import course_job_lock
 from open_notebook.course.models import (
@@ -31,7 +32,7 @@ def client():
 
 class TestStateMachine:
     def test_legal_transition(self):
-        assert sm.transition("course", "draft", "outline_approved") == "outline_approved"
+        assert sm.transition("course", "draft", "indexing") == "indexing"
 
     def test_illegal_transition_raises(self):
         with pytest.raises(InvalidInputError):
@@ -42,14 +43,12 @@ class TestStateMachine:
             sm.transition("course", "draft", "nonsense")
 
     def test_terminal_states(self):
-        assert sm.is_terminal("course", "published")
-        assert sm.is_terminal("course", "failed")
+        assert sm.is_terminal("chapter", "published")
+        assert sm.is_terminal("run", "failed")
         assert not sm.is_terminal("course", "draft")
 
-    def test_failed_course_cannot_recover(self):
-        # PDR-003: published/failed content is never resurrected in place.
-        with pytest.raises(InvalidInputError):
-            sm.transition("course", "failed", "generating")
+    def test_failed_course_can_retry_appropriate_stage(self):
+        assert sm.transition("course", "failed", "generating") == "generating"
 
     def test_review_escalation_path(self):
         assert sm.transition("chapter_review", "pending", "escalated") == "escalated"
@@ -69,7 +68,8 @@ class TestApprovalGate:
         assert sm.approval_matches("第一章 极限\n第二章 导数", "第一章 极限\n第二章 导数")
 
     def test_trailing_newlines_tolerated(self):
-        assert sm.approval_matches("A\nB", "A\nB\n\n")
+        assert sm.approval_matches("A\nB", "A\nB\n")
+        assert not sm.approval_matches("A\nB", "A\nB\n\n")
 
     def test_nfc_normalization(self):
         # composed vs decomposed 'é' are the same text
@@ -107,16 +107,21 @@ class TestOutlineValidation:
 class TestDomainModels:
     @pytest.mark.asyncio
     async def test_course_transition_saves(self, monkeypatch):
-        course = Course(title="Calculus")
+        course = Course(title="Calculus", notebook="notebook:1")
         save_mock = AsyncMock()
         monkeypatch.setattr(Course, "save", save_mock)
-        await course.transition_to(sm.CourseStatus.OUTLINE_APPROVED)
-        assert course.status == "outline_approved"
+        await course.transition_to(sm.CourseStatus.INDEXING)
+        assert course.status == "indexing"
         save_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_chapter_review_transition_saves(self, monkeypatch):
-        chapter = Chapter(course_version="course_version:1", chapter_no=1, title="Limits")
+        chapter = Chapter(
+            course_version="course_version:1",
+            chapter_no=1,
+            chapter_key="limits",
+            title="Limits",
+        )
         save_mock = AsyncMock()
         monkeypatch.setattr(Chapter, "save", save_mock)
         await chapter.transition_review("passed")
@@ -157,9 +162,17 @@ class TestSerializationLock:
 
 class TestCourseRouter:
     def test_create_course(self, client, monkeypatch):
-        monkeypatch.setattr(Course, "save", AsyncMock())
+        monkeypatch.setattr(
+            CourseService,
+            "create_course",
+            AsyncMock(
+                return_value=Course(
+                    id="course:1", title="Calculus I", notebook="notebook:1"
+                )
+            ),
+        )
         response = client.post("/api/courses", json={"title": "Calculus I"})
-        assert response.status_code == 200
+        assert response.status_code == 201
         body = response.json()
         assert body["title"] == "Calculus I"
         assert body["status"] == "draft"
@@ -177,47 +190,39 @@ class TestCourseRouter:
         assert response.status_code == 200
         assert response.json() == []
 
-    def test_illegal_transition_returns_400(self, client, monkeypatch):
-        course = Course(title="T")
-
-        async def fake_get(_id):
-            return course
-
-        monkeypatch.setattr(Course, "get", fake_get)
-        monkeypatch.setattr(Course, "save", AsyncMock())
+    def test_generic_transition_bypass_is_absent(self, client):
         response = client.post(
             "/api/courses/course:1/status", json={"status": "published"}
         )
-        assert response.status_code == 400
-        assert "Illegal" in response.json()["detail"]
+        assert response.status_code == 404
 
-    def test_approve_outline_rejects_bad_payload(self, client, monkeypatch):
-        course = Course(title="T")
-
-        async def fake_get(_id):
-            return course
-
-        monkeypatch.setattr(Course, "get", fake_get)
-        monkeypatch.setattr(Course, "save", AsyncMock())
-        response = client.put(
-            "/api/courses/course:1/outline", json={"outline": {}}
+    def test_approve_outline_rejects_bad_confirmation(self, client):
+        response = client.post(
+            "/api/courses/course:1/outline/approve",
+            json={"version_id": "course_version:1", "confirmation": "确认"},
         )
-        assert response.status_code == 400
+        assert response.status_code == 422
 
-    def test_approve_outline_transitions_to_approved(self, client, monkeypatch):
-        course = Course(title="T")
-
-        async def fake_get(_id):
-            return course
-
-        monkeypatch.setattr(Course, "get", fake_get)
-        monkeypatch.setattr(Course, "save", AsyncMock())
-        response = client.put(
-            "/api/courses/course:1/outline",
-            json={"outline": {"chapters": [{"title": "第一章"}]}},
+    def test_approve_outline_calls_service(self, client, monkeypatch):
+        approved = CourseVersion(
+            id="course_version:1",
+            course="course:1",
+            version_no=1,
+            approved_at="2026-08-18T00:00:00Z",
+            confirmation="确认大纲",
+        )
+        monkeypatch.setattr(
+            CourseService, "approve_outline", AsyncMock(return_value=approved)
+        )
+        response = client.post(
+            "/api/courses/course:1/outline/approve",
+            json={
+                "version_id": "course_version:1",
+                "confirmation": "确认大纲",
+            },
         )
         assert response.status_code == 200
-        assert response.json()["status"] == "outline_approved"
+        assert response.json()["confirmation"] == "确认大纲"
 
     def test_unknown_lab_type_rejected(self, client, monkeypatch):
         version = CourseVersion(course="course:1", version_no=1)
@@ -233,5 +238,5 @@ class TestCourseRouter:
                 "payload": {"x": 1},
             },
         )
-        assert response.status_code == 400
+        assert response.status_code == 422
         assert "lab_type" in response.json()["detail"]

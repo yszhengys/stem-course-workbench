@@ -14,14 +14,15 @@ from open_notebook.exceptions import InvalidInputError
 
 class CourseStatus:
     DRAFT = "draft"
+    INDEXING = "indexing"
+    OUTLINE_READY = "outline_ready"
     OUTLINE_APPROVED = "outline_approved"
     GENERATING = "generating"
-    REVIEWING = "reviewing"
-    PUBLISHED = "published"
+    READY = "ready"
     FAILED = "failed"
 
     ALL: FrozenSet[str] = frozenset(
-        {DRAFT, OUTLINE_APPROVED, GENERATING, REVIEWING, PUBLISHED, FAILED}
+        {DRAFT, INDEXING, OUTLINE_READY, OUTLINE_APPROVED, GENERATING, READY, FAILED}
     )
 
 
@@ -77,19 +78,45 @@ class ProgressStatus:
     ALL: FrozenSet[str] = frozenset({NOT_STARTED, IN_PROGRESS, COMPLETED})
 
 
+class ChapterStatus:
+    DRAFT = "draft"
+    GENERATING = "generating"
+    REVIEWING = "reviewing"
+    BLOCKED = "blocked"
+    READY = "ready"
+    PUBLISHED = "published"
+
+    ALL: FrozenSet[str] = frozenset(
+        {DRAFT, GENERATING, REVIEWING, BLOCKED, READY, PUBLISHED}
+    )
+
+
+class RunStatus:
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+    ALL: FrozenSet[str] = frozenset({QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED})
+
+
 # Allowed transitions. Key: current state, value: allowed next states.
 TRANSITIONS: Dict[str, Dict[str, FrozenSet[str]]] = {
     "course": {
-        CourseStatus.DRAFT: frozenset({CourseStatus.OUTLINE_APPROVED}),
+        CourseStatus.DRAFT: frozenset({CourseStatus.INDEXING}),
+        CourseStatus.INDEXING: frozenset(
+            {CourseStatus.OUTLINE_READY, CourseStatus.FAILED}
+        ),
+        CourseStatus.OUTLINE_READY: frozenset(
+            {CourseStatus.OUTLINE_APPROVED, CourseStatus.INDEXING, CourseStatus.FAILED}
+        ),
         CourseStatus.OUTLINE_APPROVED: frozenset({CourseStatus.GENERATING}),
-        CourseStatus.GENERATING: frozenset(
-            {CourseStatus.REVIEWING, CourseStatus.FAILED}
+        CourseStatus.GENERATING: frozenset({CourseStatus.READY, CourseStatus.FAILED}),
+        CourseStatus.READY: frozenset({CourseStatus.OUTLINE_READY, CourseStatus.GENERATING}),
+        CourseStatus.FAILED: frozenset(
+            {CourseStatus.INDEXING, CourseStatus.OUTLINE_READY, CourseStatus.GENERATING}
         ),
-        CourseStatus.REVIEWING: frozenset(
-            {CourseStatus.PUBLISHED, CourseStatus.FAILED}
-        ),
-        CourseStatus.PUBLISHED: frozenset(),
-        CourseStatus.FAILED: frozenset(),
     },
     "version": {
         VersionStatus.DRAFT: frozenset({VersionStatus.GENERATING}),
@@ -139,6 +166,23 @@ TRANSITIONS: Dict[str, Dict[str, FrozenSet[str]]] = {
         ),
         ProgressStatus.COMPLETED: frozenset({ProgressStatus.IN_PROGRESS}),
     },
+    "chapter": {
+        ChapterStatus.DRAFT: frozenset({ChapterStatus.GENERATING}),
+        ChapterStatus.GENERATING: frozenset({ChapterStatus.REVIEWING}),
+        ChapterStatus.REVIEWING: frozenset({ChapterStatus.BLOCKED, ChapterStatus.READY}),
+        ChapterStatus.BLOCKED: frozenset({ChapterStatus.GENERATING}),
+        ChapterStatus.READY: frozenset({ChapterStatus.PUBLISHED, ChapterStatus.GENERATING}),
+        ChapterStatus.PUBLISHED: frozenset(),
+    },
+    "run": {
+        RunStatus.QUEUED: frozenset({RunStatus.RUNNING, RunStatus.CANCELLED}),
+        RunStatus.RUNNING: frozenset(
+            {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.CANCELLED}
+        ),
+        RunStatus.SUCCEEDED: frozenset(),
+        RunStatus.FAILED: frozenset(),
+        RunStatus.CANCELLED: frozenset(),
+    },
 }
 
 # Valid state sets, for input validation.
@@ -150,6 +194,8 @@ VALID_STATES: Dict[str, FrozenSet[str]] = {
     "evidence": EvidenceStatus.ALL,
     "attempt": AttemptStatus.ALL,
     "progress": ProgressStatus.ALL,
+    "chapter": ChapterStatus.ALL,
+    "run": RunStatus.ALL,
 }
 
 
@@ -222,10 +268,12 @@ def normalize_approval(text: str) -> str:
     *exact*).
     """
     normalized = unicodedata.normalize("NFC", text)
-    lines = [line.rstrip() for line in normalized.splitlines()]
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return "\n".join(line for line in lines if line.strip())
+    # Only surrounding whitespace and one trailing newline are tolerated.
+    # Internal whitespace/newlines remain exact and therefore meaningful.
+    normalized = normalized.strip(" \t")
+    if normalized.endswith("\n"):
+        normalized = normalized[:-1]
+    return normalized.strip(" \t")
 
 
 def approval_matches(expected: str, provided: str) -> bool:

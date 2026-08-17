@@ -802,6 +802,10 @@ class CourseCreate(BaseModel):
     title: str = Field(..., min_length=1, description="Course title")
     subject: Optional[str] = Field(None, description="Subject area")
     description: Optional[str] = Field(None, description="Course description")
+    language: str = Field("zh-CN", min_length=2, max_length=20)
+    notebook_id: Optional[str] = Field(
+        None, description="Validated existing notebook; omitted creates one"
+    )
     config: Optional[Dict[str, Any]] = Field(
         None, description="Generation config (models, locale, validation)"
     )
@@ -811,6 +815,7 @@ class CourseUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, description="Course title")
     subject: Optional[str] = Field(None, description="Subject area")
     description: Optional[str] = Field(None, description="Course description")
+    language: Optional[str] = Field(None, min_length=2, max_length=20)
     config: Optional[Dict[str, Any]] = Field(
         None, description="Generation config"
     )
@@ -822,6 +827,16 @@ class CourseOutlineUpdate(BaseModel):
     )
 
 
+class CourseOutlineApproval(BaseModel):
+    version_id: str = Field(..., min_length=1)
+    confirmation: str
+
+
+class CourseSourceAssociation(BaseModel):
+    source_id: str = Field(..., min_length=1)
+    role: Literal["PRIMARY", "SUPPLEMENT"]
+
+
 class CourseStatusUpdate(BaseModel):
     status: str = Field(..., description="Target course status")
 
@@ -830,6 +845,8 @@ class CourseVersionCreate(BaseModel):
     outline_hash: Optional[str] = Field(
         None, description="Hash of the approved outline this version is based on"
     )
+    outline_artifact: Optional[Dict[str, Any]] = None
+    input_hash: Optional[str] = None
 
 
 class CourseVersionStatusUpdate(BaseModel):
@@ -839,6 +856,9 @@ class CourseVersionStatusUpdate(BaseModel):
 class ChapterCreate(BaseModel):
     chapter_no: int = Field(..., ge=1, description="Chapter number (1-based)")
     title: str = Field(..., min_length=1, description="Chapter title")
+    chapter_key: Optional[str] = Field(None, min_length=1, max_length=100)
+    artifact: Optional[Dict[str, Any]] = None
+    input_hash: Optional[str] = None
 
 
 class ChapterUpdate(BaseModel):
@@ -851,6 +871,9 @@ class ChapterUpdate(BaseModel):
     validation_status: Optional[str] = Field(
         None, description="Target validation status"
     )
+    status: Optional[str] = Field(None, description="Target chapter lifecycle status")
+    artifact: Optional[Dict[str, Any]] = None
+    input_hash: Optional[str] = None
 
 
 class LabCreate(BaseModel):
@@ -865,6 +888,8 @@ class LabCreate(BaseModel):
 
 class AttemptCreate(BaseModel):
     answers: Dict[str, Any] = Field(..., description="Student answers payload")
+    chapter_key: Optional[str] = None
+    exercise_key: Optional[str] = None
 
 
 class AttemptStatusUpdate(BaseModel):
@@ -873,9 +898,17 @@ class AttemptStatusUpdate(BaseModel):
 
 class ProgressUpdate(BaseModel):
     chapter: Optional[str] = Field(None, description="Optional chapter record id")
+    chapter_key: Optional[str] = Field(None, description="Stable chapter key")
+    block_key: Optional[str] = Field(None, description="Stable block key")
     status: str = Field(..., description="Target progress status")
 
 
 class CourseNoteCreate(BaseModel):
     chapter: Optional[str] = Field(None, description="Optional chapter record id")
+    chapter_key: Optional[str] = Field(None, description="Stable chapter key")
+    block_key: Optional[str] = Field(None, description="Stable block key")
     content: str = Field(..., min_length=1, description="Note content")
+
+
+class ChapterPublish(BaseModel):
+    course_id: str = Field(..., min_length=1)
