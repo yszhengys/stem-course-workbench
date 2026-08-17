@@ -135,6 +135,16 @@ specs/
 
 .playwright-mcp/
 
+# STEM Course Workbench local tools, evidence, and original teaching material
+.tools/
+surreal_data/
+notebook_data/course_evidence/
+course_evidence/
+course_originals/
+originals/
+work/
+outputs/
+
 
 
 *.local.yml
