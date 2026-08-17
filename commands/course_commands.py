@@ -86,8 +86,8 @@ class AdapterFailureDisposition(str, Enum):
     TRANSIENT = "transient"
 
 
-class _TerminalAdapterFailure(ValueError):
-    """Adapter failure already synchronized to its persistent Course run."""
+class _TerminalCourseFailure(ValueError):
+    """Command failure already synchronized to its persistent Course run."""
 
 
 def _command_id(input_data: StrictCourseCommandInput) -> str | None:
@@ -132,7 +132,7 @@ async def _handle_adapter_failure(
 ) -> NoReturn:
     if _adapter_failure_disposition(exc) is AdapterFailureDisposition.PERMANENT:
         await _permanent_failure(input_data, exc)
-        raise _TerminalAdapterFailure(str(exc)) from exc
+        raise _TerminalCourseFailure(str(exc)) from exc
     raise exc
 
 
@@ -151,10 +151,13 @@ async def _execute_course_operation(
                 await _handle_adapter_failure(input_data, exc)
             if attempt == max_attempts:
                 await _permanent_failure(input_data, exc)
-                raise _TerminalAdapterFailure(str(exc)) from exc
+                raise _TerminalCourseFailure(str(exc)) from exc
             await asyncio.sleep(
                 min(2 ** (attempt - 1), COURSE_ADAPTER_WAIT_MAX_SECONDS)
             )
+        except Exception as exc:
+            await _permanent_failure(input_data, exc)
+            raise _TerminalCourseFailure(str(exc)) from exc
     raise AssertionError("unreachable adapter retry state")
 
 
@@ -181,7 +184,7 @@ async def course_build_evidence_command(
 
     try:
         anchors = await _execute_course_operation(input_data, operation)
-    except _TerminalAdapterFailure:
+    except _TerminalCourseFailure:
         raise
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
         await _permanent_failure(input_data, exc)
@@ -218,7 +221,7 @@ async def course_generate_outline_command(
 
     try:
         version = await _execute_course_operation(input_data, operation)
-    except _TerminalAdapterFailure:
+    except _TerminalCourseFailure:
         raise
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
         await _permanent_failure(input_data, exc)
@@ -253,7 +256,7 @@ async def course_generate_chapter_command(
 
     try:
         chapter = await _execute_course_operation(input_data, operation)
-    except _TerminalAdapterFailure:
+    except _TerminalCourseFailure:
         raise
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
         await _permanent_failure(input_data, exc)
@@ -288,7 +291,7 @@ async def course_review_chapter_command(
 
     try:
         chapter, findings = await _execute_course_operation(input_data, operation)
-    except _TerminalAdapterFailure:
+    except _TerminalCourseFailure:
         raise
     except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
         await _permanent_failure(input_data, exc)

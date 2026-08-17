@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -34,14 +35,16 @@ class _FakeQueueStore:
             run_id = str(variables["run_id"])
             if run_id in self.runs:
                 raise RuntimeError("record already exists")
-            row = {"id": run_id, **dict(variables["payload"])}
+            payload = cast(dict[str, object], variables["payload"])
+            row = {"id": run_id, **payload}
             self.runs[run_id] = row
             return [dict(row)]
         if "FROM command WHERE" in statement and "args.run_id" in statement:
             rows = [
                 dict(row)
                 for row in self.commands.values()
-                if dict(row["args"])["run_id"] == variables["run_id"]
+                if cast(dict[str, object], row["args"])["run_id"]
+                == variables["run_id"]
             ]
             return rows[-1:]
         if statement.lstrip().startswith("UPDATE $run_id SET command"):
@@ -323,6 +326,65 @@ async def test_transient_adapter_retry_reuses_selection_and_can_recover(
     assert await module._execute_course_operation(input_data, operation) is expected
     assert operation.await_count == 2
     permanent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_failure_after_activation_terminalizes_run_without_retry(
+    monkeypatch,
+) -> None:
+    import commands.course_commands as module
+    from open_notebook.course.models import CourseGenerationRun
+
+    run = CourseGenerationRun(
+        id="course_generation_run:runtime-failure",
+        course="course:one",
+        course_version="course_version:one",
+        chapter_key="motion",
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        status="running",
+        prompt_version="v1",
+        input_hash="a" * 64,
+        command="command:one",
+    )
+    request = module.CourseChapterInput.model_validate(
+        {
+            "run_id": str(run.id),
+            "course_id": str(run.course),
+            "chapter_key": "motion",
+            "anchor_ids": ["anchor:one"],
+            "prompt_version": "v1",
+            "model": {
+                "adapter": "codex_cli",
+                "model": "gpt-5.6-sol",
+                "reasoning_effort": "max",
+            },
+            "execution_context": {
+                "command_id": "command:one",
+                "execution_started_at": "2026-08-18T00:00:00Z",
+                "app_name": "open_notebook",
+                "command_name": "course_generate_chapter",
+            },
+        }
+    )
+    generate = AsyncMock(side_effect=RuntimeError("Lab.save failed"))
+    monkeypatch.setattr(module._workflow, "load_run", AsyncMock(return_value=run))
+    monkeypatch.setattr(module._workflow, "generate_chapter", generate)
+
+    async def terminalize(**kwargs):
+        run.status = "failed"
+        run.error_message = str(kwargs["message"])
+
+    monkeypatch.setattr(module._workflow, "fail_run_reference", terminalize)
+
+    with pytest.raises(ValueError, match="Lab.save failed"):
+        await module.course_generate_chapter_command(request)
+
+    assert run.status == "failed"
+    assert run.error_message == "Lab.save failed"
+    assert generate.await_count == 1
 
 
 def test_course_command_registry_import_failure_is_fatal() -> None:
@@ -643,6 +705,308 @@ def test_succeeded_replay_fails_closed_on_output_hash_mismatch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_evidence_replay_hash_uses_immutable_canonical_anchor_output(
+    monkeypatch,
+) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.contracts import ModelSelection
+    from open_notebook.course.evidence_service import EvidenceService
+    from open_notebook.course.models import Course, CourseGenerationRun
+
+    source_hash = "a" * 64
+    course = Course(
+        id="course:canonical-evidence",
+        title="Physics",
+        notebook="notebook:one",
+        status="indexing",
+        source_ids=["source:one"],
+        primary_source_ids=["source:one"],
+    )
+    evidence = EvidenceService()
+    anchors = [
+        evidence.make_anchor(
+            course_id=str(course.id),
+            source_id="source:one",
+            source_sha256=source_hash,
+            kind="pdf_page",
+            index=index,
+            block_key=key,
+            quote=quote,
+            source_role="PRIMARY",
+        )
+        for index, key, quote in ((1, "a", "first"), (2, "b", "second"))
+    ]
+    selection = ModelSelection(adapter="open_notebook", model="docling")
+    command_args = {
+        "course_id": str(course.id),
+        "source_id": "source:one",
+        "role": "PRIMARY",
+    }
+    run = CourseGenerationRun(
+        id="course_generation_run:canonical-evidence",
+        course=str(course.id),
+        stage="evidence",
+        adapter=selection.adapter,
+        model=selection.model,
+        status="running",
+        prompt_version="evidence-v1",
+        input_hash=module.generation_input_hash(
+            course_id=str(course.id),
+            stage="evidence",
+            command_args=command_args,
+            model=selection,
+            prompt_version="evidence-v1",
+            anchor_ids=[],
+            source_hashes={"source:one": source_hash},
+        ),
+    )
+    persisted_rows = []
+    for number, anchor in enumerate(anchors, start=1):
+        row = anchor.model_dump(mode="json")
+        row.update(
+            {
+                "id": f"course_evidence_anchor:{number}",
+                "evidence": "evidence:one",
+                "created": "2026-08-18T00:00:00Z",
+                "updated": "2026-08-18T00:01:00Z",
+            }
+        )
+        persisted_rows.append(row)
+
+    async def query(statement, variables=None):
+        del variables
+        assert "FROM course_evidence_anchor" in statement
+        # Deliberately differs from the build order and includes DB envelope data.
+        return list(reversed(persisted_rows))
+
+    async def activate(active_run, _command_id):
+        return active_run
+
+    workflow = module.CourseWorkflowService()
+    monkeypatch.setattr(module.Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(module, "repo_query", query)
+    monkeypatch.setattr(workflow, "activate_run", activate)
+    monkeypatch.setattr(workflow, "_source_hash", AsyncMock(return_value=source_hash))
+    evidence_build = AsyncMock(return_value=anchors)
+    monkeypatch.setattr(workflow.evidence, "build", evidence_build)
+    monkeypatch.setattr(module.CourseGenerationRun, "save", AsyncMock(return_value=None))
+
+    built = await workflow.build_evidence(
+        run=run,
+        command_id="command:evidence",
+        course_id=str(course.id),
+        source_id="source:one",
+        role="PRIMARY",
+    )
+    replayed = await workflow.build_evidence(
+        run=run,
+        command_id="command:evidence",
+        course_id=str(course.id),
+        source_id="source:one",
+        role="PRIMARY",
+    )
+
+    assert {item.anchor_id for item in built} == {item.anchor_id for item in replayed}
+    assert evidence_build.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolution(
+    monkeypatch,
+) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.contracts import (
+        CourseOutlineArtifact,
+        ModelSelection,
+        ReviewArtifact,
+        ValidationFinding,
+    )
+    from open_notebook.course.models import (
+        Chapter,
+        Course,
+        CourseGenerationRun,
+        CourseVersion,
+    )
+
+    source_hash = "b" * 64
+    anchor_ids = ["anchor:one"]
+    course = Course(
+        id="course:canonical-review",
+        title="Physics",
+        notebook="notebook:one",
+        status="outline_approved",
+        outline_version_id="course_version:one",
+    )
+    outline = CourseOutlineArtifact(
+        title="Physics",
+        chapters=[
+            {
+                "key": "motion",
+                "title": "Motion",
+                "purpose": "Learn motion.",
+                "objective_keys": ["motion"],
+                "anchor_ids": anchor_ids,
+            }
+        ],
+        concepts=[
+            {"key": "motion", "label": "Motion", "anchor_ids": anchor_ids}
+        ],
+    )
+    version = CourseVersion(
+        id="course_version:one",
+        course=str(course.id),
+        version_no=1,
+        status="generating",
+        outline_artifact=outline.model_dump(mode="json"),
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+    )
+    chapter = Chapter(
+        id="chapter:one",
+        course_version=str(version.id),
+        chapter_no=1,
+        chapter_key="motion",
+        title="Motion",
+        status="reviewing",
+        artifact={
+            "chapter_key": "motion",
+            "purpose": "Learn motion.",
+            "objectives": ["Understand motion"],
+            "sections": [
+                {
+                    "key": "core",
+                    "title": "Core",
+                    "markdown": "Grounded.",
+                    "anchor_ids": anchor_ids,
+                    "provenance": "derived",
+                }
+            ],
+        },
+    )
+    original_findings = [
+        ValidationFinding(
+            kind="review",
+            severity="info",
+            item_key=item_key,
+            anchor_ids=anchor_ids,
+            message=message,
+        )
+        for item_key, message in (("a", "First"), ("b", "Second"))
+    ]
+    review = AsyncMock(return_value=ReviewArtifact(findings=original_findings))
+    generation = SimpleNamespace(
+        review=review,
+        validate_chapter=lambda _artifact, _anchors: [],
+        assert_publishable=lambda _findings: None,
+    )
+    workflow = module.CourseWorkflowService(
+        generation=cast(module.CourseGenerationService, generation)
+    )
+    selection = ModelSelection(
+        adapter="codex_cli", model="gpt-5.6-luna", reasoning_effort="max"
+    )
+    command_args = {
+        "course_id": str(course.id),
+        "chapter_key": "motion",
+        "anchor_ids": anchor_ids,
+        "prompt_version": "v1",
+        "model": selection.model_dump(mode="json"),
+    }
+    run = CourseGenerationRun(
+        id="course_generation_run:canonical-review",
+        course=str(course.id),
+        course_version=str(version.id),
+        chapter=str(chapter.id),
+        chapter_key="motion",
+        stage="review",
+        adapter=selection.adapter,
+        model=selection.model,
+        reasoning_effort=selection.reasoning_effort,
+        status="running",
+        prompt_version="v1",
+        input_hash=module.generation_input_hash(
+            course_id=str(course.id),
+            stage="review",
+            command_args=command_args,
+            model=selection,
+            prompt_version="v1",
+            anchor_ids=anchor_ids,
+            source_hashes={"source:one": source_hash},
+            course_version_id=str(version.id),
+            chapter_id=str(chapter.id),
+            chapter_key="motion",
+        ),
+    )
+    persisted_rows: list[dict[str, object]] = []
+
+    async def query(statement, variables=None):
+        variables = variables or {}
+        if statement.lstrip().startswith("DELETE course_validation_finding"):
+            persisted_rows.clear()
+            return []
+        if "UPSERT $finding_id" in statement:
+            persisted_rows.append(
+                {
+                    "id": str(variables["finding_id"]),
+                    "generation_run": str(run.id),
+                    "finding": dict(variables["finding"]),
+                    "created": "2026-08-18T00:00:00Z",
+                    "updated": "2026-08-18T00:01:00Z",
+                }
+            )
+            return []
+        if "FROM course_validation_finding" in statement:
+            return list(reversed(persisted_rows))
+        raise AssertionError(statement)
+
+    async def activate(active_run, _command_id):
+        return active_run
+
+    monkeypatch.setattr(workflow, "approved_version", AsyncMock(return_value=(version, outline)))
+    monkeypatch.setattr(
+        workflow,
+        "grounded_inputs",
+        AsyncMock(return_value=([], {"source:one": source_hash}, [])),
+    )
+    monkeypatch.setattr(workflow, "activate_run", activate)
+    monkeypatch.setattr(module, "repo_query", query)
+    monkeypatch.setattr(module.Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(module.CourseVersion, "chapters", AsyncMock(return_value=[chapter]))
+    monkeypatch.setattr(module.Chapter, "get", AsyncMock(return_value=chapter))
+    monkeypatch.setattr(module.Chapter, "save", AsyncMock(return_value=None))
+    monkeypatch.setattr(module.CourseGenerationRun, "save", AsyncMock(return_value=None))
+
+    _, initial = await workflow.review_chapter(
+        run=run,
+        command_id="command:review",
+        course_id=str(course.id),
+        chapter_key="motion",
+        anchor_ids=anchor_ids,
+        model=selection,
+        prompt_version="v1",
+    )
+    for index, row in enumerate(persisted_rows):
+        finding = dict(cast(dict[str, object], row["finding"]))
+        finding["status"] = "resolved"
+        finding["resolution_reason"] = f"Human resolution {index}"
+        row["finding"] = finding
+
+    _, replayed = await workflow.review_chapter(
+        run=run,
+        command_id="command:review",
+        course_id=str(course.id),
+        chapter_key="motion",
+        anchor_ids=anchor_ids,
+        model=selection,
+        prompt_version="v1",
+    )
+
+    assert [finding.item_key for finding in initial] == ["a", "b"]
+    assert {finding.status for finding in replayed} == {"resolved"}
+    assert review.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_persistent_active_run_dedupe_and_ordered_key(monkeypatch) -> None:
     import api.course_command_service as module
 
@@ -650,7 +1014,7 @@ async def test_persistent_active_run_dedupe_and_ordered_key(monkeypatch) -> None
     monkeypatch.setattr(module, "repo_query", store.query)
     monkeypatch.setattr(module, "submit_command", store.submit)
     service = module.CourseCommandService()
-    common = {
+    common: dict[str, Any] = {
         "course_id": "course:abc",
         "stage": "outline",
         "command_name": "course_generate_outline",
@@ -686,7 +1050,7 @@ async def test_concurrent_claim_terminal_retry_and_force(monkeypatch) -> None:
     monkeypatch.setattr(module, "repo_query", store.query)
     monkeypatch.setattr(module, "submit_command", store.submit)
     service = module.CourseCommandService()
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "course_id": "course:abc",
         "stage": "review",
         "command_name": "course_review_chapter",
@@ -724,7 +1088,7 @@ async def test_unbound_run_recovers_submitted_command_after_crash(monkeypatch) -
     monkeypatch.setattr(module, "repo_query", store.query)
     monkeypatch.setattr(module, "submit_command", store.submit)
     service = module.CourseCommandService()
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "course_id": "course:abc",
         "stage": "evidence",
         "command_name": "course_build_evidence",
@@ -763,7 +1127,7 @@ async def test_unbound_recovery_rejects_tampered_command_name_or_args(
     monkeypatch.setattr(module, "repo_query", store.query)
     monkeypatch.setattr(module, "submit_command", store.submit)
     service = module.CourseCommandService()
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "course_id": "course:abc",
         "stage": "evidence",
         "command_name": "course_build_evidence",
@@ -789,8 +1153,9 @@ async def test_unbound_recovery_rejects_tampered_command_name_or_args(
         await service.submit_stage(**kwargs)
 
     store.commands["command:cmd1"]["name"] = "course_generate_outline"
-    dict(store.commands["command:cmd1"]["args"])["role"] = "SUPPLEMENT"
-    tampered_args = dict(store.commands["command:cmd1"]["args"])
+    tampered_args = dict(
+        cast(dict[str, object], store.commands["command:cmd1"]["args"])
+    )
     tampered_args["role"] = "SUPPLEMENT"
     store.commands["command:cmd1"]["args"] = tampered_args
     monkeypatch.setattr(module, "repo_query", original_query)
@@ -890,7 +1255,43 @@ async def test_api_binding_fails_if_a_different_command_claimed_the_run(
             "course_generation_run:one", "command:api"
         )
 
-    assert "command = NONE OR command = $command_id" in query.await_args.args[0]
+    assert (
+        "command = NONE OR command = $command_id"
+        in query.await_args_list[0].args[0]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_status", ["succeeded", "failed", "cancelled"])
+async def test_api_binding_cannot_attach_command_to_terminalized_unbound_run(
+    monkeypatch,
+    terminal_status: str,
+) -> None:
+    import api.course_command_service as module
+
+    row = {
+        "id": "course_generation_run:one",
+        "status": terminal_status,
+        "command": None,
+    }
+
+    async def query(statement, variables=None):
+        del variables
+        if statement.lstrip().startswith("UPDATE $run_id SET command"):
+            assert "status IN ['queued', 'running']" in statement
+            return []
+        if statement.lstrip().startswith("SELECT * FROM $run_id"):
+            return [row]
+        raise AssertionError(statement)
+
+    monkeypatch.setattr(module, "repo_query", query)
+
+    with pytest.raises(ValueError, match=terminal_status):
+        await module.CourseCommandService._bind_command(
+            "course_generation_run:one", "command:api"
+        )
+
+    assert row["command"] is None
 
 
 @pytest.mark.asyncio
@@ -1125,6 +1526,7 @@ async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
     monkeypatch,
 ) -> None:
     import open_notebook.course.workflow_service as module
+    import open_notebook.domain.base as base_module
     from open_notebook.course.contracts import CourseOutlineArtifact, ModelSelection
     from open_notebook.course.evidence_service import EvidenceService
     from open_notebook.course.generation_service import CourseGenerationService
@@ -1171,11 +1573,20 @@ async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
     )
     versions: list[CourseVersion] = []
 
-    async def save_version(self):
-        if self.id is None:
-            self.id = f"course_version:v{len(versions) + 1}"
-        if not any(item.id == self.id for item in versions):
-            versions.append(self)
+    async def create_record(table, data):
+        assert table == "course_version"
+        row = {
+            **data,
+            "id": f"course_version:v{len(versions) + 1}",
+        }
+        versions.append(CourseVersion(**row))
+        return row
+
+    async def update_record(_table, record_id, _data):
+        # This mirrors SurrealDB UPDATE semantics: updating a deterministic ID
+        # that has not been created returns no row.
+        assert not any(str(item.id) == str(record_id) for item in versions)
+        return []
 
     async def query(statement, variables=None):
         variables = variables or {}
@@ -1204,8 +1615,9 @@ async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
     )
     monkeypatch.setattr(module.Course, "versions", AsyncMock(return_value=versions))
     monkeypatch.setattr(module.Course, "save", AsyncMock(return_value=None))
-    monkeypatch.setattr(module.CourseVersion, "save", save_version)
     monkeypatch.setattr(module.CourseGenerationRun, "save", AsyncMock(return_value=None))
+    monkeypatch.setattr(base_module, "repo_create", create_record)
+    monkeypatch.setattr(base_module, "repo_update", update_record)
     monkeypatch.setattr(workflow, "_source_hash", AsyncMock(return_value=source_hash))
     monkeypatch.setattr(workflow, "activate_run", activate)
     model = ModelSelection(
@@ -1423,10 +1835,12 @@ async def test_generic_command_status_synchronizes_course_run(monkeypatch) -> No
     result = await module.CommandService.get_command_status("command:abc")
 
     assert result["status"] == "failed"
-    assert "status = $run_status" in query.await_args.args[0]
-    assert "status = 'queued'" in query.await_args.args[0]
-    assert "status = 'running'" in query.await_args.args[0]
-    assert query.await_args.args[1]["run_status"] == "failed"
+    query_call = query.await_args
+    assert query_call is not None
+    assert "status = $run_status" in query_call.args[0]
+    assert "status = 'queued'" in query_call.args[0]
+    assert "status = 'running'" in query_call.args[0]
+    assert query_call.args[1]["run_status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -1465,6 +1879,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     """DB-free end-to-end proof of the V2 worker artifact path."""
 
     import open_notebook.course.workflow_service as module
+    import open_notebook.domain.base as base_module
     from api.course_service import CourseService
     from open_notebook.course.contracts import (
         ChapterArtifact,
@@ -1596,11 +2011,23 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         if not any(item.id == self.id for item in versions):
             versions.append(self)
 
-    async def save_chapter(self):
-        if self.id is None:
-            self.id = f"chapter:c{len(chapters) + 1}"
-        if not any(item.id == self.id for item in chapters):
-            chapters.append(self)
+    async def create_record(table, data):
+        assert table == "chapter"
+        row = {**data, "id": f"chapter:c{len(chapters) + 1}"}
+        chapters.append(Chapter(**row))
+        return row
+
+    async def update_record(table, record_id, data):
+        assert table == "chapter"
+        for index, stored in enumerate(chapters):
+            if str(stored.id) != str(record_id):
+                continue
+            row = {**stored.model_dump(mode="json"), **data, "id": str(stored.id)}
+            updated = Chapter(**row)
+            chapters[index] = updated
+            return [updated.model_dump(mode="json")]
+        # SurrealDB UPDATE of a never-created deterministic ID returns no row.
+        return []
 
     async def save_lab(self):
         if self.id is None:
@@ -1665,15 +2092,17 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     monkeypatch.setattr(module.CourseVersion, "chapters", list_chapters)
     monkeypatch.setattr(module.Course, "save", save_course)
     monkeypatch.setattr(module.CourseVersion, "save", save_version)
-    monkeypatch.setattr(module.Chapter, "save", save_chapter)
     monkeypatch.setattr(module.Lab, "save", save_lab)
     monkeypatch.setattr(module.CourseGenerationRun, "save", save_run)
+    monkeypatch.setattr(base_module, "repo_create", create_record)
+    monkeypatch.setattr(base_module, "repo_update", update_record)
     monkeypatch.setattr(CourseService, "get_course", AsyncMock(return_value=course))
 
     adapter = FakeCourseModelAdapter(outline)
     workflow = module.CourseWorkflowService(
         generation=CourseGenerationService(adapter=adapter)
     )
+
     async def activate(run, command_id):
         run.command = command_id
         if run.status == "queued":
@@ -1682,9 +2111,8 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
 
     monkeypatch.setattr(workflow, "activate_run", activate)
     monkeypatch.setattr(workflow, "_source_hash", AsyncMock(return_value=source_hash))
-    monkeypatch.setattr(
-        workflow.evidence, "build", AsyncMock(return_value=[anchor])
-    )
+    evidence_build = AsyncMock(return_value=[anchor])
+    monkeypatch.setattr(workflow.evidence, "build", evidence_build)
     selection = ModelSelection(
         adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
     )
@@ -1728,7 +2156,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     )
     assert [item.anchor_id for item in built] == [anchor.anchor_id]
     assert [item.anchor_id for item in replayed_evidence] == [anchor.anchor_id]
-    assert workflow.evidence.build.await_count == 1
+    assert evidence_build.await_count == 1
     assert course.status == "indexing"
     outline_args = {
         "course_id": "course:e2e",

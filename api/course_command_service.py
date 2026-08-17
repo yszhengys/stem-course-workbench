@@ -162,7 +162,8 @@ class CourseCommandService:
         rows = await repo_query(
             """
             UPDATE $run_id SET command = $command_id
-            WHERE command = NONE OR command = $command_id
+            WHERE (command = NONE OR command = $command_id)
+                AND status IN ['queued', 'running']
             RETURN AFTER;
             """,
             {
@@ -170,8 +171,18 @@ class CourseCommandService:
                 "command_id": ensure_record_id(command_id),
             },
         )
-        if not rows:
-            raise ValueError("Course generation run was claimed by another command")
+        if rows:
+            return
+
+        current_rows = await repo_query(
+            "SELECT * FROM $run_id;",
+            {"run_id": ensure_record_id(run_id)},
+        )
+        if current_rows:
+            status = str(current_rows[0].get("status") or "unknown")
+            if status not in ACTIVE_RUN_STATUSES:
+                raise ValueError(f"Course generation run is {status}")
+        raise ValueError("Course generation run was claimed by another command")
 
     async def _ensure_bound(
         self,

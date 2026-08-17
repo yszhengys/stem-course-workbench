@@ -84,6 +84,56 @@ def artifact_replay_hash(run: CourseGenerationRun) -> str:
     )
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _canonical_evidence_output(
+    anchors: list[CourseEvidenceAnchor],
+) -> list[dict[str, Any]]:
+    """Return only immutable anchor content in one stable semantic order."""
+
+    ordered = sorted(
+        anchors,
+        key=lambda anchor: (
+            anchor.locator.source_id,
+            anchor.locator.kind,
+            anchor.locator.index,
+            anchor.locator.block_key,
+            anchor.anchor_id,
+        ),
+    )
+    return [
+        anchor.model_dump(
+            mode="json",
+            include={"anchor_id", "locator", "quote_sha256", "source_role"},
+        )
+        for anchor in ordered
+    ]
+
+
+def _canonical_review_output(
+    run: CourseGenerationRun,
+    findings: list[ValidationFinding],
+) -> list[dict[str, Any]]:
+    """Exclude mutable resolution state and normalize the immutable reviewer ID."""
+
+    payloads: list[dict[str, Any]] = []
+    for finding in findings:
+        payload = finding.model_dump(
+            mode="json",
+            exclude={"status", "resolution_reason", "reviewer_run_id"},
+        )
+        payload["reviewer_run_id"] = str(run.id)
+        payloads.append(payload)
+    return sorted(payloads, key=_canonical_json)
+
+
 def _rows(model: type[Any], result: Any) -> list[Any]:
     values = result if isinstance(result, list) else [result] if result else []
     return [model(**row) for row in values if isinstance(row, dict)]
@@ -345,7 +395,7 @@ class CourseWorkflowService:
                     },
                 ),
             )
-            output = [anchor.model_dump(mode="json") for anchor in anchors]
+            output = _canonical_evidence_output(anchors)
             self.verify_completed_output(run, output)
             return anchors
         anchors = await self.evidence.build(
@@ -358,7 +408,7 @@ class CourseWorkflowService:
                 "course", course.status, sm.CourseStatus.INDEXING
             )
             await course.save()
-        await self.complete_run(run, [anchor.model_dump(mode="json") for anchor in anchors])
+        await self.complete_run(run, _canonical_evidence_output(anchors))
         return anchors
 
     async def generate_outline(
@@ -431,7 +481,6 @@ class CourseWorkflowService:
                 )
                 versions = await Course.versions(course_id)
                 version = CourseVersion(
-                    id=f"course_version:run_{replay_hash[:48]}",
                     course=course_id,
                     version_no=max((item.version_no for item in versions), default=0) + 1,
                     outline_artifact=artifact.model_dump(mode="json"),
@@ -626,7 +675,6 @@ class CourseWorkflowService:
                 )
                 siblings = await CourseVersion.chapters(str(version.id))
                 chapter = Chapter(
-                    id=f"chapter:run_{replay_hash[:48]}",
                     course_version=str(version.id),
                     chapter_no=chapter_no,
                     title=proposal.title,
@@ -781,7 +829,7 @@ class CourseWorkflowService:
                 ValidationFinding.model_validate(row["finding"])
                 for row in existing_rows
             ]
-            output = [finding.model_dump(mode="json") for finding in findings]
+            output = _canonical_review_output(run, findings)
             self.verify_completed_output(run, output)
             return chapter, findings
         chapters = await CourseVersion.chapters(str(version.id))
@@ -856,9 +904,7 @@ class CourseWorkflowService:
                 await chapter.transition_validation(sm.ChapterValidationStatus.PASSED)
             if chapter.status == sm.ChapterStatus.REVIEWING:
                 await chapter.transition_to(sm.ChapterStatus.READY)
-        await self.complete_run(
-            run, [finding.model_dump(mode="json") for finding in findings]
-        )
+        await self.complete_run(run, _canonical_review_output(run, findings))
         return chapter, findings
 
 
