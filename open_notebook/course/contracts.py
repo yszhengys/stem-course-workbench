@@ -6,7 +6,14 @@ import math
 import re
 from typing import Annotated, Generic, Literal, TypeAlias, TypeVar, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    field_validator,
+    model_validator,
+)
 
 
 class CourseContract(BaseModel):
@@ -17,13 +24,20 @@ ProvenanceLabel: TypeAlias = Literal[
     "verbatim", "adapted", "derived", "pedagogical", "补充"
 ]
 
+_COMMONMARK_FENCE = re.compile(r"(?m)^[ \t]{0,3}(?:`{3,}|~{3,})")
+_MATH_ANGLE_NOTATION = re.compile(
+    r"<(?:[A-Za-z]\s*,\s*)+[A-Za-z]\s*>|<v>", re.IGNORECASE
+)
+_HTML_ELEMENT = re.compile(r"<[/!]?[A-Za-z][^>]*>")
+
 
 def _validate_generated_text(value: str) -> str:
     lowered = value.lower()
+    without_math_angles = _MATH_ANGLE_NOTATION.sub("", value)
     if (
-        "```" in value
+        _COMMONMARK_FENCE.search(value)
         or "javascript:" in lowered
-        or re.search(r"<[/!]?[A-Za-z][^>]*>", value)
+        or _HTML_ELEMENT.search(without_math_angles)
     ):
         raise ValueError("generated text must not contain executable code or HTML")
     return value
@@ -157,7 +171,9 @@ class FormulaArtifact(CourseContract):
     oracle_unit_expression: str | None = Field(default=None, max_length=500)
     provenance: ProvenanceLabel = "derived"
     oracle_expression: str | None = Field(default=None, max_length=1000)
-    oracle_substitutions: dict[str, float] = Field(default_factory=dict, max_length=20)
+    oracle_substitutions: dict[str, FiniteFloat] = Field(
+        default_factory=dict, max_length=20
+    )
 
     _safe_text = field_validator("latex", "meaning")(_validate_generated_text)
     _safe_optional_text = field_validator(
@@ -172,8 +188,8 @@ class WorkedExampleArtifact(CourseContract):
     answer: str = Field(min_length=1, max_length=4000)
     anchor_ids: list[str] = Field(default_factory=list, max_length=100)
     oracle_expression: str | None = Field(default=None, max_length=1000)
-    oracle_values: dict[str, float] = Field(default_factory=dict, max_length=20)
-    oracle_answer: float | None = None
+    oracle_values: dict[str, FiniteFloat] = Field(default_factory=dict, max_length=20)
+    oracle_answer: FiniteFloat | None = None
     unit_expression: str | None = Field(default=None, max_length=500)
     oracle_unit_expression: str | None = Field(default=None, max_length=500)
     provenance: ProvenanceLabel = "derived"
@@ -194,8 +210,8 @@ class ExerciseArtifact(CourseContract):
     transfer_task: str = Field(min_length=1, max_length=4000)
     anchor_ids: list[str] = Field(default_factory=list, max_length=100)
     oracle_expression: str | None = Field(default=None, max_length=1000)
-    oracle_values: dict[str, float] = Field(default_factory=dict, max_length=20)
-    oracle_answer: float | None = None
+    oracle_values: dict[str, FiniteFloat] = Field(default_factory=dict, max_length=20)
+    oracle_answer: FiniteFloat | None = None
     provenance: ProvenanceLabel = "pedagogical"
 
     _safe_text = field_validator(
@@ -260,6 +276,7 @@ class LabSpec(CourseContract):
     ]
     key: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=300)
+    anchor_ids: list[str] = Field(default_factory=list, max_length=100)
     expressions: list[str] = Field(default_factory=list, max_length=8)
     domain: dict[str, tuple[float, float]] = Field(default_factory=dict, max_length=8)
     controls: list[LabControl] = Field(default_factory=list, max_length=8)

@@ -38,6 +38,20 @@ def test_parser_backed_course_prompts_render_format_and_safety_contract(stage: s
     assert "executable code" in rendered.lower() and "html" in rendered.lower()
 
 
+@pytest.mark.parametrize("stage", ["chapter_content", "practice_labs"])
+def test_chapter_prompts_require_oracle_units_for_unit_bearing_content(stage: str):
+    rendered = CourseGenerationService.prompt_for(
+        stage,
+        ["PRIMARY pdf_page 1 [anchor:one]: Grounded fact."],
+        "Return the requested artifact.",
+        format_instructions="FORMAT_SENTINEL",
+    )
+
+    lowered = rendered.lower()
+    assert "unit-bearing" in lowered
+    assert "oracle unit" in lowered
+
+
 @pytest.mark.asyncio
 async def test_course_model_options_keep_defaults_and_deepseek_optional(monkeypatch):
     configured = [
@@ -148,7 +162,11 @@ def test_generation_hash_helpers_are_canonical_and_do_not_expose_input():
 
 
 def test_chapter_section_rejects_code_fences_and_arbitrary_html():
-    for unsafe in ("```python\nprint(1)\n```", "<b>model HTML</b>"):
+    for unsafe in (
+        "```python\nprint(1)\n```",
+        "  ~~~python\nprint(1)\n  ~~~",
+        "<b>model HTML</b>",
+    ):
         with pytest.raises(ValidationError, match="code or HTML"):
             ChapterSection(
                 key="unsafe",
@@ -158,6 +176,22 @@ def test_chapter_section_rejects_code_fences_and_arbitrary_html():
             )
     with pytest.raises(ValidationError, match="anchor_ids"):
         ChapterSection(key="ungrounded", title="Ungrounded", markdown="A claim.")
+
+
+def test_generated_text_allows_math_angles_and_inline_tildes():
+    section = ChapterSection(
+        key="inner-product",
+        title="Inner products",
+        markdown=(
+            r"Compare <x,y> with <v> and \langle x,y\rangle. "
+            "Three inline tildes ~~~ are ordinary prose."
+        ),
+        anchor_ids=["anchor:one"],
+    )
+
+    assert "<x,y>" in section.markdown
+    assert "<v>" in section.markdown
+    assert r"\langle x,y\rangle" in section.markdown
 
 
 @pytest.mark.parametrize(

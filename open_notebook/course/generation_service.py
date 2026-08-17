@@ -48,6 +48,36 @@ class CourseGenerationService:
         self.adapter = adapter
 
     @staticmethod
+    def _resolved_for_publication(finding: ValidationFinding) -> bool:
+        reason = (finding.resolution_reason or "").strip()
+        if finding.status in {"manual_check", "uncertain"}:
+            return False
+        if finding.severity == "error":
+            return finding.status == "resolved"
+        if finding.severity == "high":
+            return finding.status == "resolved" or (
+                finding.status == "acknowledged" and bool(reason)
+            )
+        if finding.severity == "warning":
+            return (
+                finding.status in {"acknowledged", "resolved"}
+                and bool(reason)
+            )
+        return True
+
+    @staticmethod
+    def _eligible_for_escalation(finding: ValidationFinding) -> bool:
+        high_risk = (
+            finding.severity in {"high", "error"}
+            or finding.status == "uncertain"
+        )
+        return (
+            bool(finding.anchor_ids)
+            and not CourseGenerationService._resolved_for_publication(finding)
+            and high_risk
+        )
+
+    @staticmethod
     def grounded_context(
         *,
         course_id: str,
@@ -211,8 +241,7 @@ class CourseGenerationService:
         selected = [
             finding
             for finding in findings
-            if finding.severity in {"high", "error"}
-            or finding.status == "uncertain"
+            if self._eligible_for_escalation(finding)
         ]
         if not selected:
             return ReviewArtifact(findings=findings)
@@ -475,6 +504,87 @@ class CourseGenerationService:
         except Exception:
             return False
 
+    @staticmethod
+    def _validate_unit_oracle(
+        *,
+        item_key: str,
+        anchor_ids: list[str],
+        produced: str | None,
+        oracle: str | None,
+    ) -> list[ValidationFinding]:
+        if produced is None and oracle is None:
+            return []
+        if produced is None or oracle is None:
+            return [
+                ValidationFinding(
+                    kind="unit",
+                    severity="high",
+                    status="manual_check",
+                    item_key=item_key,
+                    anchor_ids=anchor_ids,
+                    message="Unit-bearing content requires both produced and oracle units.",
+                )
+            ]
+        if not produced.strip():
+            return [
+                ValidationFinding(
+                    kind="unit",
+                    severity="high",
+                    status="manual_check",
+                    item_key=item_key,
+                    anchor_ids=anchor_ids,
+                    message="Produced unit expression could not be parsed.",
+                )
+            ]
+        try:
+            produced_dimension = UNIT_REGISTRY.parse_expression(produced).dimensionality
+        except Exception:
+            return [
+                ValidationFinding(
+                    kind="unit",
+                    severity="high",
+                    status="manual_check",
+                    item_key=item_key,
+                    anchor_ids=anchor_ids,
+                    message="Produced unit expression could not be parsed.",
+                )
+            ]
+        if not oracle.strip():
+            return [
+                ValidationFinding(
+                    kind="unit",
+                    severity="high",
+                    status="manual_check",
+                    item_key=item_key,
+                    anchor_ids=anchor_ids,
+                    message="Oracle unit expression could not be parsed.",
+                )
+            ]
+        try:
+            oracle_dimension = UNIT_REGISTRY.parse_expression(oracle).dimensionality
+        except Exception:
+            return [
+                ValidationFinding(
+                    kind="unit",
+                    severity="high",
+                    status="manual_check",
+                    item_key=item_key,
+                    anchor_ids=anchor_ids,
+                    message="Oracle unit expression could not be parsed.",
+                )
+            ]
+        if produced_dimension != oracle_dimension:
+            return [
+                ValidationFinding(
+                    kind="unit",
+                    severity="error",
+                    item_key=item_key,
+                    anchor_ids=anchor_ids,
+                    message="Produced unit is dimensionally incompatible with its oracle.",
+                )
+            ]
+        return []
+
     @classmethod
     def validate_chapter(
         cls, artifact: ChapterArtifact, known_anchor_ids: set[str]
@@ -484,6 +594,7 @@ class CourseGenerationService:
             *((section.key, section.anchor_ids) for section in artifact.sections),
             *((formula.key, formula.anchor_ids) for formula in artifact.formulas),
             *((example.key, example.anchor_ids) for example in artifact.worked_examples),
+            *((lab.key, lab.anchor_ids) for lab in artifact.labs),
             *((exercise.key, exercise.anchor_ids) for exercise in artifact.exercises),
             (artifact.chapter_key, artifact.citations),
         ]
@@ -515,7 +626,21 @@ class CourseGenerationService:
                     )
                 )
                 continue
-            if formula.oracle_expression is None:
+            substitutions_are_finite = all(
+                math.isfinite(value) for value in formula.oracle_substitutions.values()
+            )
+            if not substitutions_are_finite:
+                findings.append(
+                    ValidationFinding(
+                        kind="formula",
+                        severity="high",
+                        status="manual_check",
+                        item_key=formula.key,
+                        anchor_ids=formula.anchor_ids,
+                        message="Formula oracle substitutions must be finite.",
+                    )
+                )
+            elif formula.oracle_expression is None:
                 findings.append(
                     ValidationFinding(
                         kind="formula",
@@ -557,50 +682,19 @@ class CourseGenerationService:
                                 message="Formula does not match its oracle expression.",
                             )
                         )
-            if formula.unit_expression:
-                try:
-                    UNIT_REGISTRY.parse_expression(formula.unit_expression)
-                except Exception:
-                    findings.append(
-                        ValidationFinding(
-                            kind="unit",
-                            severity="high",
-                            status="manual_check",
-                            item_key=formula.key,
-                            anchor_ids=formula.anchor_ids,
-                            message="Unit expression could not be parsed.",
-                        )
-                    )
-            if formula.oracle_unit_expression:
-                if formula.unit_expression is None:
-                    findings.append(
-                        ValidationFinding(
-                            kind="unit",
-                            severity="high",
-                            status="manual_check",
-                            item_key=formula.key,
-                            anchor_ids=formula.anchor_ids,
-                            message="Formula unit oracle has no produced unit to compare.",
-                        )
-                    )
-                elif not cls.units_compatible(
-                    formula.unit_expression, formula.oracle_unit_expression
-                ):
-                    findings.append(
-                        ValidationFinding(
-                            kind="unit",
-                            severity="error",
-                            item_key=formula.key,
-                            anchor_ids=formula.anchor_ids,
-                            message="Formula unit is dimensionally incompatible with its oracle.",
-                        )
-                    )
+            findings.extend(
+                cls._validate_unit_oracle(
+                    item_key=formula.key,
+                    anchor_ids=formula.anchor_ids,
+                    produced=formula.unit_expression,
+                    oracle=formula.oracle_unit_expression,
+                )
+            )
 
         oracle_items: list[WorkedExampleArtifact | ExerciseArtifact] = []
         for example in artifact.worked_examples:
             if (
                 example.oracle_expression is None
-                or not example.oracle_values
                 or example.oracle_answer is None
             ):
                 findings.append(
@@ -624,7 +718,6 @@ class CourseGenerationService:
             if supplied:
                 if (
                     exercise.oracle_expression is None
-                    or not exercise.oracle_values
                     or exercise.oracle_answer is None
                 ):
                     findings.append(
@@ -654,8 +747,39 @@ class CourseGenerationService:
                     )
                 )
                 continue
+            numeric_operands = [oracle_answer, *item.oracle_values.values()]
+            if not all(math.isfinite(value) for value in numeric_operands):
+                findings.append(
+                    ValidationFinding(
+                        kind="numeric",
+                        severity="high",
+                        status="manual_check",
+                        item_key=item.key,
+                        anchor_ids=item.anchor_ids,
+                        message="Numeric oracle operands must be finite.",
+                    )
+                )
+                continue
             try:
                 expression = cls._parse_safe_expression(expression_text)
+                required_symbols = {str(symbol) for symbol in expression.free_symbols}
+                missing_symbols = sorted(required_symbols - set(item.oracle_values))
+                if missing_symbols:
+                    findings.append(
+                        ValidationFinding(
+                            kind="numeric",
+                            severity="high",
+                            status="manual_check",
+                            item_key=item.key,
+                            anchor_ids=item.anchor_ids,
+                            message=(
+                                "Numeric oracle is missing values for symbols: "
+                                + ", ".join(missing_symbols)
+                                + "."
+                            ),
+                        )
+                    )
+                    continue
                 evaluated = float(N(expression.subs(item.oracle_values)))
                 tolerance = 1e-9 * max(1.0, abs(oracle_answer))
                 if not math.isfinite(evaluated) or abs(evaluated - oracle_answer) > tolerance:
@@ -682,37 +806,23 @@ class CourseGenerationService:
                     )
                 )
         for example in artifact.worked_examples:
-            if example.oracle_unit_expression:
-                if example.unit_expression is None:
-                    findings.append(
-                        ValidationFinding(
-                            kind="unit",
-                            severity="high",
-                            status="manual_check",
-                            item_key=example.key,
-                            anchor_ids=example.anchor_ids,
-                            message="Example unit oracle has no produced unit to compare.",
-                        )
-                    )
-                elif not cls.units_compatible(
-                    example.unit_expression, example.oracle_unit_expression
-                ):
-                    findings.append(
-                        ValidationFinding(
-                            kind="unit",
-                            severity="error",
-                            item_key=example.key,
-                            anchor_ids=example.anchor_ids,
-                            message="Example unit is dimensionally incompatible with its oracle.",
-                        )
-                    )
+            findings.extend(
+                cls._validate_unit_oracle(
+                    item_key=example.key,
+                    anchor_ids=example.anchor_ids,
+                    produced=example.unit_expression,
+                    oracle=example.oracle_unit_expression,
+                )
+            )
         for lab in artifact.labs:
             if any("=" in expression and "==" not in expression for expression in lab.expressions):
                 findings.append(
                     ValidationFinding(
                         kind="lab",
                         severity="error",
+                        status="open" if lab.anchor_ids else "manual_check",
                         item_key=lab.key,
+                        anchor_ids=lab.anchor_ids,
                         message="Lab expressions must not contain assignments.",
                     )
                 )
@@ -726,6 +836,12 @@ class CourseGenerationService:
         for rule in rules:
             key = str(rule.get("key", "physics"))
             kind = rule.get("kind")
+            raw_anchor_ids = rule.get("anchor_ids", [])
+            anchor_ids = (
+                [anchor_id for anchor_id in raw_anchor_ids if isinstance(anchor_id, str)]
+                if isinstance(raw_anchor_ids, list)
+                else []
+            )
             failed = False
             try:
                 if kind in {"direction", "reference_frame"}:
@@ -747,6 +863,7 @@ class CourseGenerationService:
                         severity="high",
                         status="manual_check",
                         item_key=key,
+                        anchor_ids=anchor_ids,
                         message="Physics rule could not be evaluated.",
                     )
                 )
@@ -756,7 +873,9 @@ class CourseGenerationService:
                     ValidationFinding(
                         kind="physics",
                         severity="error",
+                        status="open" if anchor_ids else "manual_check",
                         item_key=key,
+                        anchor_ids=anchor_ids,
                         message=f"Physics {kind} check failed.",
                     )
                 )
@@ -764,26 +883,11 @@ class CourseGenerationService:
 
     @staticmethod
     def assert_publishable(findings: Iterable[ValidationFinding]) -> None:
-        blocking: list[ValidationFinding] = []
-        for finding in findings:
-            reason = (finding.resolution_reason or "").strip()
-            if finding.status in {"manual_check", "uncertain"}:
-                blocking.append(finding)
-                continue
-            if finding.severity == "error":
-                if finding.status != "resolved":
-                    blocking.append(finding)
-                continue
-            if finding.severity == "high":
-                resolved = finding.status == "resolved" or (
-                    finding.status == "acknowledged" and bool(reason)
-                )
-                if not resolved:
-                    blocking.append(finding)
-                continue
-            if finding.severity == "warning":
-                if finding.status not in {"acknowledged", "resolved"} or not reason:
-                    blocking.append(finding)
+        blocking = [
+            finding
+            for finding in findings
+            if not CourseGenerationService._resolved_for_publication(finding)
+        ]
         if blocking:
             kinds = ", ".join(
                 f"{finding.severity}:{finding.item_key}" for finding in blocking
@@ -793,8 +897,7 @@ class CourseGenerationService:
     @staticmethod
     def requires_escalation(findings: Iterable[ValidationFinding]) -> bool:
         return any(
-            finding.severity in {"high", "error"}
-            or finding.status == "uncertain"
+            CourseGenerationService._eligible_for_escalation(finding)
             for finding in findings
         )
 
@@ -846,10 +949,7 @@ class CourseGenerationService:
         merged: list[ValidationFinding] = []
         for finding in original:
             replacement = responses.get(finding.item_key)
-            eligible = (
-                finding.severity in {"high", "error"}
-                or finding.status == "uncertain"
-            )
+            eligible = CourseGenerationService._eligible_for_escalation(finding)
             if replacement is None or not eligible:
                 merged.append(finding)
                 continue
