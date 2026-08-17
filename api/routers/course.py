@@ -76,6 +76,11 @@ async def list_courses():
     return [_body(course) for course in await _call(CourseService.list_courses())]
 
 
+@router.get("/courses/model-options")
+async def get_course_model_options():
+    return await _call(CourseService.get_model_options())
+
+
 @router.get("/courses/{course_id}")
 async def get_course(course_id: str):
     return _body(await _call(CourseService.get_course(course_id)))

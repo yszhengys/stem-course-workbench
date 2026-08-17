@@ -1,0 +1,178 @@
+import hashlib
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from pydantic import ValidationError
+
+from api.course_service import CourseService
+from open_notebook.course.contracts import (
+    ChapterSection,
+    ModelSelection,
+    ReviewArtifact,
+)
+from open_notebook.course.generation_service import CourseGenerationService
+from open_notebook.course.models import DEFAULT_MODEL_POLICY
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["outline", "chapter_content", "practice_labs", "review", "escalation"],
+)
+def test_parser_backed_course_prompts_render_format_and_safety_contract(stage: str):
+    prompt_path = Path("prompts/course") / f"{stage}.jinja"
+
+    assert prompt_path.is_file()
+    rendered = CourseGenerationService.prompt_for(
+        stage,
+        ["PRIMARY pdf_page 1 [anchor:one]: Grounded fact."],
+        "Return the requested artifact.",
+        format_instructions="FORMAT_SENTINEL",
+    )
+
+    assert "FORMAT_SENTINEL" in rendered
+    assert "anchor:one" in rendered
+    assert "supplied" in rendered.lower() and "anchor" in rendered.lower()
+    assert "derived" in rendered and "pedagogical" in rendered and "补充" in rendered
+    assert "executable code" in rendered.lower() and "html" in rendered.lower()
+
+
+@pytest.mark.asyncio
+async def test_course_model_options_keep_defaults_and_deepseek_optional(monkeypatch):
+    configured = [
+        SimpleNamespace(
+            id="model:configured", name="configured-model", provider="openai"
+        )
+    ]
+
+    async def language_models(model_type: str):
+        assert model_type == "language"
+        return configured
+
+    monkeypatch.setattr(
+        "api.course_service.Model.get_models_by_type", language_models
+    )
+    payload = await CourseService.get_model_options()
+
+    assert payload["defaults"] == {
+        stage: selection.model_dump(mode="json")
+        for stage, selection in DEFAULT_MODEL_POLICY.items()
+    }
+    options = payload["options"]
+    assert {
+        "adapter": "open_notebook",
+        "model": "deepseek-v4-pro",
+        "reasoning_effort": None,
+        "optional": True,
+        "configured": False,
+    } in options
+    assert any(
+        option["adapter"] == "open_notebook"
+        and option["model"] == "model:configured"
+        and option["configured"] is True
+        for option in options
+    )
+    assert any(
+        option["adapter"] == "ollama" and option["reasoning_effort"] is None
+        for option in options
+    )
+    codex = [option for option in options if option["adapter"] == "codex_cli"]
+    assert codex and all(
+        option["reasoning_efforts"] == ["low", "medium", "high", "xhigh", "max"]
+        for option in codex
+    )
+    assert all(
+        option["model"] != "deepseek-v4-pro"
+        for option in payload["defaults"].values()
+    )
+    assert ModelSelection(
+        adapter="open_notebook", model="deepseek-v4-pro", reasoning_effort=None
+    )
+
+
+def test_generation_hash_helpers_are_canonical_and_do_not_expose_input():
+    expected_input = hashlib.sha256(b"outline\nanchor:one").hexdigest()
+    expected_output = hashlib.sha256(b'{"a":1,"b":2}').hexdigest()
+
+    assert CourseGenerationService.input_hash("outline", "anchor:one") == expected_input
+    assert (
+        CourseGenerationService.output_hash({"b": 2, "a": 1})
+        == expected_output
+    )
+    assert "anchor:one" not in expected_input
+
+
+def test_chapter_section_rejects_code_fences_and_arbitrary_html():
+    for unsafe in ("```python\nprint(1)\n```", "<b>model HTML</b>"):
+        with pytest.raises(ValidationError, match="code or HTML"):
+            ChapterSection(
+                key="unsafe",
+                title="Unsafe",
+                markdown=unsafe,
+                anchor_ids=["anchor:one"],
+            )
+    with pytest.raises(ValidationError, match="anchor_ids"):
+        ChapterSection(key="ungrounded", title="Ungrounded", markdown="A claim.")
+
+
+def test_outline_rejects_duplicate_proposed_lab_keys():
+    outline = {
+        "title": "Course",
+        "chapters": [
+            {
+                "key": "one",
+                "title": "One",
+                "purpose": "First",
+                "objective_keys": ["concept"],
+                "anchor_ids": ["anchor:one"],
+                "lab_keys": ["shared-lab"],
+            },
+            {
+                "key": "two",
+                "title": "Two",
+                "purpose": "Second",
+                "objective_keys": ["concept"],
+                "anchor_ids": ["anchor:one"],
+                "lab_keys": ["shared-lab"],
+            },
+        ],
+        "concepts": [
+            {"key": "concept", "label": "Concept", "anchor_ids": ["anchor:one"]}
+        ],
+    }
+
+    with pytest.raises(ValueError, match="lab keys must be unique"):
+        CourseGenerationService.validate_outline(
+            outline, {"anchor:one"}, available_lab_keys={"shared-lab"}
+        )
+
+
+def test_escalation_merge_rejects_out_of_scope_item_or_anchor():
+    from open_notebook.course.contracts import ValidationFinding
+
+    original = ValidationFinding(
+        kind="review",
+        severity="high",
+        item_key="known",
+        anchor_ids=["anchor:one"],
+        message="known",
+    )
+    bad_item = ValidationFinding(
+        kind="review",
+        severity="high",
+        item_key="invented",
+        anchor_ids=["anchor:one"],
+        message="invented",
+    )
+    bad_anchor = original.model_copy(update={"anchor_ids": ["anchor:two"]})
+
+    with pytest.raises(ValueError, match="item keys"):
+        CourseGenerationService.merge_escalation_findings(
+            [original], ReviewArtifact(findings=[bad_item]), known_anchor_ids={"anchor:one"}
+        )
+    with pytest.raises(ValueError, match="anchors"):
+        CourseGenerationService.merge_escalation_findings(
+            [original],
+            ReviewArtifact(findings=[bad_anchor]),
+            known_anchor_ids={"anchor:one"},
+        )

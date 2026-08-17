@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Annotated, Generic, Literal, TypeAlias, TypeVar, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -10,6 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 class CourseContract(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+
+ProvenanceLabel: TypeAlias = Literal[
+    "verbatim", "adapted", "derived", "pedagogical", "补充"
+]
 
 
 class SourceLocator(CourseContract):
@@ -73,6 +79,7 @@ class OutlineChapter(CourseContract):
     prerequisite_keys: list[str] = Field(default_factory=list, max_length=100)
     objective_keys: list[str] = Field(min_length=1, max_length=100)
     anchor_ids: list[str] = Field(min_length=1, max_length=100)
+    lab_keys: list[str] = Field(default_factory=list, max_length=20)
 
 
 class CourseOutlineArtifact(CourseContract):
@@ -122,6 +129,9 @@ class FormulaArtifact(CourseContract):
     meaning: str = Field(min_length=1, max_length=2000)
     anchor_ids: list[str] = Field(min_length=1, max_length=100)
     unit_expression: str | None = Field(default=None, max_length=500)
+    provenance: ProvenanceLabel = "derived"
+    oracle_expression: str | None = Field(default=None, max_length=1000)
+    oracle_substitutions: dict[str, float] = Field(default_factory=dict, max_length=20)
 
 
 class WorkedExampleArtifact(CourseContract):
@@ -130,6 +140,10 @@ class WorkedExampleArtifact(CourseContract):
     steps: list[str] = Field(min_length=1, max_length=50)
     answer: str = Field(min_length=1, max_length=4000)
     anchor_ids: list[str] = Field(default_factory=list, max_length=100)
+    oracle_expression: str | None = Field(default=None, max_length=1000)
+    oracle_values: dict[str, float] = Field(default_factory=dict, max_length=20)
+    oracle_answer: float | None = None
+    provenance: ProvenanceLabel = "derived"
 
 
 class ExerciseArtifact(CourseContract):
@@ -140,6 +154,10 @@ class ExerciseArtifact(CourseContract):
     answer: str = Field(min_length=1, max_length=4000)
     transfer_task: str = Field(min_length=1, max_length=4000)
     anchor_ids: list[str] = Field(default_factory=list, max_length=100)
+    oracle_expression: str | None = Field(default=None, max_length=1000)
+    oracle_values: dict[str, float] = Field(default_factory=dict, max_length=20)
+    oracle_answer: float | None = None
+    provenance: ProvenanceLabel = "pedagogical"
 
 
 def _validate_bounded_lab_value(value: object, *, depth: int = 0) -> None:
@@ -187,6 +205,7 @@ class LabSpec(CourseContract):
     kind: Literal[
         "function_plot", "parametric_curve", "vector_field", "geometry", "kinematics"
     ]
+    key: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=300)
     expressions: list[str] = Field(default_factory=list, max_length=8)
     domain: dict[str, tuple[float, float]] = Field(default_factory=dict, max_length=8)
@@ -275,7 +294,19 @@ class ChapterSection(CourseContract):
     key: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=300)
     markdown: str = Field(min_length=1, max_length=100_000)
-    anchor_ids: list[str] = Field(default_factory=list, max_length=200)
+    anchor_ids: list[str] = Field(min_length=1, max_length=200)
+    provenance: ProvenanceLabel = "derived"
+
+    @field_validator("markdown")
+    @classmethod
+    def markdown_is_content_only(cls, value: str) -> str:
+        lowered = value.lower()
+        if "```" in value or any(
+            token in lowered
+            for token in ("<script", "<iframe", "<object", "javascript:")
+        ) or re.search(r"<[/!]?[A-Za-z][^>]*>", value):
+            raise ValueError("chapter sections must not contain executable code or HTML")
+        return value
 
 
 class ChapterArtifact(CourseContract):
@@ -289,8 +320,10 @@ class ChapterArtifact(CourseContract):
     worked_examples: list[WorkedExampleArtifact] = Field(default_factory=list, max_length=100)
     labs: list[LabSpecVariant] = Field(default_factory=list, max_length=20)
     misconceptions: list[str] = Field(default_factory=list, max_length=100)
+    pitfalls: list[str] = Field(default_factory=list, max_length=100)
     exercises: list[ExerciseArtifact] = Field(default_factory=list, max_length=200)
     quick_reference: list[str] = Field(default_factory=list, max_length=100)
+    citations: list[str] = Field(default_factory=list, max_length=500)
 
 
 class ValidationFinding(CourseContract):
@@ -304,6 +337,10 @@ class ValidationFinding(CourseContract):
     message: str = Field(min_length=1, max_length=4000)
     reviewer_run_id: str | None = None
     resolution_reason: str | None = Field(default=None, max_length=2000)
+
+
+class ReviewArtifact(CourseContract):
+    findings: list[ValidationFinding] = Field(default_factory=list, max_length=500)
 
 
 OutputT = TypeVar("OutputT")

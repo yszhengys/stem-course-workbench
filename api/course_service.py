@@ -7,8 +7,10 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
 
+from open_notebook.ai.models import Model
 from open_notebook.course import state_machine as sm
 from open_notebook.course.models import (
+    DEFAULT_MODEL_POLICY,
     Attempt,
     Chapter,
     Course,
@@ -115,6 +117,68 @@ async def _owned_chapter(
 
 
 class CourseService:
+    @staticmethod
+    async def get_model_options() -> dict[str, Any]:
+        """Return explicit Course-only selections without changing global defaults."""
+        configured_models = await Model.get_models_by_type("language")
+        efforts = ["low", "medium", "high", "xhigh", "max"]
+        options: list[dict[str, Any]] = [
+            {
+                "adapter": "codex_cli",
+                "model": model,
+                "reasoning_effort": "max",
+                "reasoning_efforts": efforts,
+                "optional": False,
+                "configured": True,
+            }
+            for model in ("gpt-5.6-sol", "gpt-5.6-luna")
+        ]
+        options.extend(
+            {
+                "adapter": "ollama",
+                "model": model,
+                "reasoning_effort": None,
+                "optional": True,
+                "configured": False,
+            }
+            for model in ("qwen3.5:9b", "deepseek-r1:8b")
+        )
+        options.extend(
+            {
+                "adapter": "open_notebook",
+                "model": str(model.id),
+                "reasoning_effort": None,
+                "optional": False,
+                "configured": True,
+                "name": model.name,
+                "provider": model.provider,
+            }
+            for model in sorted(
+                configured_models,
+                key=lambda item: (item.provider, item.name, str(item.id)),
+            )
+        )
+        deepseek_configured = any(
+            model.provider == "deepseek" and model.name == "deepseek-v4-pro"
+            for model in configured_models
+        )
+        options.append(
+            {
+                "adapter": "open_notebook",
+                "model": "deepseek-v4-pro",
+                "reasoning_effort": None,
+                "optional": True,
+                "configured": deepseek_configured,
+            }
+        )
+        return {
+            "defaults": {
+                stage: selection.model_dump(mode="json")
+                for stage, selection in DEFAULT_MODEL_POLICY.items()
+            },
+            "options": options,
+        }
+
     @staticmethod
     async def create_course(
         *,
