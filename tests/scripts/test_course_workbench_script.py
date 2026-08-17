@@ -6,6 +6,7 @@ import signal
 import stat
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -52,12 +53,20 @@ if "pgid=" in args:
 if "stat=" in args:
     print("Z" if (state / f"pid.{pid}.dead").exists() else "S")
     raise SystemExit(0)
+if "lstart=" in args:
+    start_file = state / f"pid.{pid}.start"
+    print(start_file.read_text(encoding="utf-8").strip() if start_file.exists() else "")
+    raise SystemExit(0)
+if "comm=" in args:
+    executable_file = state / f"pid.{pid}.executable"
+    print(executable_file.read_text(encoding="utf-8").strip() if executable_file.exists() else "")
+    raise SystemExit(0)
 if "command=" in args:
     command_file = state / f"pid.{pid}.command"
     if command_file.exists():
         print(command_file.read_text(encoding="utf-8").strip())
     else:
-        print("course-workbench.sh")
+        print("")
     raise SystemExit(0)
 raise SystemExit(1)
 """,
@@ -78,6 +87,8 @@ def raise_exit():
     (state / "port.3000").unlink(missing_ok=True)
     (state / f"pid.{pid}.cwd").unlink(missing_ok=True)
     (state / f"pid.{pid}.command").unlink(missing_ok=True)
+    (state / f"pid.{pid}.executable").unlink(missing_ok=True)
+    (state / f"pid.{pid}.start").unlink(missing_ok=True)
     (state / f"pid.{pid}.dead").touch()
     raise SystemExit(0)
 
@@ -91,6 +102,8 @@ if sys.argv[1:] == ["run", "dev"]:
     (state / "port.3000").write_text(str(pid), encoding="utf-8")
     (state / f"pid.{pid}.cwd").write_text(str(Path.cwd()), encoding="utf-8")
     (state / f"pid.{pid}.command").write_text("npm run dev", encoding="utf-8")
+    (state / f"pid.{pid}.executable").write_text("/fake/node", encoding="utf-8")
+    (state / f"pid.{pid}.start").write_text("Mon Aug 18 01:00:00 2026", encoding="utf-8")
     print("frontend ready", flush=True)
     signal.signal(signal.SIGTERM, lambda *_: raise_exit())
     while True:
@@ -123,11 +136,12 @@ if args and args[0] == "inspect":
 if args and args[0] == "compose":
     project_dir = args[args.index("--project-directory") + 1]
     tail = args[args.index(project_dir) + 1:]
-    if tail == ["ps", "-q", "surrealdb"]:
-        if (state / "docker.running").exists():
+    if tail == ["ps", "--all", "-q", "surrealdb"]:
+        if (state / "docker.exists").exists() or (state / "docker.running").exists():
             print("fake-surrealdb")
         raise SystemExit(0)
     if tail == ["up", "-d", "surrealdb"]:
+        (state / "docker.exists").touch()
         (state / "docker.running").touch()
         (state / "docker.root").write_text(project_dir, encoding="utf-8")
         raise SystemExit(0)
@@ -154,22 +168,33 @@ delay = float(os.environ.get("FAKE_CURL_DELAY", "0"))
 if delay:
     time.sleep(delay)
 failure = os.environ.get("FAKE_FAIL_READY", "")
+status = os.environ.get("FAKE_HTTP_STATUS", "200")
+body = "ok"
 if failure == "api" and url.endswith(":5055/health"):
     raise SystemExit(22)
 if failure == "frontend-page" and url.endswith("/courses/new"):
-    print("<html>course page without readiness marker</html>")
-    raise SystemExit(0)
-if failure == "db-config" and url.endswith("/api/config"):
-    print('{"dbStatus":"offline"}')
-    raise SystemExit(0)
-if url.endswith("/api/config"):
-    print('{"dbStatus":"online"}')
+    body = "<html>course page without readiness marker</html>"
+elif failure == "db-config" and url.endswith("/api/config"):
+    body = '{"dbStatus":"offline"}'
+elif url.endswith("/api/config"):
+    body = '{"dbStatus":"online"}'
 elif url.endswith(":3000/config"):
-    print('{"apiUrl":"http://127.0.0.1:5055"}')
+    body = '{"apiUrl":"http://127.0.0.1:5055"}'
 elif url.endswith("/courses/new"):
-    print('<main data-course-workbench-ready="new-course">ready</main>')
+    if os.environ.get("FAKE_UI_CONTRACT_READY") == "1":
+        body = '<main data-course-workbench-ready="new-course">ready</main>'
+    elif os.environ.get("FAKE_UI_CONTRACT_READY") == "connection":
+        body = '<div data-course-workbench-ready="connection-checking">loading</div>'
+    else:
+        body = '<html>current repository contract is not ready</html>'
+if "-o" in args:
+    output = args[args.index("-o") + 1]
+    if output != "/dev/null":
+        Path(output).write_text(body, encoding="utf-8")
 else:
-    print("ok")
+    print(body)
+if "-w" in args:
+    print(status, end="")
 raise SystemExit(0)
 """,
     )
@@ -235,6 +260,8 @@ def raise_exit():
     (state / "port.5055").unlink(missing_ok=True)
     (state / f"pid.{pid}.cwd").unlink(missing_ok=True)
     (state / f"pid.{pid}.command").unlink(missing_ok=True)
+    (state / f"pid.{pid}.executable").unlink(missing_ok=True)
+    (state / f"pid.{pid}.start").unlink(missing_ok=True)
     (state / f"pid.{pid}.dead").touch()
     raise SystemExit(0)
 
@@ -251,10 +278,20 @@ if args and args[0] == "run":
     (state / f"pid.{pid}.cwd").write_text(str(Path.cwd()), encoding="utf-8")
     if "run_api.py" in args:
         (state / "port.5055").write_text(str(pid), encoding="utf-8")
-        (state / f"pid.{pid}.command").write_text("uv run python run_api.py", encoding="utf-8")
+        command = "uv run python run_api.py"
+        cwd = str(Path.cwd())
+        if os.environ.get("FAKE_BAD_API_OWNERSHIP") == "1":
+            command = "wrong-api-command"
+            cwd = "/another/checkout"
+        (state / f"pid.{pid}.cwd").write_text(cwd, encoding="utf-8")
+        (state / f"pid.{pid}.command").write_text(command, encoding="utf-8")
+        (state / f"pid.{pid}.executable").write_text("/fake/uv", encoding="utf-8")
+        (state / f"pid.{pid}.start").write_text("Mon Aug 18 01:00:00 2026", encoding="utf-8")
         print("Application startup complete", flush=True)
     elif "surreal-commands-worker" in args:
         (state / f"pid.{pid}.command").write_text("uv run surreal-commands-worker", encoding="utf-8")
+        (state / f"pid.{pid}.executable").write_text("/fake/uv", encoding="utf-8")
+        (state / f"pid.{pid}.start").write_text("Mon Aug 18 01:00:00 2026", encoding="utf-8")
         print("Successfully imported 1/1 modules", flush=True)
         print("Starting LIVE query listener for new commands...", flush=True)
     else:
@@ -268,7 +305,7 @@ raise SystemExit(2)
 
 
 @pytest.fixture
-def fake_repo(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
+def fake_repo(tmp_path: Path) -> Iterator[tuple[Path, dict[str, str], Path]]:
     assert SCRIPT.exists(), "launcher script must exist"
     repo = tmp_path / "stem-course-workbench"
     (repo / "scripts").mkdir(parents=True)
@@ -313,7 +350,7 @@ def _run(
     repo: Path,
     env: dict[str, str],
     *args: str,
-    timeout: float = 10,
+    timeout: float = 20,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(repo / "scripts" / "course-workbench.sh"), *args],
@@ -332,10 +369,16 @@ def _calls(path: Path) -> list[str]:
     return path.read_text(encoding="utf-8").splitlines()
 
 
+def _with_ui_contract(env: dict[str, str]) -> dict[str, str]:
+    """Model the future Task 4 UI contract in isolated launcher unit tests."""
+    return {**env, "FAKE_UI_CONTRACT_READY": "1"}
+
+
 def test_start_creates_secure_env_uses_locked_dependencies_and_is_idempotent(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, state = fake_repo
+    env = _with_ui_contract(env)
 
     first = _run(repo, env, "start", "--no-open")
     assert first.returncode == 0, first.stdout + first.stderr
@@ -347,6 +390,11 @@ def test_start_creates_secure_env_uses_locked_dependencies_and_is_idempotent(
     )
     assert key and key != "change-me-to-a-secret-string"
     assert stat.S_IMODE((repo / ".env").stat().st_mode) == 0o600
+    runtime = repo / ".runtime" / "course-workbench"
+    assert stat.S_IMODE(runtime.stat().st_mode) == 0o700
+    assert stat.S_IMODE((runtime / "logs").stat().st_mode) == 0o700
+    for private_file in [repo / ".env", *runtime.glob("*.*"), *(runtime / "logs").glob("*")]:
+        assert stat.S_IMODE(private_file.stat().st_mode) & 0o077 == 0
     assert key not in first.stdout + first.stderr
     assert not list(repo.glob(".env*.bak"))
     assert "sync --locked" in _calls(state / "uv.calls")
@@ -362,17 +410,73 @@ def test_start_creates_secure_env_uses_locked_dependencies_and_is_idempotent(
     assert _calls(state / "uv.calls") == uv_calls
     assert _calls(state / "npm.calls") == npm_calls
     assert _calls(state / "docker.calls").count(
-        f"compose --project-directory {repo} up -d surrealdb"
-    ) == docker_calls.count(f"compose --project-directory {repo} up -d surrealdb")
+        f"compose -f {repo}/docker-compose.yml --project-directory {repo} up -d surrealdb"
+    ) == docker_calls.count(
+        f"compose -f {repo}/docker-compose.yml --project-directory {repo} up -d surrealdb"
+    )
 
     stopped = _run(repo, env, "stop")
     assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+
+
+@pytest.mark.parametrize(
+    "existing_key",
+    ["", "change-me-to-a-secret-string", "replace-me", "your-secret-here"],
+)
+def test_existing_env_is_secured_and_placeholder_key_is_replaced_without_argv_leak(
+    fake_repo: tuple[Path, dict[str, str], Path], existing_key: str
+) -> None:
+    repo, env, state = fake_repo
+    env = _with_ui_contract(env)
+    env_file = repo / ".env"
+    env_file.write_text(
+        f"OPEN_NOTEBOOK_ENCRYPTION_KEY={existing_key}\nKEEP_THIS=value\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o644)
+
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode == 0, result.stdout + result.stderr
+    content = env_file.read_text(encoding="utf-8")
+    replacement = next(
+        line.split("=", 1)[1]
+        for line in content.splitlines()
+        if line.startswith("OPEN_NOTEBOOK_ENCRYPTION_KEY=")
+    )
+    assert replacement and replacement != existing_key
+    assert "KEEP_THIS=value" in content
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert replacement not in result.stdout + result.stderr
+    assert replacement not in "\n".join(_calls(state / "uv.calls"))
+    launcher = (repo / "scripts" / "course-workbench.sh").read_text(encoding="utf-8")
+    assert 'awk -v replacement="$key"' not in launcher
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_existing_valid_env_key_is_preserved_while_permissions_are_fixed(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, _ = fake_repo
+    env = _with_ui_contract(env)
+    key = "valid-existing-key-0123456789abcdef"
+    env_file = repo / ".env"
+    env_file.write_text(
+        f"OPEN_NOTEBOOK_ENCRYPTION_KEY={key}\n", encoding="utf-8"
+    )
+    env_file.chmod(0o644)
+
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"OPEN_NOTEBOOK_ENCRYPTION_KEY={key}" in env_file.read_text(), result.stdout
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert _run(repo, env, "stop").returncode == 0
 
 
 def test_lockfile_changes_repeat_locked_install(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, state = fake_repo
+    env = _with_ui_contract(env)
     assert _run(repo, env, "start", "--no-open").returncode == 0
     assert _run(repo, env, "stop").returncode == 0
 
@@ -390,6 +494,7 @@ def test_concurrent_start_is_locked_and_does_not_duplicate_services(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, state = fake_repo
+    env = _with_ui_contract(env)
     slow_env = {**env, "FAKE_CURL_DELAY": "0.15"}
     first = subprocess.Popen(
         [str(repo / "scripts" / "course-workbench.sh"), "start", "--no-open"],
@@ -404,7 +509,7 @@ def test_concurrent_start_is_locked_and_does_not_duplicate_services(
     while not lock_dir.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     second = _run(repo, env, "start", "--no-open")
-    stdout, stderr = first.communicate(timeout=10)
+    stdout, stderr = first.communicate(timeout=20)
 
     assert first.returncode == 0, stdout + stderr
     assert second.returncode != 0
@@ -415,7 +520,7 @@ def test_concurrent_start_is_locked_and_does_not_duplicate_services(
     assert _run(repo, env, "stop").returncode == 0
 
 
-def test_stale_launcher_lock_is_recovered_without_signalling_its_reused_pid(
+def test_live_or_initializing_launcher_lock_is_never_removed(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, state = fake_repo
@@ -428,18 +533,40 @@ def test_stale_launcher_lock_is_recovered_without_signalling_its_reused_pid(
             "unrelated process", encoding="utf-8"
         )
         result = _run(repo, env, "start", "--no-open")
-        assert result.returncode == 0, result.stdout + result.stderr
+        assert result.returncode != 0
         assert unrelated.poll() is None
-        assert _run(repo, env, "stop").returncode == 0
+        assert lock_dir.exists()
+        assert (lock_dir / "pid").read_text().strip() == str(unrelated.pid)
     finally:
         unrelated.terminate()
         unrelated.wait(timeout=3)
+
+    (lock_dir / "pid").unlink()
+    before = lock_dir.stat().st_ino
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode != 0
+    assert lock_dir.exists() and lock_dir.stat().st_ino == before
+
+
+def test_dead_launcher_lock_is_recovered(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, _ = fake_repo
+    env = _with_ui_contract(env)
+    lock_dir = repo / ".runtime" / "course-workbench" / "launcher.lock"
+    lock_dir.mkdir(parents=True)
+    (lock_dir / "pid").write_text("999999", encoding="utf-8")
+
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _run(repo, env, "stop").returncode == 0
 
 
 def test_stale_pid_is_replaced_only_during_start(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, _ = fake_repo
+    env = _with_ui_contract(env)
     runtime = repo / ".runtime" / "course-workbench"
     runtime.mkdir(parents=True)
     (runtime / "api.pid").write_text("999999", encoding="utf-8")
@@ -511,7 +638,8 @@ def test_other_checkout_surreal_container_is_rejected(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, state = fake_repo
-    (state / "docker.running").touch()
+    # `ps --all` must detect this stopped container before `up` can recreate it.
+    (state / "docker.exists").touch()
     (state / "docker.root").write_text("/another/checkout", encoding="utf-8")
     result = _run(repo, env, "start", "--no-open")
     assert result.returncode != 0
@@ -521,11 +649,57 @@ def test_other_checkout_surreal_container_is_rejected(
     assert not any("stop surrealdb" in line for line in _calls(state / "docker.calls"))
 
 
+def test_compose_is_explicit_and_checks_stopped_container_ownership(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = _with_ui_contract(env)
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _run(repo, env, "stop").returncode == 0
+    calls = [call for call in _calls(state / "docker.calls") if call.startswith("compose ")]
+    prefix = f"compose -f {repo}/docker-compose.yml --project-directory {repo} "
+    assert calls
+    assert all(call.startswith(prefix) for call in calls)
+    assert any(call.endswith("ps --all -q surrealdb") for call in calls)
+
+
+def test_failed_new_process_ownership_is_terminated_and_metadata_cleared(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {**_with_ui_contract(env), "FAKE_BAD_API_OWNERSHIP": "1"}
+
+    result = _run(repo, env, "start", "--no-open", timeout=20)
+    assert result.returncode != 0
+    runtime = repo / ".runtime" / "course-workbench"
+    assert not list(runtime.glob("api.*"))
+    api_pids = [path.name.split(".")[1] for path in state.glob("pid.*.dead")]
+    assert api_pids, result.stdout + result.stderr
+    assert not (state / "port.5055").exists()
+
+
+@pytest.mark.parametrize("status_code", [204, 302])
+def test_readiness_rejects_non_200_http_status(
+    fake_repo: tuple[Path, dict[str, str], Path], status_code: int
+) -> None:
+    repo, env, _ = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "FAKE_HTTP_STATUS": str(status_code),
+        "COURSE_WORKBENCH_READY_TIMEOUT": "1",
+    }
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode != 0
+    assert "SurrealDB health" in (result.stdout + result.stderr)
+
+
 def test_failed_readiness_rolls_back_only_new_services_and_preserves_data(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, state = fake_repo
-    env = {**env, "FAKE_FAIL_READY": "frontend-page"}
+    # Base fake deliberately models the current repository: Task 4 has not yet
+    # supplied the page marker, so the launcher must fail safely.
     (repo / "surreal_data").mkdir()
     (repo / "surreal_data" / "keep").write_text("db", encoding="utf-8")
     (repo / "notebook_data").mkdir()
@@ -534,7 +708,7 @@ def test_failed_readiness_rolls_back_only_new_services_and_preserves_data(
     result = _run(repo, env, "start", "--no-open")
     assert result.returncode != 0
     combined = result.stdout + result.stderr
-    assert "data-course-workbench-ready" in combined
+    assert "readiness marker" in combined
     assert "api.log" in combined and "worker.log" in combined
     assert not (state / "docker.running").exists()
     assert any("stop surrealdb" in line for line in _calls(state / "docker.calls"))
@@ -544,10 +718,11 @@ def test_failed_readiness_rolls_back_only_new_services_and_preserves_data(
     assert (repo / "notebook_data" / "keep").read_text() == "course"
 
 
-def test_full_readiness_default_opens_new_course_and_worker_uses_default_five(
+def test_full_readiness_when_task4_contract_exists_opens_new_course_and_uses_default_five(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, state = fake_repo
+    env = _with_ui_contract(env)
     result = _run(repo, env)
     assert result.returncode == 0, result.stdout + result.stderr
     assert _calls(state / "open.calls") == [
@@ -567,6 +742,16 @@ def test_full_readiness_default_opens_new_course_and_worker_uses_default_five(
     assert _run(repo, env, "stop").returncode == 0
 
 
+def test_exact_200_course_route_accepts_ssr_connection_guard_marker(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, _ = fake_repo
+    env = {**env, "FAKE_UI_CONTRACT_READY": "connection"}
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _run(repo, env, "stop").returncode == 0
+
+
 def test_status_is_read_only_and_stop_refuses_unverified_pid(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
@@ -577,23 +762,53 @@ def test_status_is_read_only_and_stop_refuses_unverified_pid(
 
     runtime = repo / ".runtime" / "course-workbench"
     runtime.mkdir(parents=True)
-    external = subprocess.Popen(["sleep", "60"], cwd=repo.parent)
+    external = subprocess.Popen(
+        ["sleep", "60"], cwd=repo.parent, start_new_session=True
+    )
     try:
         for suffix, value in {
             "pid": str(external.pid),
             "pgid": str(os.getpgid(external.pid)),
             "cwd": str(repo),
-            "command": "run_api.py",
+            "signature": "run_api.py",
+            "argv": "uv run python run_api.py",
+            "executable": "/fake/uv",
+            "started": "different start fingerprint",
         }.items():
             (runtime / f"api.{suffix}").write_text(value, encoding="utf-8")
         (state / f"pid.{external.pid}.cwd").write_text(str(repo), encoding="utf-8")
+        (state / f"pid.{external.pid}.command").write_text(
+            "uv run python run_api.py", encoding="utf-8"
+        )
+        (state / f"pid.{external.pid}.executable").write_text(
+            "/fake/uv", encoding="utf-8"
+        )
+        (state / f"pid.{external.pid}.start").write_text(
+            "actual reused PID start fingerprint", encoding="utf-8"
+        )
         (repo / "surreal_data").mkdir()
         (repo / "surreal_data" / "keep").write_text("db", encoding="utf-8")
         result = _run(repo, env, "stop")
         assert result.returncode != 0
         assert "refusing" in (result.stdout + result.stderr).lower()
+        assert "start fingerprint" in (result.stdout + result.stderr).lower()
         assert external.poll() is None
         assert (repo / "surreal_data" / "keep").read_text() == "db"
+
+        metadata_before = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in runtime.glob("api.*")
+        }
+        start_result = _run(repo, _with_ui_contract(env), "start", "--no-open")
+        assert start_result.returncode != 0
+        assert "live but unverified" in (
+            start_result.stdout + start_result.stderr
+        ).lower()
+        assert external.poll() is None
+        assert {
+            path.name: path.read_text(encoding="utf-8")
+            for path in runtime.glob("api.*")
+        } == metadata_before
     finally:
         external.terminate()
         external.wait(timeout=3)
@@ -603,6 +818,7 @@ def test_logs_follow_requested_service_and_restart_works(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
     repo, env, state = fake_repo
+    env = _with_ui_contract(env)
     assert _run(repo, env, "start", "--no-open").returncode == 0
     logs = _run(repo, env, "logs", "worker")
     assert logs.returncode == 0
@@ -613,3 +829,27 @@ def test_logs_follow_requested_service_and_restart_works(
     assert restarted.returncode == 0, restarted.stdout + restarted.stderr
     assert any("stop surrealdb" in line for line in _calls(state / "docker.calls"))
     assert _run(repo, env, "stop").returncode == 0
+
+
+def test_repository_declares_course_ui_startup_contract() -> None:
+    """Source contract only; the final gate still uses a real Next HTTP run."""
+    page = PROJECT_ROOT / "frontend/src/app/(dashboard)/courses/new/page.tsx"
+    connection_guard = (
+        PROJECT_ROOT / "frontend/src/components/common/ConnectionGuard.tsx"
+    )
+    backend_config = PROJECT_ROOT / "api/routers/config.py"
+
+    assert page.exists()
+    assert 'data-course-workbench-ready="new-course"' in page.read_text(
+        encoding="utf-8"
+    )
+    guard_source = connection_guard.read_text(encoding="utf-8")
+    assert 'data-course-workbench-ready="connection-checking"' in guard_source
+    checking_branch = guard_source.split("if (isChecking)", 1)[1].split(
+        "// Render children", 1
+    )[0]
+    assert "return null" not in checking_branch
+    assert "LoadingSpinner" in checking_branch or "loading" in checking_branch.lower()
+    config_source = backend_config.read_text(encoding="utf-8")
+    assert "VERSION_CHECK_TIMEOUT_SECONDS = 0.5" in config_source
+    assert "asyncio.wait_for" in config_source

@@ -5,12 +5,14 @@
 
 set -u
 set -o pipefail
+umask 077
 
 SCRIPT_DIR=$(CDPATH= cd -P "$(dirname "$0")" 2>/dev/null && pwd)
 REPO_ROOT=$(CDPATH= cd -P "$SCRIPT_DIR/.." 2>/dev/null && pwd)
 RUNTIME_DIR="$REPO_ROOT/.runtime/course-workbench"
 LOG_DIR="$RUNTIME_DIR/logs"
 LOCK_DIR="$RUNTIME_DIR/launcher.lock"
+LOCK_OWNER_FILE="$LOCK_DIR/pid"
 ENV_FILE="$REPO_ROOT/.env"
 UV_BIN="$REPO_ROOT/.tools/bin/uv"
 PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
@@ -77,6 +79,7 @@ ensure_runtime() {
         error "Cannot create runtime directory: $RUNTIME_DIR"
         return 1
     fi
+    chmod 700 "$RUNTIME_DIR" "$LOG_DIR" || return 1
 }
 
 acquire_lock() {
@@ -84,44 +87,61 @@ acquire_lock() {
         return 1
     fi
     if mkdir "$LOCK_DIR" 2>/dev/null; then
-        if ! write_atomic "$LOCK_DIR/pid" "$$"; then
-            rmdir "$LOCK_DIR" 2>/dev/null || true
+        # mkdir is the atomic ownership operation. The owner file is immutable
+        # for this lock's lifetime; contenders never remove an initializing lock.
+        if ! (set -C; printf '%s\n' "$$" > "$LOCK_OWNER_FILE") 2>/dev/null; then
+            error "Acquired the launcher lock but could not record its owner. The lock was left in place for safety."
             return 1
         fi
         return 0
     fi
-    owner=$(read_first_line "$LOCK_DIR/pid")
-    owner_command=""
-    if [ -n "$owner" ]; then
-        owner_command=$(process_command "$owner")
-    fi
-    case "$owner_command" in
-        *"course-workbench.sh"*) ;;
-        *)
-            # A crashed launcher must not leave the checkout permanently locked.
-            # Remove only the lock metadata; never signal the unverified PID.
-            rm -f "$LOCK_DIR/pid"
-            if rmdir "$LOCK_DIR" 2>/dev/null && mkdir "$LOCK_DIR" 2>/dev/null; then
-                if write_atomic "$LOCK_DIR/pid" "$$"; then
-                    return 0
-                fi
-                rmdir "$LOCK_DIR" 2>/dev/null || true
-            fi
+    attempts=0
+    while [ ! -s "$LOCK_OWNER_FILE" ] && [ "$attempts" -lt 20 ]; do
+        attempts=$((attempts + 1))
+        sleep 0.05
+    done
+    owner=$(read_first_line "$LOCK_OWNER_FILE")
+    case "$owner" in
+        ''|*[!0-9]*)
+            error "Another launcher operation owns an initializing lock. It was not modified; retry shortly."
+            return 1
             ;;
     esac
-    if [ -n "$owner" ]; then
+    if kill -0 "$owner" 2>/dev/null; then
         error "Another launcher operation is in progress (PID $owner). Try again when it finishes."
-    else
-        error "Another launcher operation is in progress. Try again when it finishes."
+        return 1
     fi
-    return 1
+
+    # The kernel proves this owner PID is dead. Re-read the immutable owner
+    # before removal so a racing contender cannot make us delete a new lock.
+    [ "$(read_first_line "$LOCK_OWNER_FILE")" = "$owner" ] || {
+        error "Launcher lock ownership changed while checking it; retry."
+        return 1
+    }
+    rm -f "$LOCK_OWNER_FILE"
+    if ! rmdir "$LOCK_DIR" 2>/dev/null; then
+        error "Could not recover the stale launcher lock safely; retry."
+        return 1
+    fi
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        error "Another launcher operation acquired the lock first; retry."
+        return 1
+    fi
+    if ! (set -C; printf '%s\n' "$$" > "$LOCK_OWNER_FILE") 2>/dev/null; then
+        error "Acquired the launcher lock but could not record its owner. The lock was left in place for safety."
+        return 1
+    fi
+    return 0
 }
 
 release_lock() {
-    if [ -d "$LOCK_DIR" ]; then
-        rm -f "$LOCK_DIR/pid"
-        rmdir "$LOCK_DIR" 2>/dev/null || true
+    [ -d "$LOCK_DIR" ] || return 0
+    if [ "$(read_first_line "$LOCK_OWNER_FILE")" != "$$" ]; then
+        error "Refusing to release a launcher lock owned by another process."
+        return 1
     fi
+    rm -f "$LOCK_OWNER_FILE"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 
 check_platform() {
@@ -165,8 +185,64 @@ random_key() {
     LC_ALL=C od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
 }
 
+rewrite_env_key() {
+    source_file=$1
+    destination=$2
+    key=$3
+    temporary="${destination}.tmp.$$"
+    # The key travels through stdin, never argv. Global umask keeps the temp
+    # file private from its first byte; mv atomically replaces the destination.
+    if ! {
+        printf '%s\n' "$key"
+        cat "$source_file"
+    } | awk '
+        NR == 1 { replacement = $0; next }
+        /^OPEN_NOTEBOOK_ENCRYPTION_KEY=/ {
+            if (!replaced) print "OPEN_NOTEBOOK_ENCRYPTION_KEY=" replacement
+            replaced = 1
+            next
+        }
+        { print }
+        END {
+            if (!replaced) print "OPEN_NOTEBOOK_ENCRYPTION_KEY=" replacement
+        }
+    ' > "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if ! chmod 600 "$temporary" || ! mv "$temporary" "$destination"; then
+        rm -f "$temporary"
+        return 1
+    fi
+}
+
 ensure_env() {
+    if [ -L "$ENV_FILE" ]; then
+        error "Refusing to use symlinked .env: $ENV_FILE"
+        return 1
+    fi
     if [ -f "$ENV_FILE" ]; then
+        chmod 600 "$ENV_FILE" || {
+            error "Could not set .env permissions to 600."
+            return 1
+        }
+        existing_key=$(awk '
+            /^OPEN_NOTEBOOK_ENCRYPTION_KEY=/ {
+                sub(/^OPEN_NOTEBOOK_ENCRYPTION_KEY=/, "")
+                value = $0
+            }
+            END { print value }
+        ' "$ENV_FILE")
+        case "$existing_key" in
+            ''|*change-me-to-a-secret-string*|*replace-me*|*your-secret*|*CHANGE_ME*)
+                key=$(random_key)
+                if [ "${#key}" -lt 32 ] || ! rewrite_env_key "$ENV_FILE" "$ENV_FILE" "$key"; then
+                    error "Could not replace the placeholder encryption key in .env securely."
+                    return 1
+                fi
+                say "Secured the local .env encryption key and permissions."
+                ;;
+        esac
         return 0
     fi
     if [ ! -f "$REPO_ROOT/.env.example" ]; then
@@ -178,28 +254,7 @@ ensure_env() {
         error "Could not generate OPEN_NOTEBOOK_ENCRYPTION_KEY securely."
         return 1
     fi
-    temporary="${ENV_FILE}.tmp.$$"
-    if ! umask 077; then
-        return 1
-    fi
-    if ! awk -v replacement="$key" '
-        BEGIN { replaced = 0 }
-        /^OPEN_NOTEBOOK_ENCRYPTION_KEY=/ {
-            print "OPEN_NOTEBOOK_ENCRYPTION_KEY=" replacement
-            replaced = 1
-            next
-        }
-        { print }
-        END {
-            if (!replaced) print "OPEN_NOTEBOOK_ENCRYPTION_KEY=" replacement
-        }
-    ' "$REPO_ROOT/.env.example" > "$temporary"; then
-        rm -f "$temporary"
-        error "Could not create .env."
-        return 1
-    fi
-    if ! chmod 600 "$temporary" || ! mv "$temporary" "$ENV_FILE"; then
-        rm -f "$temporary"
+    if ! rewrite_env_key "$REPO_ROOT/.env.example" "$ENV_FILE" "$key"; then
         error "Could not secure .env."
         return 1
     fi
@@ -262,7 +317,18 @@ process_alive() {
 }
 
 process_command() {
-    ps -p "$1" -o command= 2>/dev/null | sed -e 's/^[[:space:]]*//'
+    ps -ww -p "$1" -o command= 2>/dev/null | \
+        sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+process_executable() {
+    ps -ww -p "$1" -o comm= 2>/dev/null | \
+        sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+}
+
+process_started() {
+    LC_ALL=C ps -ww -p "$1" -o lstart= 2>/dev/null | \
+        sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
 process_group() {
@@ -294,7 +360,10 @@ validate_process() {
     pid=$(read_first_line "$(runtime_path "$service" pid)")
     stored_pgid=$(read_first_line "$(runtime_path "$service" pgid)")
     stored_cwd=$(read_first_line "$(runtime_path "$service" cwd)")
-    stored_marker=$(read_first_line "$(runtime_path "$service" command)")
+    stored_marker=$(read_first_line "$(runtime_path "$service" signature)")
+    stored_argv=$(read_first_line "$(runtime_path "$service" argv)")
+    stored_executable=$(read_first_line "$(runtime_path "$service" executable)")
+    stored_started=$(read_first_line "$(runtime_path "$service" started)")
     wanted_cwd=$(expected_cwd "$service")
     wanted_marker=$(expected_marker "$service")
     PROCESS_REASON=""
@@ -310,6 +379,8 @@ validate_process() {
     actual_pgid=$(process_group "$pid")
     actual_cwd=$(process_cwd "$pid")
     actual_command=$(process_command "$pid")
+    actual_executable=$(process_executable "$pid")
+    actual_started=$(process_started "$pid")
     if [ -z "$actual_pgid" ] || [ "$actual_pgid" != "$pid" ] || [ "$stored_pgid" != "$actual_pgid" ]; then
         PROCESS_REASON="PID $pid is not the verified process-group leader"
         return 1
@@ -329,6 +400,18 @@ validate_process() {
             return 1
             ;;
     esac
+    if [ -z "$stored_argv" ] || [ "$actual_command" != "$stored_argv" ]; then
+        PROCESS_REASON="PID $pid exact argv changed since launch"
+        return 1
+    fi
+    if [ -z "$stored_executable" ] || [ "$actual_executable" != "$stored_executable" ]; then
+        PROCESS_REASON="PID $pid executable changed since launch"
+        return 1
+    fi
+    if [ -z "$stored_started" ] || [ "$actual_started" != "$stored_started" ]; then
+        PROCESS_REASON="PID $pid start fingerprint changed (possible PID reuse)"
+        return 1
+    fi
     return 0
 }
 
@@ -338,15 +421,25 @@ cleanup_process_metadata() {
         "$(runtime_path "$service" pid)" \
         "$(runtime_path "$service" pgid)" \
         "$(runtime_path "$service" cwd)" \
+        "$(runtime_path "$service" signature)" \
+        "$(runtime_path "$service" argv)" \
+        "$(runtime_path "$service" executable)" \
+        "$(runtime_path "$service" started)" \
         "$(runtime_path "$service" command)"
 }
 
 remove_stale_metadata() {
     service=$1
     if [ -f "$(runtime_path "$service" pid)" ] && ! validate_process "$service"; then
+        stale_pid=$(read_first_line "$(runtime_path "$service" pid)")
+        if process_alive "$stale_pid"; then
+            error "Refusing to replace $service metadata: PID $stale_pid is live but unverified ($PROCESS_REASON)."
+            return 1
+        fi
         say "Replacing stale $service state: $PROCESS_REASON"
         cleanup_process_metadata "$service"
     fi
+    return 0
 }
 
 owner_diagnostic() {
@@ -388,7 +481,8 @@ assert_host_port_available() {
 
 compose_container_state() {
     CONTAINER_REASON=""
-    container_id=$(docker compose --project-directory "$REPO_ROOT" ps -q surrealdb 2>/dev/null || true)
+    container_id=$(docker compose -f "$REPO_ROOT/docker-compose.yml" \
+        --project-directory "$REPO_ROOT" ps --all -q surrealdb 2>/dev/null || true)
     [ -z "$container_id" ] && return 1
     container_root=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container_id" 2>/dev/null || true)
     container_service=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container_id" 2>/dev/null || true)
@@ -420,7 +514,8 @@ start_database() {
         return 1
     fi
     say "Starting SurrealDB (Docker only)..."
-    if ! docker compose --project-directory "$REPO_ROOT" up -d surrealdb; then
+    if ! docker compose -f "$REPO_ROOT/docker-compose.yml" \
+        --project-directory "$REPO_ROOT" up -d surrealdb; then
         error "Could not start SurrealDB."
         return 1
     fi
@@ -433,47 +528,136 @@ start_database() {
     fi
 }
 
+set_started_flag() {
+    service=$1
+    value=$2
+    case "$service" in
+        api) STARTED_API=$value ;;
+        worker) STARTED_WORKER=$value ;;
+        frontend) STARTED_FRONTEND=$value ;;
+    esac
+}
+
+terminate_new_launch() {
+    service=$1
+    pid=$2
+    handshake=$3
+    handshake_pid=""
+    handshake_pgid=""
+    if [ -f "$handshake" ]; then
+        handshake_pid=$(sed -n '1p' "$handshake")
+        handshake_pgid=$(sed -n '2p' "$handshake")
+    fi
+    actual_pgid=$(process_group "$pid")
+    if [ "$handshake_pid" = "$pid" ] && [ "$handshake_pgid" = "$pid" ] && \
+       [ "$actual_pgid" = "$pid" ]; then
+        kill -TERM "-$pid" 2>/dev/null || true
+        attempts=0
+        while process_alive "$pid" && [ "$attempts" -lt 20 ]; do
+            attempts=$((attempts + 1))
+            sleep 0.05
+        done
+        process_alive "$pid" && kill -KILL "-$pid" 2>/dev/null || true
+    else
+        # `$pid` is the direct child created by this invocation. Without a
+        # verified session handshake we may terminate only that PID, not a PGID.
+        kill -TERM "$pid" 2>/dev/null || true
+    fi
+    rm -f "$handshake"
+    cleanup_process_metadata "$service"
+    set_started_flag "$service" 0
+}
+
+write_service_metadata() {
+    service=$1
+    pid=$2
+    pgid=$3
+    cwd=$4
+    signature=$5
+    argv=$6
+    executable=$7
+    started=$8
+    # PID is the commit marker and is written last; status cannot mistake a
+    # partially written metadata set for a reusable process.
+    write_atomic "$(runtime_path "$service" pgid)" "$pgid" && \
+        write_atomic "$(runtime_path "$service" cwd)" "$cwd" && \
+        write_atomic "$(runtime_path "$service" signature)" "$signature" && \
+        write_atomic "$(runtime_path "$service" argv)" "$argv" && \
+        write_atomic "$(runtime_path "$service" executable)" "$executable" && \
+        write_atomic "$(runtime_path "$service" started)" "$started" && \
+        write_atomic "$(runtime_path "$service" pid)" "$pid"
+}
+
 launch_service() {
     service=$1
     cwd=$2
     marker=$3
     shift 3
     log_file=$(log_path "$service")
+    handshake_prefix="$RUNTIME_DIR/${service}.session"
     : > "$log_file" || return 1
     API_RELOAD=false "$PYTHON_BIN" -c '
 import os
 import sys
 cwd = sys.argv[1]
-command = sys.argv[2:]
+handshake_prefix = sys.argv[2]
+command = sys.argv[3:]
 os.chdir(cwd)
 os.setsid()
+pid = os.getpid()
+handshake = f"{handshake_prefix}.{pid}"
+fd = os.open(handshake, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    handle.write(f"{pid}\n{os.getpgrp()}\n")
 os.execvpe(command[0], command, os.environ)
-' "$cwd" "$@" >> "$log_file" 2>&1 < /dev/null &
+' "$cwd" "$handshake_prefix" "$@" >> "$log_file" 2>&1 < /dev/null &
     pid=$!
-    if ! write_atomic "$(runtime_path "$service" pid)" "$pid" || \
-       ! write_atomic "$(runtime_path "$service" pgid)" "$pid" || \
-       ! write_atomic "$(runtime_path "$service" cwd)" "$cwd" || \
-       ! write_atomic "$(runtime_path "$service" command)" "$marker"; then
-        kill -TERM "-$pid" 2>/dev/null || true
-        kill -TERM "$pid" 2>/dev/null || true
-        cleanup_process_metadata "$service"
-        return 1
-    fi
+    handshake="${handshake_prefix}.${pid}"
+    set_started_flag "$service" 1
+
     attempts=0
-    while [ "$attempts" -lt 20 ]; do
-        if validate_process "$service"; then
-            return 0
+    while [ "$attempts" -lt 40 ]; do
+        if [ -f "$handshake" ]; then
+            handshake_pid=$(sed -n '1p' "$handshake")
+            handshake_pgid=$(sed -n '2p' "$handshake")
+            actual_pgid=$(process_group "$pid")
+            actual_cwd=$(process_cwd "$pid")
+            actual_argv=$(process_command "$pid")
+            actual_executable=$(process_executable "$pid")
+            actual_started=$(process_started "$pid")
+            case "$actual_argv" in
+                *"$marker"*) marker_matches=1 ;;
+                *) marker_matches=0 ;;
+            esac
+            if [ "$handshake_pid" = "$pid" ] && [ "$handshake_pgid" = "$pid" ] && \
+               [ -n "$actual_pgid" ] && [ -n "$actual_cwd" ] && \
+               [ -n "$actual_argv" ] && [ -n "$actual_executable" ] && \
+               [ -n "$actual_started" ]; then
+                if [ "$actual_pgid" = "$pid" ] && [ "$actual_cwd" = "$cwd" ] && \
+                   [ "$marker_matches" -eq 1 ]; then
+                    if write_service_metadata "$service" "$pid" "$pid" "$cwd" \
+                        "$marker" "$actual_argv" "$actual_executable" "$actual_started"; then
+                        if validate_process "$service"; then
+                            rm -f "$handshake"
+                            return 0
+                        fi
+                    fi
+                fi
+                break
+            fi
         fi
         process_alive "$pid" || break
         attempts=$((attempts + 1))
         sleep 0.05
     done
-    error "$service did not start as a verifiable process group: $PROCESS_REASON"
+    PROCESS_REASON="session/argv/executable/cwd/start fingerprint validation failed"
+    error "$service did not start as an owned process group: $PROCESS_REASON"
+    terminate_new_launch "$service" "$pid" "$handshake"
     return 1
 }
 
 start_api() {
-    remove_stale_metadata api
+    remove_stale_metadata api || return 1
     if validate_process api; then
         assert_host_port_available api 5055 || return 1
         say "Reusing API process $(read_first_line "$(runtime_path api pid)")."
@@ -485,11 +669,10 @@ start_api() {
         "$UV_BIN" run --env-file "$ENV_FILE" python run_api.py; then
         return 1
     fi
-    STARTED_API=1
 }
 
 start_worker() {
-    remove_stale_metadata worker
+    remove_stale_metadata worker || return 1
     if validate_process worker; then
         say "Reusing worker process $(read_first_line "$(runtime_path worker pid)")."
         return 0
@@ -501,11 +684,10 @@ start_worker() {
         --import-modules commands --max-tasks "$max_tasks"; then
         return 1
     fi
-    STARTED_WORKER=1
 }
 
 start_frontend() {
-    remove_stale_metadata frontend
+    remove_stale_metadata frontend || return 1
     if validate_process frontend; then
         assert_host_port_available frontend 3000 || return 1
         say "Reusing frontend process $(read_first_line "$(runtime_path frontend pid)")."
@@ -516,24 +698,37 @@ start_frontend() {
     if ! launch_service frontend "$REPO_ROOT/frontend" "npm run dev" npm run dev; then
         return 1
     fi
-    STARTED_FRONTEND=1
+}
+
+http_200_to_file() {
+    url=$1
+    output_file=$2
+    status=$(curl -sS --max-time 2 -o "$output_file" -w '%{http_code}' "$url" 2>/dev/null) || return 1
+    [ "$status" = "200" ]
 }
 
 surreal_ready() {
-    curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:8000/health
+    http_200_to_file http://127.0.0.1:8000/health /dev/null
 }
 
 api_health_ready() {
-    curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:5055/health
+    http_200_to_file http://127.0.0.1:5055/health /dev/null
 }
 
 api_database_ready() {
-    response=$(curl -fsS --max-time 2 http://127.0.0.1:5055/api/config 2>/dev/null) || return 1
-    printf '%s' "$response" | grep -Eq '"dbStatus"[[:space:]]*:[[:space:]]*"online"'
+    response_file="$RUNTIME_DIR/api-config-response.$$"
+    if ! http_200_to_file http://127.0.0.1:5055/api/config "$response_file"; then
+        rm -f "$response_file"
+        return 1
+    fi
+    grep -Eq '"dbStatus"[[:space:]]*:[[:space:]]*"online"' "$response_file"
+    result=$?
+    rm -f "$response_file"
+    return "$result"
 }
 
 course_router_ready() {
-    curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:5055/api/courses
+    http_200_to_file http://127.0.0.1:5055/api/courses /dev/null
 }
 
 worker_ready() {
@@ -544,13 +739,27 @@ worker_ready() {
 }
 
 frontend_config_ready() {
-    response=$(curl -fsS --max-time 2 http://127.0.0.1:3000/config 2>/dev/null) || return 1
-    printf '%s' "$response" | grep -Eq '"apiUrl"[[:space:]]*:[[:space:]]*"http://(127\.0\.0\.1|localhost):5055/?"'
+    response_file="$RUNTIME_DIR/frontend-config-response.$$"
+    if ! http_200_to_file http://127.0.0.1:3000/config "$response_file"; then
+        rm -f "$response_file"
+        return 1
+    fi
+    grep -Eq '"apiUrl"[[:space:]]*:[[:space:]]*"http://(127\.0\.0\.1|localhost):5055/?"' "$response_file"
+    result=$?
+    rm -f "$response_file"
+    return "$result"
 }
 
 course_page_ready() {
-    response=$(curl -fsS --max-time 2 "$COURSE_URL" 2>/dev/null) || return 1
-    printf '%s' "$response" | grep -Fq 'data-course-workbench-ready="new-course"'
+    response_file="$RUNTIME_DIR/course-page-response.$$"
+    if ! http_200_to_file "$COURSE_URL" "$response_file"; then
+        rm -f "$response_file"
+        return 1
+    fi
+    grep -Eq 'data-course-workbench-ready="(new-course|connection-checking)"' "$response_file"
+    result=$?
+    rm -f "$response_file"
+    return "$result"
 }
 
 wait_for() {
@@ -606,7 +815,8 @@ stop_owned_database() {
     fi
     if [ "$container_state" -eq 0 ]; then
         say "Stopping this checkout's SurrealDB container (data is preserved)..."
-        docker compose --project-directory "$REPO_ROOT" stop surrealdb || return 1
+        docker compose -f "$REPO_ROOT/docker-compose.yml" \
+            --project-directory "$REPO_ROOT" stop surrealdb || return 1
     fi
 }
 
@@ -616,7 +826,8 @@ rollback_new_services() {
     [ "$STARTED_WORKER" -eq 1 ] && stop_verified_service worker >/dev/null 2>&1 || true
     [ "$STARTED_API" -eq 1 ] && stop_verified_service api >/dev/null 2>&1 || true
     if [ "$STARTED_DB" -eq 1 ]; then
-        docker compose --project-directory "$REPO_ROOT" stop surrealdb >/dev/null 2>&1 || true
+        docker compose -f "$REPO_ROOT/docker-compose.yml" \
+            --project-directory "$REPO_ROOT" stop surrealdb >/dev/null 2>&1 || true
     fi
     error "Logs: $(log_path api), $(log_path worker), $(log_path frontend)"
     for service in api worker frontend; do
@@ -649,8 +860,8 @@ start_locked() {
     wait_for "worker command imports and LIVE listener" worker_ready || return 1
     start_frontend || return 1
     wait_for "frontend runtime API configuration" frontend_config_ready || return 1
-    if ! wait_for "new-course page marker data-course-workbench-ready=\"new-course\"" course_page_ready; then
-        error "The frontend answered, but the Course UI readiness marker is missing. Finish/rebuild the Course UI and retry."
+    if ! wait_for "new-course route and SSR readiness marker" course_page_ready; then
+        error "The frontend answered, but /courses/new did not expose a Course or ConnectionGuard readiness marker. Finish/rebuild the Course UI and retry."
         return 1
     fi
 

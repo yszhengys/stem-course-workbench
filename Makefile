@@ -14,7 +14,7 @@ GHCR_IMAGE := ghcr.io/yszhengys/stem-course-workbench
 PLATFORMS := linux/amd64,linux/arm64
 
 database:
-	docker compose up -d surrealdb
+	docker compose -f "$(CURDIR)/docker-compose.yml" --project-directory "$(CURDIR)" up -d surrealdb
 
 run:
 	@echo "⚠️  Warning: Starting frontend only. For full functionality, use 'make start-all'"
