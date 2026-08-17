@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from open_notebook.course.contracts import LabSpecVariant
+from open_notebook.course.contracts import LabSpecVariant, ModelSelection
 
 
 # Notebook models
@@ -799,6 +799,78 @@ class NotebookDeleteResponse(BaseModel):
 
 
 # Course module models (PDR-003)
+
+
+class StrictCourseRequest(BaseModel):
+    """Reject unknown Course fields at the HTTP trust boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CourseJobRequest(StrictCourseRequest):
+    prompt_version: str = Field("v1", min_length=1, max_length=100)
+    force: bool = False
+
+
+class CourseAnchoredJobRequest(CourseJobRequest):
+    anchor_ids: List[str] = Field(..., min_length=1, max_length=500)
+    model: ModelSelection
+
+    @field_validator("anchor_ids")
+    @classmethod
+    def anchors_are_unique(cls, value: List[str]) -> List[str]:
+        if any(not anchor_id.strip() for anchor_id in value):
+            raise ValueError("anchor IDs must be non-empty")
+        if len(value) != len(set(value)):
+            raise ValueError("anchor IDs must be unique")
+        return value
+
+
+class CourseEvidenceBuildRequest(StrictCourseRequest):
+    source_id: str = Field(..., min_length=1)
+    role: Literal["PRIMARY", "SUPPLEMENT"]
+    force: bool = False
+
+
+class CourseOutlineGenerateRequest(CourseAnchoredJobRequest):
+    available_lab_keys: List[str] = Field(..., max_length=100)
+
+    @field_validator("available_lab_keys")
+    @classmethod
+    def lab_keys_are_unique(cls, value: List[str]) -> List[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("lab keys must be unique")
+        return value
+
+
+class CourseChapterGenerateRequest(CourseAnchoredJobRequest):
+    pass
+
+
+class CourseChapterReviewRequest(CourseAnchoredJobRequest):
+    pass
+
+
+class CourseRetrievalRequest(StrictCourseRequest):
+    anchor_ids: List[str] = Field(..., min_length=1, max_length=500)
+
+    @field_validator("anchor_ids")
+    @classmethod
+    def anchors_are_unique(cls, value: List[str]) -> List[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("anchor IDs must be unique")
+        return value
+
+
+class CourseFindingUpdate(StrictCourseRequest):
+    status: Literal["resolved", "acknowledged"]
+    resolution_reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class CourseJobResponse(BaseModel):
+    command_id: str
+    run_id: str
+    status: str
 
 class CourseCreate(BaseModel):
     title: str = Field(..., min_length=1, description="Course title")

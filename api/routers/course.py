@@ -6,6 +6,7 @@ from typing import Any, Awaitable, TypeVar
 
 from fastapi import APIRouter, HTTPException, status
 
+from api.course_command_service import CourseCommandService, CourseJobSubmission
 from api.course_service import (
     CourseApprovalError,
     CourseConflictError,
@@ -17,9 +18,16 @@ from api.models import (
     ChapterCreate,
     ChapterPublish,
     ChapterUpdate,
+    CourseChapterGenerateRequest,
+    CourseChapterReviewRequest,
     CourseCreate,
+    CourseEvidenceBuildRequest,
+    CourseFindingUpdate,
+    CourseJobResponse,
     CourseNoteCreate,
     CourseOutlineApproval,
+    CourseOutlineGenerateRequest,
+    CourseRetrievalRequest,
     CourseSourceAssociation,
     CourseUpdate,
     CourseVersionCreate,
@@ -30,6 +38,7 @@ from open_notebook.domain.base import ObjectModel
 from open_notebook.exceptions import InvalidInputError, NotFoundError, OpenNotebookError
 
 router = APIRouter()
+course_commands = CourseCommandService()
 ResultT = TypeVar("ResultT")
 LAB_TYPES = {
     "function_plot",
@@ -44,6 +53,14 @@ def _body(model: ObjectModel) -> dict[str, Any]:
     data = model.model_dump(mode="json")
     data["id"] = str(model.id) if model.id is not None else None
     return data
+
+
+def _job(submission: CourseJobSubmission) -> CourseJobResponse:
+    return CourseJobResponse(
+        command_id=submission.command_id,
+        run_id=submission.run_id,
+        status=submission.status,
+    )
 
 
 async def _call(operation: Awaitable[ResultT]) -> ResultT:
@@ -106,6 +123,148 @@ async def associate_source(course_id: str, request: CourseSourceAssociation):
         CourseService.associate_source(course_id, request.source_id, request.role)
     )
     return _body(course)
+
+
+@router.get("/courses/{course_id}/sources/eligible")
+async def list_eligible_sources(course_id: str):
+    return await _call(course_commands.eligible_sources(course_id))
+
+
+@router.post(
+    "/courses/{course_id}/evidence/build",
+    response_model=CourseJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def build_evidence(course_id: str, request: CourseEvidenceBuildRequest):
+    submission = await _call(
+        course_commands.submit_evidence(
+            course_id=course_id,
+            source_id=request.source_id,
+            role=request.role,
+            force=request.force,
+        )
+    )
+    return _job(submission)
+
+
+@router.get("/courses/{course_id}/evidence/anchors")
+async def list_evidence_anchors(course_id: str):
+    return [
+        _body(anchor)
+        for anchor in await _call(course_commands.list_anchors(course_id))
+    ]
+
+
+@router.post(
+    "/courses/{course_id}/outline/generate",
+    response_model=CourseJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def generate_outline(course_id: str, request: CourseOutlineGenerateRequest):
+    submission = await _call(
+        course_commands.submit_outline(
+            course_id=course_id,
+            anchor_ids=request.anchor_ids,
+            available_lab_keys=request.available_lab_keys,
+            prompt_version=request.prompt_version,
+            model=request.model,
+            force=request.force,
+        )
+    )
+    return _job(submission)
+
+
+@router.get("/courses/{course_id}/outline/current")
+async def get_current_outline(course_id: str):
+    return _body(await _call(course_commands.current_outline(course_id)))
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/generate",
+    response_model=CourseJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def generate_chapter(
+    course_id: str, chapter_key: str, request: CourseChapterGenerateRequest
+):
+    submission = await _call(
+        course_commands.submit_chapter(
+            course_id=course_id,
+            chapter_key=chapter_key,
+            anchor_ids=request.anchor_ids,
+            prompt_version=request.prompt_version,
+            model=request.model,
+            force=request.force,
+        )
+    )
+    return _job(submission)
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/review",
+    response_model=CourseJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def review_chapter(
+    course_id: str, chapter_key: str, request: CourseChapterReviewRequest
+):
+    submission = await _call(
+        course_commands.submit_review(
+            course_id=course_id,
+            chapter_key=chapter_key,
+            anchor_ids=request.anchor_ids,
+            prompt_version=request.prompt_version,
+            model=request.model,
+            force=request.force,
+        )
+    )
+    return _job(submission)
+
+
+@router.get("/courses/{course_id}/chapters/{chapter_key}")
+async def get_current_chapter(course_id: str, chapter_key: str):
+    return _body(
+        await _call(course_commands.current_chapter(course_id, chapter_key))
+    )
+
+
+@router.get("/courses/{course_id}/runs/{run_id}")
+async def get_generation_run(course_id: str, run_id: str):
+    return _body(await _call(course_commands.get_run(course_id, run_id)))
+
+
+@router.get("/courses/{course_id}/findings")
+async def list_validation_findings(
+    course_id: str, chapter_key: str | None = None
+):
+    return [
+        _body(finding)
+        for finding in await _call(
+            course_commands.list_findings(course_id, chapter_key)
+        )
+    ]
+
+
+@router.patch("/courses/{course_id}/findings/{finding_id}")
+async def update_validation_finding(
+    course_id: str, finding_id: str, request: CourseFindingUpdate
+):
+    finding = await _call(
+        course_commands.update_finding(
+            course_id=course_id,
+            finding_id=finding_id,
+            status=request.status,
+            resolution_reason=request.resolution_reason,
+        )
+    )
+    return _body(finding)
+
+
+@router.post("/courses/{course_id}/retrieval/context")
+async def retrieval_context(course_id: str, request: CourseRetrievalRequest):
+    return await _call(
+        course_commands.retrieval_context(course_id, request.anchor_ids)
+    )
 
 
 @router.post("/courses/{course_id}/outline/approve")
