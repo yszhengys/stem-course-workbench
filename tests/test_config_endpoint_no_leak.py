@@ -17,6 +17,7 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 
@@ -99,8 +100,23 @@ async def test_slow_optional_version_check_has_a_short_budget(monkeypatch):
         },
     )
 
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/config",
+            "raw_path": b"/api/config",
+            "query_string": b"",
+            "headers": [],
+            "client": ("testclient", 50000),
+            "server": ("testserver", 80),
+        }
+    )
+
     response = await asyncio.wait_for(
-        config.get_config(request=None),
+        config.get_config(request=request),
         timeout=config.VERSION_CHECK_TIMEOUT_SECONDS + 0.25,
     )
 
