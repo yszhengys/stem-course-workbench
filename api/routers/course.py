@@ -18,6 +18,7 @@ from api.models import (
     ChapterCreate,
     ChapterPublish,
     ChapterUpdate,
+    CourseChapterAttemptCreate,
     CourseChapterGenerateRequest,
     CourseChapterReviewRequest,
     CourseCreate,
@@ -25,6 +26,7 @@ from api.models import (
     CourseFindingUpdate,
     CourseJobResponse,
     CourseNoteCreate,
+    CourseNoteReattach,
     CourseOutlineApproval,
     CourseOutlineGenerateRequest,
     CourseRetrievalRequest,
@@ -228,6 +230,44 @@ async def get_current_chapter(course_id: str, chapter_key: str):
     )
 
 
+@router.get("/courses/{course_id}/chapters/{chapter_key}/labs")
+async def list_current_chapter_labs(course_id: str, chapter_key: str):
+    return await _call(CourseService.list_chapter_labs(course_id, chapter_key))
+
+
+@router.get("/courses/{course_id}/chapters/{chapter_key}/attempts")
+async def list_chapter_attempts(course_id: str, chapter_key: str):
+    return await _call(CourseService.list_chapter_attempts(course_id, chapter_key))
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/labs/{lab_key}/attempts",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_chapter_attempt(
+    course_id: str,
+    chapter_key: str,
+    lab_key: str,
+    request: CourseChapterAttemptCreate,
+):
+    attempt = await _call(
+        CourseService.create_chapter_attempt(
+            course_id,
+            chapter_key,
+            lab_key,
+            request.model_dump(exclude_unset=True),
+        )
+    )
+    return _body(attempt)
+
+
+@router.post("/courses/{course_id}/chapters/{chapter_key}/publish")
+async def publish_current_chapter(course_id: str, chapter_key: str):
+    return _body(
+        await _call(CourseService.publish_current_chapter(course_id, chapter_key))
+    )
+
+
 @router.get("/courses/{course_id}/runs/{run_id}")
 async def get_generation_run(course_id: str, run_id: str):
     return _body(await _call(course_commands.get_run(course_id, run_id)))
@@ -403,6 +443,21 @@ async def list_notes(course_id: str):
 async def create_note(course_id: str, request: CourseNoteCreate):
     note = await _call(
         CourseService.create_note(course_id, request.model_dump(exclude_unset=True))
+    )
+    return _body(note)
+
+
+@router.patch("/courses/{course_id}/notes/{note_id}")
+async def reattach_note(
+    course_id: str, note_id: str, request: CourseNoteReattach
+):
+    note = await _call(
+        CourseService.reattach_note(
+            course_id,
+            note_id,
+            chapter_key=request.chapter_key,
+            block_key=request.block_key,
+        )
     )
     return _body(note)
 

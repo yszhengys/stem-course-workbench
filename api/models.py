@@ -976,6 +976,15 @@ class AttemptCreate(BaseModel):
     exercise_key: Optional[str] = None
 
 
+class CourseChapterAttemptCreate(StrictCourseRequest):
+    answers: Dict[str, Any] = Field(..., description="Student answers payload")
+    exercise_key: Optional[str] = Field(None, min_length=1, max_length=100)
+    answer: Optional[str] = Field(None, max_length=10000)
+    hints_used: Optional[int] = Field(None, ge=0, le=5)
+    answer_revealed: Optional[bool] = None
+    transfer_completed: Optional[bool] = None
+
+
 class AttemptStatusUpdate(BaseModel):
     status: str = Field(..., description="Target attempt status")
 
@@ -992,6 +1001,11 @@ class CourseNoteCreate(BaseModel):
     chapter_key: Optional[str] = Field(None, description="Stable chapter key")
     block_key: Optional[str] = Field(None, description="Stable block key")
     content: str = Field(..., min_length=1, description="Note content")
+
+
+class CourseNoteReattach(StrictCourseRequest):
+    chapter_key: str = Field(..., min_length=1, max_length=100)
+    block_key: str = Field(..., min_length=1, max_length=200)
 
 
 class ChapterPublish(BaseModel):

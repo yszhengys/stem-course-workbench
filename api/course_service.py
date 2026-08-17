@@ -116,6 +116,64 @@ async def _owned_chapter(
     return max(matches, key=lambda chapter: chapter.version_no)
 
 
+async def _current_chapter_records(
+    course_id: str, chapter_key: str
+) -> tuple[Course, CourseVersion, Chapter]:
+    """Resolve the current approved Course version and latest stable-key chapter."""
+
+    course = await CourseService.get_course(course_id)
+    if not course.outline_version_id:
+        raise NotFoundError("Course resource not found")
+    version_id = course.outline_version_id
+    version = await _typed_get(CourseVersion, version_id, "course_version")
+    if (
+        str(version.id) != version_id
+        or version.course != course_id
+        or version.approved_at is None
+        or version.outline_artifact is None
+        or version.outline_hash != _artifact_hash(version.outline_artifact)
+    ):
+        raise CourseConflictError("Current Course outline is not approved")
+    chapter = await _owned_chapter(
+        course_id=course_id,
+        version_id=version_id,
+        chapter_key=chapter_key,
+    )
+    return course, version, chapter
+
+
+def _persistent_lab_key(lab: Lab) -> str:
+    value = lab.payload.get("key") if isinstance(lab.payload, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise CourseConflictError("Persistent Lab has no stable key")
+    return value
+
+
+async def _current_chapter_labs(
+    course_id: str, chapter_key: str
+) -> tuple[CourseVersion, Chapter, list[tuple[str, Lab]]]:
+    _, version, chapter = await _current_chapter_records(course_id, chapter_key)
+    if chapter.id is None:
+        raise CourseConflictError("Current chapter is not persisted")
+    version_id = str(version.id)
+    chapter_id = str(chapter.id)
+    keyed: list[tuple[str, Lab]] = []
+    seen: set[str] = set()
+    for lab in await CourseVersion.labs(version_id):
+        if lab.course_version != version_id or lab.chapter != chapter_id:
+            continue
+        key = _persistent_lab_key(lab)
+        if key in seen:
+            raise CourseConflictError("Persistent Lab stable key is not unique")
+        seen.add(key)
+        keyed.append((key, lab))
+    if seen != _artifact_keys(chapter.artifact, "labs"):
+        raise CourseConflictError(
+            "Chapter artifact and persistent Lab stable keys do not match"
+        )
+    return version, chapter, keyed
+
+
 class CourseService:
     @staticmethod
     async def get_model_options() -> dict[str, Any]:
@@ -442,6 +500,19 @@ class CourseService:
         return chapter
 
     @staticmethod
+    async def publish_current_chapter(
+        course_id: str, chapter_key: str
+    ) -> Chapter:
+        """Publish the latest chapter from the current approved Course version."""
+
+        _, version, chapter = await _current_chapter_records(
+            course_id, chapter_key
+        )
+        return await CourseService.publish_chapter(
+            course_id, str(version.id), str(chapter.id)
+        )
+
+    @staticmethod
     async def publish_version(version_id: str) -> CourseVersion:
         version = await _typed_get(CourseVersion, version_id, "course_version")
         if version.status == sm.VersionStatus.PUBLISHED:
@@ -488,6 +559,121 @@ class CourseService:
     async def list_labs(version_id: str) -> list[Lab]:
         await _typed_get(CourseVersion, version_id, "course_version")
         return await CourseVersion.labs(version_id)
+
+    @staticmethod
+    async def list_chapter_labs(
+        course_id: str, chapter_key: str
+    ) -> list[dict[str, Any]]:
+        """Expose current persistent Labs through stable artifact keys."""
+
+        _, _, labs = await _current_chapter_labs(course_id, chapter_key)
+        result: list[dict[str, Any]] = []
+        for lab_key, lab in labs:
+            if lab.id is None:
+                raise CourseConflictError("Current Lab is not persisted")
+            result.append(
+                {
+                    "id": str(lab.id),
+                    "lab_key": lab_key,
+                    "lab_type": lab.lab_type,
+                    "spec": lab.payload,
+                }
+            )
+        return result
+
+    @staticmethod
+    async def create_chapter_attempt(
+        course_id: str,
+        chapter_key: str,
+        lab_key: str,
+        values: dict[str, Any],
+    ) -> Attempt:
+        """Resolve a current persistent Lab by stable key and save one attempt."""
+
+        version, chapter, keyed_labs = await _current_chapter_labs(
+            course_id, chapter_key
+        )
+        matches = [lab for key, lab in keyed_labs if key == lab_key]
+        if len(matches) != 1 or matches[0].id is None or chapter.id is None:
+            raise NotFoundError("Course Lab not found")
+        exercise_key = values.get("exercise_key")
+        if exercise_key is not None and exercise_key not in _artifact_keys(
+            chapter.artifact, "exercises"
+        ):
+            raise NotFoundError("Course exercise not found")
+        attempt = Attempt(
+            lab=str(matches[0].id),
+            answers=values["answers"],
+            course=course_id,
+            course_version=str(version.id),
+            chapter=str(chapter.id),
+            chapter_key=chapter.chapter_key,
+            exercise_key=exercise_key,
+            answer=values.get("answer"),
+            hints_used=values.get("hints_used"),
+            answer_revealed=values.get("answer_revealed"),
+            transfer_completed=values.get("transfer_completed"),
+            orphan_status="active",
+        )
+        await attempt.save()
+        return attempt
+
+    @staticmethod
+    async def list_chapter_attempts(
+        course_id: str, chapter_key: str
+    ) -> list[dict[str, Any]]:
+        """Return current and historical attempts with explicit stable Lab keys."""
+
+        await _current_chapter_records(course_id, chapter_key)
+        rows = await repo_query(
+            """
+            SELECT * FROM attempt
+            WHERE course = $course AND chapter_key = $chapter_key
+            ORDER BY created DESC;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "chapter_key": chapter_key,
+            },
+        )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            attempt = Attempt(**row)
+            if attempt.course != course_id or attempt.chapter_key != chapter_key:
+                raise NotFoundError("Course attempt ownership mismatch")
+            lab = await _typed_get(Lab, attempt.lab, "lab")
+            version = await _typed_get(
+                CourseVersion, lab.course_version, "course_version"
+            )
+            if lab.chapter is None:
+                raise NotFoundError("Course attempt ownership mismatch")
+            historical_chapter = await _typed_get(
+                Chapter, lab.chapter, "chapter"
+            )
+            lab_key = _persistent_lab_key(lab)
+            if (
+                str(lab.id) != attempt.lab
+                or str(version.id) != lab.course_version
+                or version.course != course_id
+                or str(historical_chapter.id) != lab.chapter
+                or historical_chapter.course_version != lab.course_version
+                or historical_chapter.chapter_key != chapter_key
+                or lab_key not in _artifact_keys(historical_chapter.artifact, "labs")
+                or (
+                    attempt.course_version is not None
+                    and attempt.course_version != lab.course_version
+                )
+                or (
+                    attempt.chapter is not None
+                    and lab.chapter is not None
+                    and attempt.chapter != lab.chapter
+                )
+            ):
+                raise NotFoundError("Course attempt ownership mismatch")
+            payload = attempt.model_dump(mode="json")
+            payload["id"] = str(attempt.id) if attempt.id is not None else None
+            result.append({"lab_key": lab_key, "attempt": payload})
+        return result
 
     @staticmethod
     async def create_attempt(lab_id: str, values: dict[str, Any]) -> Attempt:
@@ -623,6 +809,31 @@ class CourseService:
                 else "active"
             )
         note = CourseNote(course=course_id, **payload)
+        await note.save()
+        return note
+
+    @staticmethod
+    async def reattach_note(
+        course_id: str,
+        note_id: str,
+        *,
+        chapter_key: str,
+        block_key: str,
+    ) -> CourseNote:
+        """Attach an existing Course note to a real block in the current chapter."""
+
+        _, _, chapter = await _current_chapter_records(course_id, chapter_key)
+        note = await _typed_get(CourseNote, note_id, "course_note")
+        if note.course != course_id:
+            raise NotFoundError("Course note not found")
+        if block_key not in _artifact_block_keys(chapter.artifact):
+            raise NotFoundError("Course chapter block not found")
+        if chapter.id is None:
+            raise CourseConflictError("Current chapter is not persisted")
+        note.chapter = str(chapter.id)
+        note.chapter_key = chapter.chapter_key
+        note.block_key = block_key
+        note.orphan_status = "active"
         await note.save()
         return note
 
