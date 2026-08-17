@@ -13,12 +13,12 @@ from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 from open_notebook.config import UPLOADS_FOLDER
+from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Source
 from open_notebook.exceptions import ConfigurationError, InvalidInputError
 
 from .locking import course_job_lock
-from .models import Course, CourseEvidenceAnchor, Evidence
-from .state_machine import EvidenceStatus
+from .models import Course, CourseEvidenceAnchor
 
 EvidenceKind = Literal["pdf", "pptx"]
 SourceRole = Literal["PRIMARY", "SUPPLEMENT"]
@@ -323,9 +323,12 @@ class EvidenceService:
             preview_path=preview_path,
         )
 
-    def manifest_path(self, source_id: str, source_sha256: str) -> Path:
+    def manifest_path(
+        self, course_id: str, source_id: str, source_sha256: str
+    ) -> Path:
+        course_namespace = hashlib.sha256(course_id.encode("utf-8")).hexdigest()
         safe_name = hashlib.sha256(source_id.encode("utf-8")).hexdigest() + ".json"
-        return self.data_root / source_sha256 / safe_name
+        return self.data_root / course_namespace / source_sha256 / safe_name
 
     @staticmethod
     def manifest(
@@ -427,61 +430,64 @@ class EvidenceService:
         kind: EvidenceKind,
         anchors: list[CourseEvidenceAnchor],
     ) -> list[CourseEvidenceAnchor]:
-        evidence_rows = await Evidence.list_by_course(course_id)
-        evidence = next(
-            (row for row in evidence_rows if row.source == source_id), None
+        statement = """
+BEGIN TRANSACTION;
+LET $evidence = (
+    UPSERT ONLY evidence
+    SET course = $course_id,
+        source = $source_id,
+        title = $source_title,
+        kind = $kind,
+        file_hash = $source_hash,
+        source_hash = $source_hash,
+        source_role = $source_role,
+        status = 'ready'
+    WHERE course = $course_id AND source = $source_id
+    RETURN AFTER
+);
+UPDATE course_evidence_anchor
+SET is_current = false
+WHERE course = $course_id
+  AND source = $source_id
+  AND anchor_id NOT IN $anchor_ids;
+FOR $anchor IN $anchors {
+    UPSERT course_evidence_anchor
+    SET course = $course_id,
+        source = $source_id,
+        evidence = $evidence.id,
+        anchor_id = $anchor.anchor_id,
+        locator = $anchor.locator,
+        quote_sha256 = $anchor.quote_sha256,
+        source_role = $anchor.source_role,
+        preview_path = $anchor.preview_path,
+        is_current = true
+    WHERE course = $course_id AND anchor_id = $anchor.anchor_id;
+};
+COMMIT TRANSACTION;
+"""
+        await repo_query(
+            statement,
+            {
+                "course_id": ensure_record_id(course_id),
+                "source_id": ensure_record_id(source_id),
+                "source_title": source_id,
+                "kind": kind,
+                "source_hash": source_hash,
+                "source_role": source_role,
+                "anchor_ids": [anchor.anchor_id for anchor in anchors],
+                "anchors": [
+                    {
+                        "anchor_id": anchor.anchor_id,
+                        "locator": anchor.locator.model_dump(mode="json"),
+                        "quote_sha256": anchor.quote_sha256,
+                        "source_role": anchor.source_role,
+                        "preview_path": anchor.preview_path,
+                    }
+                    for anchor in anchors
+                ],
+            },
         )
-        if evidence is None:
-            evidence = Evidence(
-                course=course_id,
-                source=source_id,
-                title=source_id,
-                kind=kind,
-                file_hash=source_hash,
-                source_hash=source_hash,
-                source_role=source_role,
-                status=EvidenceStatus.PENDING,
-            )
-            await evidence.save()
-            await evidence.transition_to(EvidenceStatus.PROCESSING)
-            await evidence.transition_to(EvidenceStatus.READY)
-        else:
-            evidence.kind = kind
-            evidence.file_hash = source_hash
-            evidence.source_hash = source_hash
-            evidence.source_role = source_role
-            evidence.status = EvidenceStatus.READY
-            await evidence.save()
-        if not evidence.id:
-            raise EvidenceInputError("Evidence record could not be persisted.")
-
-        all_anchors = await CourseEvidenceAnchor.get_all()
-        relevant = [
-            anchor
-            for anchor in all_anchors
-            if anchor.course == course_id and anchor.source == source_id
-        ]
-        new_by_id = {anchor.anchor_id: anchor for anchor in anchors}
-        existing_by_id = {anchor.anchor_id: anchor for anchor in relevant}
-        for old in relevant:
-            should_be_current = old.anchor_id in new_by_id
-            if old.is_current != should_be_current:
-                old.is_current = should_be_current
-                await old.save()
-        persisted: list[CourseEvidenceAnchor] = []
-        for anchor in anchors:
-            existing = existing_by_id.get(anchor.anchor_id)
-            if existing is not None:
-                existing.evidence = evidence.id
-                existing.source_role = source_role
-                existing.is_current = True
-                await existing.save()
-                persisted.append(existing)
-                continue
-            anchor.evidence = evidence.id
-            await anchor.save()
-            persisted.append(anchor)
-        return persisted
+        return anchors
 
     async def build(
         self,
@@ -508,49 +514,49 @@ class EvidenceService:
             raw_content = (
                 await extracted if inspect.isawaitable(extracted) else extracted
             )
-        records = self.docling_records(str(raw_content), kind)
-        if not records:
-            raise EvidenceInputError(
-                "Docling returned no provenance-backed text; evidence was not created."
+            records = self.docling_records(str(raw_content), kind)
+            if not records:
+                raise EvidenceInputError(
+                    "Docling returned no provenance-backed text; evidence was not created."
+                )
+            locator_kind: Literal["pdf_page", "pptx_slide"] = (
+                "pdf_page" if kind == "pdf" else "pptx_slide"
             )
-        locator_kind: Literal["pdf_page", "pptx_slide"] = (
-            "pdf_page" if kind == "pdf" else "pptx_slide"
-        )
-        anchors = [
-            self.make_anchor(
-                course_id=course_id,
-                source_id=source_id,
-                source_sha256=source_hash,
-                kind=locator_kind,
-                index=index,
-                block_key=block_key,
-                quote=quote,
-                source_role=source_role,
-                bbox=bbox,
-            )
-            for index, block_key, quote, bbox in records
-        ]
-        manifest_path = self.manifest_path(source_id, source_hash)
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(
-            json.dumps(
-                self.manifest(
+            anchors = [
+                self.make_anchor(
                     course_id=course_id,
                     source_id=source_id,
                     source_sha256=source_hash,
-                    anchors=anchors,
+                    kind=locator_kind,
+                    index=index,
+                    block_key=block_key,
+                    quote=quote,
+                    source_role=source_role,
+                    bbox=bbox,
+                )
+                for index, block_key, quote, bbox in records
+            ]
+            manifest_path = self.manifest_path(course_id, source_id, source_hash)
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(
+                json.dumps(
+                    self.manifest(
+                        course_id=course_id,
+                        source_id=source_id,
+                        source_sha256=source_hash,
+                        anchors=anchors,
+                    ),
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
                 ),
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            ),
-            encoding="utf-8",
-        )
-        return await self._persist(
-            course_id=course_id,
-            source_id=source_id,
-            source_role=source_role,
-            source_hash=source_hash,
-            kind=kind,
-            anchors=anchors,
-        )
+                encoding="utf-8",
+            )
+            return await self._persist(
+                course_id=course_id,
+                source_id=source_id,
+                source_role=source_role,
+                source_hash=source_hash,
+                kind=kind,
+                anchors=anchors,
+            )

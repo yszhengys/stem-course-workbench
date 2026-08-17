@@ -202,8 +202,14 @@ class CodexCliAdapter(CourseModelAdapter):
             await asyncio.wait_for(process.wait(), timeout=5)
         except (TimeoutError, ProcessLookupError):
             if process.returncode is None:
-                process.kill()
-                await process.wait()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (PermissionError, ProcessLookupError):
+                    process.kill()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except (TimeoutError, ProcessLookupError):
+                    pass
 
 
 class OpenNotebookModelAdapter(CourseModelAdapter):
@@ -216,7 +222,7 @@ class OpenNotebookModelAdapter(CourseModelAdapter):
     ) -> OutputT:
         try:
             model = await provision_langchain_model(
-                prompt, request.model.model, default_type="language"
+                "", request.model.model, default_type="language"
             )
             response = await model.ainvoke(prompt)
             content = getattr(response, "content", response)

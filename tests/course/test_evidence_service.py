@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import inspect
 import json
@@ -11,7 +12,7 @@ from open_notebook.course.evidence_service import (
     EvidenceInputError,
     EvidenceService,
 )
-from open_notebook.course.models import Course, CourseEvidenceAnchor, Evidence
+from open_notebook.course.models import Course
 from open_notebook.domain.notebook import Asset, Source
 
 
@@ -240,6 +241,19 @@ def test_retrieval_context_contains_only_valid_current_selected_anchors():
     ) == [f"PRIMARY pdf_page 1 [{current.anchor_id}]: Grounded quote"]
 
 
+def test_manifest_path_is_namespaced_by_course_source_and_hash(tmp_path: Path):
+    service = EvidenceService(data_root=tmp_path / "evidence")
+    source_hash = hashlib.sha256(b"same source").hexdigest()
+
+    first = service.manifest_path("course:one", "source:one", source_hash)
+    second = service.manifest_path("course:two", "source:one", source_hash)
+
+    assert first != second
+    assert first.parent.name == source_hash
+    assert first.is_relative_to(service.data_root)
+    assert second.is_relative_to(service.data_root)
+
+
 @pytest.mark.asyncio
 async def test_missing_docling_runtime_never_falls_back(tmp_path: Path, monkeypatch):
     path = tmp_path / "lesson.pdf"
@@ -260,56 +274,144 @@ async def test_missing_docling_runtime_never_falls_back(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_duplicate_rebuild_reuses_records_and_changed_hash_stales_old_anchors(
+async def test_persistence_is_one_bound_atomic_upsert_and_stales_changed_hash(
+    monkeypatch,
+):
+    service = EvidenceService(data_root=Path("/tmp/course-evidence-test"))
+    source_hash = hashlib.sha256(b"source").hexdigest()
+    anchor = service.make_anchor(
+        course_id="course:one",
+        source_id="source:one",
+        source_sha256=source_hash,
+        kind="pdf_page",
+        index=1,
+        block_key="block",
+        quote="Grounded",
+        source_role="PRIMARY",
+    )
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def query(statement, params):
+        calls.append((statement, params))
+        return []
+
+    monkeypatch.setattr("open_notebook.course.evidence_service.repo_query", query)
+
+    persisted = await service._persist(
+        course_id="course:one",
+        source_id="source:one",
+        source_role="PRIMARY",
+        source_hash=source_hash,
+        kind="pdf",
+        anchors=[anchor],
+    )
+
+    assert persisted == [anchor]
+    assert len(calls) == 1
+    statement, params = calls[0]
+    assert "BEGIN TRANSACTION" in statement
+    assert "COMMIT TRANSACTION" in statement
+    assert "UPSERT ONLY evidence" in statement
+    assert "UPSERT course_evidence_anchor" in statement
+    assert "SET is_current = false" in statement
+    assert "anchor_id NOT IN $anchor_ids" in statement
+    assert str(params["course_id"]) == "course:one"
+    assert str(params["source_id"]) == "source:one"
+    assert params["anchor_ids"] == [anchor.anchor_id]
+
+
+@pytest.mark.asyncio
+async def test_persistence_failure_is_one_transaction_not_partial(monkeypatch):
+    service = EvidenceService(data_root=Path("/tmp/course-evidence-test"))
+    source_hash = hashlib.sha256(b"source").hexdigest()
+    anchor = service.make_anchor(
+        course_id="course:one",
+        source_id="source:one",
+        source_sha256=source_hash,
+        kind="pdf_page",
+        index=1,
+        block_key="block",
+        quote="Grounded",
+        source_role="PRIMARY",
+    )
+    calls: list[str] = []
+
+    async def fail(statement, params):
+        calls.append(statement)
+        raise RuntimeError("injected transaction failure")
+
+    monkeypatch.setattr("open_notebook.course.evidence_service.repo_query", fail)
+
+    with pytest.raises(RuntimeError, match="injected transaction failure"):
+        await service._persist(
+            course_id="course:one",
+            source_id="source:one",
+            source_role="PRIMARY",
+            source_hash=source_hash,
+            kind="pdf",
+            anchors=[anchor],
+        )
+
+    assert len(calls) == 1
+    assert calls[0].index("BEGIN TRANSACTION") < calls[0].index("status = 'ready'")
+    assert calls[0].index("status = 'ready'") < calls[0].index("COMMIT TRANSACTION")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_build_holds_heavy_lock_through_persistence(
     tmp_path: Path, monkeypatch
 ):
     path = tmp_path / "lesson.pdf"
     _pdf(path)
     service = EvidenceService(data_root=tmp_path / "cache", allowed_roots=[tmp_path])
-    course = _course()
-    source = _source(path)
-    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
-    monkeypatch.setattr(Source, "get", AsyncMock(return_value=source))
-    monkeypatch.setattr(service, "_extract_docling_content", AsyncMock(return_value=_docling_payload()))
-    saved_evidence: list[Evidence] = []
-    saved_anchors: list[CourseEvidenceAnchor] = []
-
-    async def save_evidence(record: Evidence):
-        if record.id is None:
-            record.id = "evidence:one"
-        if record not in saved_evidence:
-            saved_evidence.append(record)
-
-    async def save_anchor(record: CourseEvidenceAnchor):
-        if record.id is None:
-            record.id = f"course_evidence_anchor:{len(saved_anchors) + 1}"
-        if record not in saved_anchors:
-            saved_anchors.append(record)
-
-    monkeypatch.setattr(Evidence, "list_by_course", AsyncMock(side_effect=lambda _: saved_evidence))
-    monkeypatch.setattr(CourseEvidenceAnchor, "get_all", AsyncMock(side_effect=lambda: saved_anchors))
-    monkeypatch.setattr(Evidence, "save", save_evidence)
-    monkeypatch.setattr(CourseEvidenceAnchor, "save", save_anchor)
-
-    first = await service.build(
-        course_id="course:one", source_id="source:one", source_role="PRIMARY"
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=_course()))
+    monkeypatch.setattr(Source, "get", AsyncMock(return_value=_source(path)))
+    local_job_lock = asyncio.Lock()
+    monkeypatch.setattr(
+        "open_notebook.course.evidence_service.course_job_lock",
+        lambda: local_job_lock,
     )
-    second = await service.build(
-        course_id="course:one", source_id="source:one", source_role="PRIMARY"
-    )
+    active = 0
+    maximum_active = 0
+    events: list[str] = []
+    counter = 0
 
-    assert [item.anchor_id for item in first] == [item.anchor_id for item in second]
-    assert len(saved_evidence) == 1
-    assert len(saved_anchors) == 1
+    async def extract(*args):
+        nonlocal counter
+        counter += 1
+        events.append(f"extract:{counter}")
+        await asyncio.sleep(0)
+        return _docling_payload()
 
-    with path.open("ab") as handle:
-        handle.write(b"changed")
-    monkeypatch.setattr(service, "_validate_file", lambda *_: None)
-    changed = await service.build(
-        course_id="course:one", source_id="source:one", source_role="PRIMARY"
+    async def persist(**kwargs):
+        nonlocal active, maximum_active
+        active += 1
+        maximum_active = max(maximum_active, active)
+        events.append("persist:start")
+        await asyncio.sleep(0.01)
+        events.append("persist:end")
+        active -= 1
+        return kwargs["anchors"]
+
+    monkeypatch.setattr(service, "_extract_docling_content", extract)
+    monkeypatch.setattr(service, "_persist", persist)
+
+    first, second = await asyncio.gather(
+        service.build(
+            course_id="course:one", source_id="source:one", source_role="PRIMARY"
+        ),
+        service.build(
+            course_id="course:one", source_id="source:one", source_role="PRIMARY"
+        ),
     )
 
-    assert changed[0].anchor_id != first[0].anchor_id
-    assert first[0].is_current is False
-    assert changed[0].is_current is True
-    assert len(saved_anchors) == 2
+    assert first[0].anchor_id == second[0].anchor_id
+    assert maximum_active == 1
+    assert events == [
+        "extract:1",
+        "persist:start",
+        "persist:end",
+        "extract:2",
+        "persist:start",
+        "persist:end",
+    ]

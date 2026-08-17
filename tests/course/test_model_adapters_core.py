@@ -1,5 +1,6 @@
 import asyncio
 import json
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -229,28 +230,67 @@ async def test_codex_cancel_terminates_process_group(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_codex_forced_termination_sends_sigkill_to_process_group(monkeypatch):
+    signals: list[tuple[int, int]] = []
+
+    class Process:
+        returncode = None
+        pid = 987
+
+        async def wait(self):
+            return None
+
+        def kill(self):
+            raise AssertionError("must not kill only the child PID")
+
+    async def timeout(coroutine, **kwargs):
+        coroutine.close()
+        raise TimeoutError
+
+    monkeypatch.setattr("os.killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(asyncio, "wait_for", timeout)
+
+    await CodexCliAdapter._terminate_process(Process())  # type: ignore[arg-type]
+
+    assert signals == [
+        (987, signal.SIGTERM),
+        (987, signal.SIGKILL),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_open_notebook_passes_exact_selected_model_without_fallback(monkeypatch):
     calls: dict[str, object] = {}
+    long_prompt = "grounded evidence " * 120_000
 
     class Model:
         async def ainvoke(self, prompt):
+            calls["invoked_prompt"] = prompt
             return SimpleNamespace(content=json.dumps({"answer": "ok"}))
 
-    async def provision(prompt, model_id, default_type):
-        calls.update(model_id=model_id, default_type=default_type)
+    async def provision(content, model_id, default_type):
+        calls.update(
+            provisioning_content=content,
+            model_id=model_id,
+            default_type=default_type,
+        )
         return Model()
 
     monkeypatch.setattr(
         "open_notebook.course.model_adapters.provision_langchain_model", provision
     )
     result = await OpenNotebookModelAdapter().generate(
-        _request("open_notebook", "model:deepseek-v4-pro"), Output, prompt="prompt"
+        _request("open_notebook", "model:deepseek-v4-pro"),
+        Output,
+        prompt=long_prompt,
     )
 
     assert result.answer == "ok"
     assert calls == {
+        "provisioning_content": "",
         "model_id": "model:deepseek-v4-pro",
         "default_type": "language",
+        "invoked_prompt": long_prompt,
     }
 
 
@@ -288,4 +328,3 @@ async def test_fake_adapter_is_deterministic_and_real_adapter_requires_switch(mo
         build_adapter(_request().model, binary="codex")
     monkeypatch.setenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS", "1")
     assert isinstance(build_adapter(_request().model, binary="codex"), CodexCliAdapter)
-
