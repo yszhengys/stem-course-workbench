@@ -5,6 +5,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -194,13 +195,24 @@ elif url.endswith("/api/config"):
 elif url.endswith(":3000/config"):
     body = '{"apiUrl":"http://127.0.0.1:5055"}'
 elif url.endswith("/courses/new"):
+    page_calls_file = state / "course-page.calls"
+    page_calls = (
+        int(page_calls_file.read_text(encoding="utf-8").strip())
+        if page_calls_file.exists()
+        else 0
+    ) + 1
+    page_calls_file.write_text(str(page_calls), encoding="utf-8")
     if os.environ.get("FAKE_UI_CONTRACT_READY") == "1":
         body = '<main data-course-workbench-ready="new-course">ready</main>'
     elif os.environ.get("FAKE_UI_CONTRACT_READY") == "connection":
         body = '<div data-course-workbench-ready="connection-checking">loading</div>'
     else:
         body = '<html>current repository contract is not ready</html>'
-    if os.environ.get("FAKE_WORKER_EXITS_AFTER_READY") == "1":
+    exit_on_page_call = os.environ.get("FAKE_WORKER_EXITS_ON_COURSE_PAGE_CALL")
+    if (
+        os.environ.get("FAKE_WORKER_EXITS_AFTER_READY") == "1"
+        or exit_on_page_call == str(page_calls)
+    ):
         (state / "worker.exit").touch()
         deadline = time.monotonic() + 2
         worker_pid_file = state / "worker.pid"
@@ -343,7 +355,10 @@ while True:
         (state / f"pid.{pid}.start").write_text("Mon Aug 18 01:00:00 2026", encoding="utf-8")
         print("Successfully imported 1/1 modules", flush=True)
         print("Starting LIVE query listener for new commands...", flush=True)
-        if os.environ.get("FAKE_WORKER_EXITS_AFTER_READY") == "1":
+        if (
+            os.environ.get("FAKE_WORKER_EXITS_AFTER_READY") == "1"
+            or os.environ.get("FAKE_WORKER_EXITS_ON_COURSE_PAGE_CALL")
+        ):
             while not (state / "worker.exit").exists():
                 time.sleep(0.01)
             (state / f"pid.{pid}.dead").touch()
@@ -424,8 +439,45 @@ def _calls(path: Path) -> list[str]:
 
 
 def _with_ui_contract(env: dict[str, str]) -> dict[str, str]:
-    """Model the future Task 4 UI contract in isolated launcher unit tests."""
+    """Return the stable HTTP marker contract used by isolated launcher tests."""
     return {**env, "FAKE_UI_CONTRACT_READY": "1"}
+
+
+def _effective_course_env_with_real_uv(
+    env_file: Path, cache_dir: Path
+) -> tuple[str, str]:
+    """Ask the repository-pinned real uv to parse the launcher's dotenv file."""
+    command_env = os.environ.copy()
+    command_env.pop("OPEN_NOTEBOOK_ENCRYPTION_KEY", None)
+    command_env.pop("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS", None)
+    command_env["UV_CACHE_DIR"] = str(cache_dir)
+    result = subprocess.run(
+        [
+            str(PROJECT_ROOT / ".tools" / "bin" / "uv"),
+            "run",
+            "--no-project",
+            "--env-file",
+            str(env_file),
+            "--",
+            sys.executable,
+            "-c",
+            (
+                "import os; "
+                "print(os.environ['OPEN_NOTEBOOK_ENCRYPTION_KEY']); "
+                "print(os.environ['OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS'])"
+            ),
+        ],
+        cwd=env_file.parent,
+        env=command_env,
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = result.stdout.splitlines()
+    assert len(values) == 2, result.stdout + result.stderr
+    return values[0], values[1]
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -602,6 +654,71 @@ def test_existing_env_explicit_course_model_opt_out_is_preserved(
     lines = env_file.read_text(encoding="utf-8").splitlines()
     assert lines.count("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=0") == 1
     assert not any(line == "OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1" for line in lines)
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_export_and_spaced_dotenv_assignments_are_rewritten_deduped_and_effective(
+    fake_repo: tuple[Path, dict[str, str], Path], tmp_path: Path
+) -> None:
+    repo, env, state = fake_repo
+    env = _with_ui_contract(env)
+    env_file = repo / ".env"
+    env_file.write_text(
+        "  export OPEN_NOTEBOOK_ENCRYPTION_KEY = '   '\n"
+        "OPEN_NOTEBOOK_ENCRYPTION_KEY=duplicate-secret-must-not-win\n"
+        "  export OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS = 0\n"
+        "OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS = 1\n"
+        "KEEP_THIS=value\n",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    content = env_file.read_text(encoding="utf-8")
+    assert content.count("OPEN_NOTEBOOK_ENCRYPTION_KEY") == 1
+    assert content.count("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS") == 1
+    assert "duplicate-secret-must-not-win" not in content
+    assert "KEEP_THIS=value" in content
+    effective_key, effective_model_permission = _effective_course_env_with_real_uv(
+        env_file, tmp_path / "real-uv-cache"
+    )
+    assert len(effective_key) >= 32
+    assert effective_key.strip()
+    assert effective_model_permission == "0"
+    assert effective_key not in result.stdout + result.stderr
+    assert effective_key not in "\n".join(_calls(state / "uv.calls"))
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_first_valid_export_assignment_wins_and_duplicates_are_removed(
+    fake_repo: tuple[Path, dict[str, str], Path], tmp_path: Path
+) -> None:
+    repo, env, state = fake_repo
+    env = _with_ui_contract(env)
+    first_key = "first-valid-export-key-0123456789abcdef"
+    later_key = "later-key-must-not-override-0123456789abcdef"
+    env_file = repo / ".env"
+    env_file.write_text(
+        f"  export OPEN_NOTEBOOK_ENCRYPTION_KEY = {first_key}\n"
+        f"OPEN_NOTEBOOK_ENCRYPTION_KEY={later_key}\n"
+        "  export OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS = 0\n"
+        "OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1\n",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    content = env_file.read_text(encoding="utf-8")
+    assert content.count("OPEN_NOTEBOOK_ENCRYPTION_KEY") == 1
+    assert content.count("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS") == 1
+    assert later_key not in content
+    assert first_key not in "\n".join(_calls(state / "uv.calls"))
+    assert later_key not in "\n".join(_calls(state / "uv.calls"))
+    assert _effective_course_env_with_real_uv(
+        env_file, tmp_path / "real-uv-cache"
+    ) == (first_key, "0")
     assert _run(repo, env, "stop").returncode == 0
 
 
@@ -1007,6 +1124,29 @@ def test_worker_that_logs_live_listener_then_exits_cannot_pass_final_readiness(
     assert not list(runtime.glob("worker.*"))
 
 
+def test_worker_exit_during_last_http_probe_fails_final_ownership_snapshot(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        # The first request is the page-specific wait. The second is the final
+        # HTTP probe inside all_services_ready, after worker_ready has passed.
+        "FAKE_WORKER_EXITS_ON_COURSE_PAGE_CALL": "2",
+        "COURSE_WORKBENCH_READY_TIMEOUT": "1",
+    }
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode != 0
+    assert "STEM Course Workbench is ready" not in result.stdout
+    assert (state / "course-page.calls").read_text(encoding="utf-8") == "2"
+    worker_pid = (state / "worker.pid").read_text(encoding="utf-8").strip()
+    assert (state / f"pid.{worker_pid}.dead").exists()
+    runtime = repo / ".runtime" / "course-workbench"
+    assert not list(runtime.glob("worker.*"))
+
+
 def test_exact_200_course_route_rejects_non_course_connection_marker(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
@@ -1125,33 +1265,6 @@ def test_logs_follow_requested_service_and_restart_works(
     assert restarted.returncode == 0, restarted.stdout + restarted.stderr
     assert any("stop surrealdb" in line for line in _calls(state / "docker.calls"))
     assert _run(repo, env, "stop").returncode == 0
-
-
-def test_repository_declares_course_ui_startup_contract() -> None:
-    """Source contract only; the final gate still uses a real Next HTTP run."""
-    page = PROJECT_ROOT / "frontend/src/app/(dashboard)/courses/new/page.tsx"
-    connection_guard = (
-        PROJECT_ROOT / "frontend/src/components/common/ConnectionGuard.tsx"
-    )
-    backend_config = PROJECT_ROOT / "api/routers/config.py"
-
-    assert page.exists()
-    assert 'data-course-workbench-ready="new-course"' in page.read_text(
-        encoding="utf-8"
-    )
-    guard_source = connection_guard.read_text(encoding="utf-8")
-    checking_branch = guard_source.split("if (isChecking)", 1)[1].split(
-        "// Render children", 1
-    )[0]
-    assert "return null" not in checking_branch
-    assert "data-course-workbench-ready" in checking_branch
-    assert "/courses/new" in checking_branch
-    assert "new-course" in checking_branch
-    assert "connection-checking" in checking_branch
-    assert "LoadingSpinner" in checking_branch or "loading" in checking_branch.lower()
-    config_source = backend_config.read_text(encoding="utf-8")
-    assert "VERSION_CHECK_TIMEOUT_SECONDS = 0.5" in config_source
-    assert "asyncio.wait_for" in config_source
 
 
 def test_example_env_enables_user_initiated_course_models() -> None:

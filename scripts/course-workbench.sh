@@ -187,26 +187,104 @@ random_key() {
     LC_ALL=C od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n'
 }
 
-rewrite_env_key() {
+env_assignment_exists() {
+    source_file=$1
+    env_name=$2
+    awk -v env_name="$env_name" '
+        function is_assignment(line, candidate) {
+            candidate = line
+            sub(/^[[:space:]]*/, "", candidate)
+            if (candidate ~ /^export[[:space:]]+/) {
+                sub(/^export[[:space:]]+/, "", candidate)
+            }
+            return candidate ~ ("^" env_name "[[:space:]]*=")
+        }
+        is_assignment($0) { found = 1; exit }
+        END { if (!found) exit 1 }
+    ' "$source_file"
+}
+
+first_env_assignment_value() {
+    source_file=$1
+    env_name=$2
+    awk -v env_name="$env_name" '
+        function normalized_assignment(line, candidate) {
+            candidate = line
+            sub(/^[[:space:]]*/, "", candidate)
+            if (candidate ~ /^export[[:space:]]+/) {
+                sub(/^export[[:space:]]+/, "", candidate)
+            }
+            return candidate
+        }
+        {
+            candidate = normalized_assignment($0)
+            if (candidate ~ ("^" env_name "[[:space:]]*=")) {
+                sub("^" env_name "[[:space:]]*=", "", candidate)
+                print candidate
+                exit
+            }
+        }
+    ' "$source_file"
+}
+
+dedupe_env_assignment() {
     source_file=$1
     destination=$2
-    key=$3
-    temporary="${destination}.tmp.$$"
-    # The key travels through stdin, never argv. Global umask keeps the temp
-    # file private from its first byte; mv atomically replaces the destination.
+    env_name=$3
+    temporary=$(mktemp "${destination}.tmp.XXXXXX") || return 1
+    if ! awk -v env_name="$env_name" '
+        function is_assignment(line, candidate) {
+            candidate = line
+            sub(/^[[:space:]]*/, "", candidate)
+            if (candidate ~ /^export[[:space:]]+/) {
+                sub(/^export[[:space:]]+/, "", candidate)
+            }
+            return candidate ~ ("^" env_name "[[:space:]]*=")
+        }
+        is_assignment($0) {
+            if (!seen) print
+            seen = 1
+            next
+        }
+        { print }
+    ' "$source_file" > "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if ! chmod 600 "$temporary" || ! mv "$temporary" "$destination"; then
+        rm -f "$temporary"
+        return 1
+    fi
+}
+
+rewrite_env_assignment() {
+    source_file=$1
+    destination=$2
+    env_name=$3
+    replacement=$4
+    temporary=$(mktemp "${destination}.tmp.XXXXXX") || return 1
+    # Sensitive values travel through stdin, never external-process argv.
     if ! {
-        printf '%s\n' "$key"
+        printf '%s\n' "$replacement"
         cat "$source_file"
-    } | awk '
+    } | awk -v env_name="$env_name" '
         NR == 1 { replacement = $0; next }
-        /^[[:space:]]*OPEN_NOTEBOOK_ENCRYPTION_KEY=/ {
-            if (!replaced) print "OPEN_NOTEBOOK_ENCRYPTION_KEY=" replacement
+        function is_assignment(line, candidate) {
+            candidate = line
+            sub(/^[[:space:]]*/, "", candidate)
+            if (candidate ~ /^export[[:space:]]+/) {
+                sub(/^export[[:space:]]+/, "", candidate)
+            }
+            return candidate ~ ("^" env_name "[[:space:]]*=")
+        }
+        is_assignment($0) {
+            if (!replaced) print env_name "=" replacement
             replaced = 1
             next
         }
         { print }
         END {
-            if (!replaced) print "OPEN_NOTEBOOK_ENCRYPTION_KEY=" replacement
+            if (!replaced) print env_name "=" replacement
         }
     ' > "$temporary"; then
         rm -f "$temporary"
@@ -218,21 +296,44 @@ rewrite_env_key() {
     fi
 }
 
+rewrite_env_key() {
+    rewrite_env_assignment "$1" "$2" OPEN_NOTEBOOK_ENCRYPTION_KEY "$3"
+}
+
+normalize_env_value() {
+    printf '%s\n' "$1" | awk '
+        {
+            value = $0
+            sub(/^[[:space:]]*/, "", value)
+            sub(/[[:space:]]*$/, "", value)
+            first = substr(value, 1, 1)
+            last = substr(value, length(value), 1)
+            if (length(value) >= 2 &&
+                ((first == "\"" && last == "\"") ||
+                 (first == "\047" && last == "\047"))) {
+                value = substr(value, 2, length(value) - 2)
+                sub(/^[[:space:]]*/, "", value)
+                sub(/[[:space:]]*$/, "", value)
+            }
+            print value
+        }
+    '
+}
+
 ensure_course_model_permission() {
-    if grep -Eq '^[[:space:]]*OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=' "$ENV_FILE"; then
-        return 0
+    model_name=OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS
+    if env_assignment_exists "$ENV_FILE" "$model_name"; then
+        model_value=$(first_env_assignment_value "$ENV_FILE" "$model_name")
+        normalized_model_value=$(normalize_env_value "$model_value")
+        case "$normalized_model_value" in
+            0|1)
+                dedupe_env_assignment "$ENV_FILE" "$ENV_FILE" "$model_name"
+                return $?
+                ;;
+        esac
     fi
 
-    temporary="${ENV_FILE}.tmp.$$"
-    if ! {
-        cat "$ENV_FILE"
-        printf '\n%s\n' 'OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1'
-    } > "$temporary"; then
-        rm -f "$temporary"
-        return 1
-    fi
-    if ! chmod 600 "$temporary" || ! mv "$temporary" "$ENV_FILE"; then
-        rm -f "$temporary"
+    if ! rewrite_env_assignment "$ENV_FILE" "$ENV_FILE" "$model_name" 1; then
         return 1
     fi
     say "Enabled user-initiated Course model generation in local configuration."
@@ -248,31 +349,9 @@ ensure_env() {
             error "Could not set .env permissions to 600."
             return 1
         }
-        existing_key=$(awk '
-            /^[[:space:]]*OPEN_NOTEBOOK_ENCRYPTION_KEY=/ && !found {
-                value = $0
-                sub(/^[[:space:]]*OPEN_NOTEBOOK_ENCRYPTION_KEY=/, "", value)
-                print value
-                found = 1
-            }
-        ' "$ENV_FILE")
-        normalized_key=$(printf '%s\n' "$existing_key" | awk '
-            {
-                value = $0
-                sub(/^[[:space:]]*/, "", value)
-                sub(/[[:space:]]*$/, "", value)
-                first = substr(value, 1, 1)
-                last = substr(value, length(value), 1)
-                if (length(value) >= 2 &&
-                    ((first == "\"" && last == "\"") ||
-                     (first == "\047" && last == "\047"))) {
-                    value = substr(value, 2, length(value) - 2)
-                    sub(/^[[:space:]]*/, "", value)
-                    sub(/[[:space:]]*$/, "", value)
-                }
-                print value
-            }
-        ')
+        existing_key=$(first_env_assignment_value \
+            "$ENV_FILE" OPEN_NOTEBOOK_ENCRYPTION_KEY)
+        normalized_key=$(normalize_env_value "$existing_key")
         case "$normalized_key" in
             ''|*change-me-to-a-secret-string*|*replace-me*|*your-secret*|*CHANGE_ME*)
                 key=$(random_key)
@@ -281,6 +360,13 @@ ensure_env() {
                     return 1
                 fi
                 say "Secured the local .env encryption key and permissions."
+                ;;
+            *)
+                if ! dedupe_env_assignment "$ENV_FILE" "$ENV_FILE" \
+                    OPEN_NOTEBOOK_ENCRYPTION_KEY; then
+                    error "Could not deduplicate OPEN_NOTEBOOK_ENCRYPTION_KEY safely."
+                    return 1
+                fi
                 ;;
         esac
         if ! ensure_course_model_permission; then
@@ -873,6 +959,26 @@ course_page_ready() {
     return "$result"
 }
 
+service_owns_listening_port() {
+    service=$1
+    port=$2
+    validate_process "$service" || return 1
+    owners=$(port_pids "$port")
+    [ -n "$owners" ] || return 1
+    for owner in $owners; do
+        pid_belongs_to_service "$owner" "$service" || return 1
+    done
+}
+
+final_ownership_snapshot() {
+    # This runs after every HTTP/body probe. It closes the race where a service
+    # exits (or a port changes owners) during the last successful request.
+    compose_container_state && \
+        service_owns_listening_port api 5055 && \
+        validate_process worker && \
+        service_owns_listening_port frontend 3000
+}
+
 all_services_ready() {
     surreal_ready && \
         api_health_ready && \
@@ -880,7 +986,8 @@ all_services_ready() {
         course_router_ready && \
         worker_ready && \
         frontend_config_ready && \
-        course_page_ready
+        course_page_ready && \
+        final_ownership_snapshot
 }
 
 wait_for() {
