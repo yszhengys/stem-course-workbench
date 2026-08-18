@@ -71,6 +71,172 @@ describe('courseApi', () => {
     expect(new Set(request.available_lab_keys).size).toBe(request.available_lab_keys.length)
   })
 
+  it('rebuilds generation payloads from runtime allowlists', async () => {
+    const stop = new Error('stop after request capture')
+    vi.mocked(apiClient.post).mockRejectedValue(stop)
+    const request = {
+      anchor_ids: ['anchor:one'],
+      prompt_version: 'v1',
+      force: false,
+      model: {
+        adapter: 'open_notebook',
+        model: 'model:deepseek-v4-pro',
+        reasoning_effort: null,
+        chapter: 'chapter:hidden',
+      },
+      file_path: '/private/server/path.pdf',
+      evidence_text: 'untrusted legacy evidence',
+      chapter: 'chapter:hidden',
+    } as never
+
+    await expect(courseApi.generateOutline('course:one', request)).rejects.toBe(stop)
+    await expect(courseApi.generateChapter('course:one', 'limits', request)).rejects.toBe(stop)
+    await expect(courseApi.reviewChapter('course:one', 'limits', request)).rejects.toBe(stop)
+
+    expect(vi.mocked(apiClient.post).mock.calls[0][1]).toEqual({
+      anchor_ids: ['anchor:one'],
+      prompt_version: 'v1',
+      force: false,
+      model: {
+        adapter: 'open_notebook',
+        model: 'model:deepseek-v4-pro',
+        reasoning_effort: null,
+      },
+      available_lab_keys: expect.any(Array),
+    })
+    expect(vi.mocked(apiClient.post).mock.calls[1][1]).toEqual({
+      anchor_ids: ['anchor:one'],
+      prompt_version: 'v1',
+      force: false,
+      model: {
+        adapter: 'open_notebook',
+        model: 'model:deepseek-v4-pro',
+        reasoning_effort: null,
+      },
+    })
+    expect(vi.mocked(apiClient.post).mock.calls[2][1]).toEqual({
+      anchor_ids: ['anchor:one'],
+      prompt_version: 'v1',
+      force: false,
+      model: {
+        adapter: 'open_notebook',
+        model: 'model:deepseek-v4-pro',
+        reasoning_effort: null,
+      },
+    })
+  })
+
+  it('rebuilds every other Course write payload from runtime allowlists', async () => {
+    const stop = new Error('stop after request capture')
+    vi.mocked(apiClient.post).mockRejectedValue(stop)
+    vi.mocked(apiClient.patch).mockRejectedValue(stop)
+    vi.mocked(apiClient.put).mockRejectedValue(stop)
+
+    await expect(courseApi.create({
+      title: 'Calculus',
+      subject: 'math',
+      description: null,
+      language: 'en-US',
+      notebook_id: 'notebook:one',
+      file_path: '/private/server/course.pdf',
+    } as never)).rejects.toBe(stop)
+    await expect(courseApi.associateSource('course:one', {
+      source_id: 'source:one',
+      role: 'PRIMARY',
+      chapter: 'chapter:hidden',
+    } as never)).rejects.toBe(stop)
+    await expect(courseApi.buildEvidence('course:one', {
+      source_id: 'source:one',
+      role: 'PRIMARY',
+      force: false,
+      file_path: '/private/server/source.pdf',
+      evidence_text: 'legacy evidence',
+    } as never)).rejects.toBe(stop)
+    await expect(courseApi.approveOutline('course:one', {
+      version_id: 'course_outline_version:one',
+      confirmation: '确认大纲',
+      chapter: 'chapter:hidden',
+    } as never)).rejects.toBe(stop)
+    await expect(courseApi.createChapterAttempt('course:one', 'limits', 'lab-1', {
+      answers: { value: 42 },
+      exercise_key: 'exercise-1',
+      answer: '42',
+      hints_used: 1,
+      answer_revealed: false,
+      transfer_completed: true,
+      chapter: 'chapter:hidden',
+    } as never)).rejects.toBe(stop)
+    await expect(courseApi.createNote('course:one', {
+      chapter_key: 'limits',
+      block_key: 'definition-limit',
+      content: 'Remember this.',
+      chapter: 'chapter:hidden',
+    } as never)).rejects.toBe(stop)
+
+    expect(vi.mocked(apiClient.post).mock.calls.map(([path, payload]) => [path, payload])).toEqual([
+      ['/courses', {
+        title: 'Calculus',
+        subject: 'math',
+        description: null,
+        language: 'en-US',
+        notebook_id: 'notebook:one',
+      }],
+      ['/courses/course%3Aone/sources', { source_id: 'source:one', role: 'PRIMARY' }],
+      ['/courses/course%3Aone/evidence/build', { source_id: 'source:one', role: 'PRIMARY', force: false }],
+      ['/courses/course%3Aone/outline/approve', {
+        version_id: 'course_outline_version:one',
+        confirmation: '确认大纲',
+      }],
+      ['/courses/course%3Aone/chapters/limits/labs/lab-1/attempts', {
+        answers: { value: 42 },
+        exercise_key: 'exercise-1',
+        answer: '42',
+        hints_used: 1,
+        answer_revealed: false,
+        transfer_completed: true,
+      }],
+      ['/courses/course%3Aone/notes', {
+        chapter_key: 'limits',
+        block_key: 'definition-limit',
+        content: 'Remember this.',
+      }],
+    ])
+
+    await expect(courseApi.updateFinding('course:one', 'finding:one', {
+      status: 'resolved',
+      resolution_reason: 'Checked manually.',
+      evidence_text: 'legacy evidence',
+    } as never)).rejects.toBe(stop)
+    await expect(courseApi.reattachNote('course:one', 'note:one', {
+      chapter_key: 'limits',
+      block_key: 'definition-limit',
+      chapter: 'chapter:hidden',
+    } as never)).rejects.toBe(stop)
+
+    expect(vi.mocked(apiClient.patch).mock.calls.map(([path, payload]) => [path, payload])).toEqual([
+      ['/courses/course%3Aone/findings/finding%3Aone', {
+        status: 'resolved',
+        resolution_reason: 'Checked manually.',
+      }],
+      ['/courses/course%3Aone/notes/note%3Aone', {
+        chapter_key: 'limits',
+        block_key: 'definition-limit',
+      }],
+    ])
+
+    await expect(courseApi.updateProgress('course:one', {
+      chapter_key: 'limits',
+      block_key: null,
+      status: 'completed',
+      chapter: 'chapter:hidden',
+    } as never)).rejects.toBe(stop)
+    expect(apiClient.put).toHaveBeenCalledWith('/courses/course%3Aone/progress', {
+      chapter_key: 'limits',
+      block_key: null,
+      status: 'completed',
+    })
+  })
+
   it('uses stable chapter and Lab keys for attempts and publication', async () => {
     vi.mocked(apiClient.post)
       .mockResolvedValueOnce({

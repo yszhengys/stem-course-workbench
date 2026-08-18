@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { AlertTriangle, ArrowLeft, BookOpen, CheckCircle2, FileText, Network } from 'lucide-react'
@@ -63,6 +63,7 @@ export default function CourseOutlinePage() {
   const [evidenceCommandId, setEvidenceCommandId] = useState<string>()
   const [outlineCommandId, setOutlineCommandId] = useState<string>()
   const [sourceValidationError, setSourceValidationError] = useState<string>()
+  const modelSelectionInitialized = useRef(false)
 
   const evidenceStatus = useCommandStatus(evidenceCommandId, [
     QUERY_KEYS.course(courseId),
@@ -76,9 +77,17 @@ export default function CourseOutlinePage() {
   ])
 
   useEffect(() => {
-    if (!models.data || outlineModel) return
-    setOutlineModel(selectableDefaultModel(models.data.options, models.data.defaults.outline))
-  }, [models.data, outlineModel])
+    if (!models.data) return
+    if (!modelSelectionInitialized.current) {
+      modelSelectionInitialized.current = true
+      setOutlineModel(selectableDefaultModel(models.data.options, models.data.defaults.outline))
+      return
+    }
+    setOutlineModel((current) => current
+      ? selectableDefaultModel(models.data.options, current)
+      : null
+    )
+  }, [models.data])
 
   useEffect(() => {
     if (!anchors.data) return
@@ -89,9 +98,13 @@ export default function CourseOutlinePage() {
     })
   }, [anchors.data])
 
-  const currentOutline = outline.data
+  const outlineUnavailable = outline.isLoading || outline.isFetching || outline.isError
+  const currentOutline = outlineUnavailable ? undefined : outline.data
   const outlineArtifact = currentOutline?.outline_artifact
   const approved = Boolean(currentOutline?.approved_at)
+  const selectedOutlineModel = models.data && outlineModel
+    ? selectableDefaultModel(models.data.options, outlineModel)
+    : null
   const anchorsById = useMemo(
     () => new Map((anchors.data ?? []).map((anchor) => [anchor.anchor_id, anchor])),
     [anchors.data]
@@ -124,11 +137,11 @@ export default function CourseOutlinePage() {
   }
 
   const handleOutlineGenerate = async () => {
-    if (!outlineModel || selectedAnchorIds.length === 0) return
+    if (!selectedOutlineModel || selectedAnchorIds.length === 0) return
     const job = await generateOutline.mutateAsync({
       anchor_ids: selectedAnchorIds,
       prompt_version: 'v1',
-      model: outlineModel,
+      model: selectedOutlineModel,
       force: false,
     })
     setOutlineCommandId(job.command_id)
@@ -225,7 +238,7 @@ export default function CourseOutlinePage() {
                     options={models.data?.options ?? []}
                     value={outlineModel}
                     onChange={setOutlineModel}
-                    disabled={generateOutline.isPending || outlineStatus.isFetching}
+                    disabled={models.isFetching || generateOutline.isPending || outlineStatus.isFetching}
                   />
                 )}
                 <div className="space-y-2">
@@ -258,7 +271,7 @@ export default function CourseOutlinePage() {
                 <Button
                   type="button"
                   onClick={() => void handleOutlineGenerate()}
-                  disabled={models.isError || anchors.isError || !outlineModel || selectedAnchorIds.length === 0 || generateOutline.isPending || outlineStatus.isFetching}
+                  disabled={models.isError || models.isFetching || anchors.isError || !selectedOutlineModel || selectedAnchorIds.length === 0 || generateOutline.isPending || outlineStatus.isFetching}
                 >
                   {generateOutline.isPending ? t('common.processing') : t('course.generateOutline')}
                 </Button>
@@ -271,7 +284,9 @@ export default function CourseOutlinePage() {
             </Card>
           </div>
 
-          {course.data.outline_version_id && outline.isLoading && <CourseInlineLoading />}
+          {course.data.outline_version_id && !outline.isError && (outline.isLoading || outline.isFetching) && (
+            <CourseInlineLoading />
+          )}
           {course.data.outline_version_id && outline.isError && (
             <CourseInlineError onRetry={() => void outline.refetch()} />
           )}

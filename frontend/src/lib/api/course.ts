@@ -20,10 +20,28 @@ import {
   GenerateChapterRequest,
   GenerateOutlineRequest,
   chapterSchema,
+  ModelSelection,
   progressSchema,
 } from '@/lib/types/course'
 
 const pathId = encodeURIComponent
+
+function modelPayload(model: ModelSelection): ModelSelection {
+  return {
+    adapter: model.adapter,
+    model: model.model,
+    reasoning_effort: model.reasoning_effort,
+  }
+}
+
+function anchoredJobPayload(request: GenerateOutlineRequest | GenerateChapterRequest) {
+  return {
+    anchor_ids: [...request.anchor_ids],
+    prompt_version: request.prompt_version,
+    model: modelPayload(request.model),
+    force: request.force,
+  }
+}
 
 export const courseApi = {
   async list() {
@@ -37,7 +55,14 @@ export const courseApi = {
   },
 
   async create(request: CreateCourseRequest) {
-    const response = await apiClient.post('/courses', request)
+    const payload: CreateCourseRequest = {
+      title: request.title,
+      language: request.language,
+    }
+    if (request.subject !== undefined) payload.subject = request.subject
+    if (request.description !== undefined) payload.description = request.description
+    if (request.notebook_id !== undefined) payload.notebook_id = request.notebook_id
+    const response = await apiClient.post('/courses', payload)
     return courseSchema.parse(response.data)
   },
 
@@ -47,12 +72,19 @@ export const courseApi = {
   },
 
   async associateSource(courseId: string, request: { source_id: string; role: 'PRIMARY' | 'SUPPLEMENT' }) {
-    const response = await apiClient.post(`/courses/${pathId(courseId)}/sources`, request)
+    const response = await apiClient.post(`/courses/${pathId(courseId)}/sources`, {
+      source_id: request.source_id,
+      role: request.role,
+    })
     return courseSchema.parse(response.data)
   },
 
   async buildEvidence(courseId: string, request: BuildEvidenceRequest) {
-    const response = await apiClient.post(`/courses/${pathId(courseId)}/evidence/build`, request)
+    const response = await apiClient.post(`/courses/${pathId(courseId)}/evidence/build`, {
+      source_id: request.source_id,
+      role: request.role,
+      force: request.force,
+    })
     return courseJobSchema.parse(response.data)
   },
 
@@ -67,8 +99,12 @@ export const courseApi = {
   },
 
   async generateOutline(courseId: string, request: GenerateOutlineRequest) {
+    const payload = anchoredJobPayload(request)
     const response = await apiClient.post(`/courses/${pathId(courseId)}/outline/generate`, {
-      ...request,
+      anchor_ids: payload.anchor_ids,
+      prompt_version: payload.prompt_version,
+      model: payload.model,
+      force: payload.force,
       available_lab_keys: [...SAFE_LAB_PROPOSAL_KEYS],
     })
     return courseJobSchema.parse(response.data)
@@ -80,14 +116,17 @@ export const courseApi = {
   },
 
   async approveOutline(courseId: string, request: { version_id: string; confirmation: string }) {
-    const response = await apiClient.post(`/courses/${pathId(courseId)}/outline/approve`, request)
+    const response = await apiClient.post(`/courses/${pathId(courseId)}/outline/approve`, {
+      version_id: request.version_id,
+      confirmation: request.confirmation,
+    })
     return courseVersionSchema.parse(response.data)
   },
 
   async generateChapter(courseId: string, chapterKey: string, request: GenerateChapterRequest) {
     const response = await apiClient.post(
       `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/generate`,
-      request
+      anchoredJobPayload(request)
     )
     return courseJobSchema.parse(response.data)
   },
@@ -95,7 +134,7 @@ export const courseApi = {
   async reviewChapter(courseId: string, chapterKey: string, request: GenerateChapterRequest) {
     const response = await apiClient.post(
       `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/review`,
-      request
+      anchoredJobPayload(request)
     )
     return courseJobSchema.parse(response.data)
   },
@@ -127,9 +166,17 @@ export const courseApi = {
     labKey: string,
     request: CreateCourseAttemptRequest
   ) {
+    const payload: CreateCourseAttemptRequest = {
+      answers: { ...request.answers },
+    }
+    if (request.exercise_key !== undefined) payload.exercise_key = request.exercise_key
+    if (request.answer !== undefined) payload.answer = request.answer
+    if (request.hints_used !== undefined) payload.hints_used = request.hints_used
+    if (request.answer_revealed !== undefined) payload.answer_revealed = request.answer_revealed
+    if (request.transfer_completed !== undefined) payload.transfer_completed = request.transfer_completed
     const response = await apiClient.post(
       `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/labs/${pathId(labKey)}/attempts`,
-      request
+      payload
     )
     return courseAttemptSchema.parse(response.data)
   },
@@ -155,7 +202,10 @@ export const courseApi = {
   ) {
     const response = await apiClient.patch(
       `/courses/${pathId(courseId)}/findings/${pathId(findingId)}`,
-      request
+      {
+        status: request.status,
+        resolution_reason: request.resolution_reason,
+      }
     )
     return courseFindingSchema.parse(response.data)
   },
@@ -209,7 +259,10 @@ export const courseApi = {
   ) {
     const response = await apiClient.patch(
       `/courses/${pathId(courseId)}/notes/${pathId(noteId)}`,
-      request
+      {
+        chapter_key: request.chapter_key,
+        block_key: request.block_key,
+      }
     )
     return courseNoteSchema.parse(response.data)
   },

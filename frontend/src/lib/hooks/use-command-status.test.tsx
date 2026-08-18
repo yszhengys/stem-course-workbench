@@ -10,9 +10,13 @@ import {
   useCommandStatus,
 } from './use-command-status'
 
-vi.mock('@/lib/api/commands', () => ({
-  commandsApi: { getStatus: vi.fn() },
-}))
+vi.mock('@/lib/api/commands', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api/commands')>()
+  return {
+    ...actual,
+    commandsApi: { ...actual.commandsApi, getStatus: vi.fn() },
+  }
+})
 
 describe('useCommandStatus', () => {
   let queryClient: QueryClient
@@ -44,7 +48,7 @@ describe('useCommandStatus', () => {
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   )
 
-  it.each(['completed', 'succeeded'])('stops on %s and invalidates once', async (terminal) => {
+  it.each(['completed', 'succeeded'] as const)('stops on %s and invalidates once', async (terminal) => {
     vi.mocked(commandsApi.getStatus)
       .mockResolvedValueOnce({ job_id: 'command:one', status: 'running' })
       .mockResolvedValueOnce({ job_id: 'command:one', status: terminal })
@@ -69,7 +73,7 @@ describe('useCommandStatus', () => {
     expect(invalidate).toHaveBeenCalledTimes(2)
   })
 
-  it.each(['failed', 'cancelled', 'canceled'])('stops and exposes backend failure for %s', async (terminal) => {
+  it.each(['failed', 'cancelled', 'canceled'] as const)('stops and exposes backend failure for %s', async (terminal) => {
     vi.mocked(commandsApi.getStatus).mockResolvedValue({
       job_id: 'command:one',
       status: terminal,
@@ -126,6 +130,31 @@ describe('useCommandStatus', () => {
     })
     expect(commandsApi.getStatus).toHaveBeenCalledTimes(1)
     expect(result.current.isTimedOut).toBe(false)
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  it('fails closed and stops polling when a typed dependency returns an unknown status', async () => {
+    vi.mocked(commandsApi.getStatus).mockResolvedValue({
+      job_id: 'command:one',
+      status: 'mystery',
+    } as never)
+
+    const { result } = renderHook(
+      () => useCommandStatus('command:one', [['courses']]),
+      { wrapper }
+    )
+
+    await flush()
+
+    expect(result.current.status).toBe('failed')
+    expect(result.current.isSuccess).toBe(false)
+    expect(result.current.isFailure).toBe(true)
+    expect(result.current.errorMessage).toMatch(/invalid command status/i)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COMMAND_POLL_INTERVAL_MS * 2)
+    })
+    expect(commandsApi.getStatus).toHaveBeenCalledTimes(1)
     expect(invalidate).not.toHaveBeenCalled()
   })
 })

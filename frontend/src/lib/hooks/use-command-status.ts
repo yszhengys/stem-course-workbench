@@ -1,13 +1,17 @@
 import { QueryKey, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState } from 'react'
 
-import { commandsApi } from '@/lib/api/commands'
+import {
+  commandJobStateSchema,
+  commandsApi,
+  type CommandJobState,
+} from '@/lib/api/commands'
 
 export const COMMAND_POLL_INTERVAL_MS = 2000
 export const COMMAND_POLL_TIMEOUT_MS = 30 * 60 * 1000
 
-const SUCCESS_STATES = new Set(['completed', 'succeeded'])
-const FAILURE_STATES = new Set(['failed', 'cancelled', 'canceled'])
+const SUCCESS_STATES = new Set<CommandJobState>(['completed', 'succeeded'])
+const FAILURE_STATES = new Set<CommandJobState>(['failed', 'cancelled', 'canceled'])
 
 export function useCommandStatus(
   commandId: string | undefined,
@@ -29,7 +33,10 @@ export function useCommandStatus(
     retry: false,
     refetchInterval: (currentQuery) => {
       if (currentQuery.state.error) return false
-      const status = currentQuery.state.data?.status?.toLowerCase()
+      const rawStatus = currentQuery.state.data?.status
+      const parsedStatus = rawStatus === undefined ? null : commandJobStateSchema.safeParse(rawStatus)
+      if (parsedStatus && !parsedStatus.success) return false
+      const status = parsedStatus?.success ? parsedStatus.data : undefined
       if (isTimedOut || (status && (SUCCESS_STATES.has(status) || FAILURE_STATES.has(status)))) {
         return false
       }
@@ -38,9 +45,17 @@ export function useCommandStatus(
     refetchIntervalInBackground: true,
   })
 
-  const status = query.isError ? 'failed' : query.data?.status.toLowerCase()
+  const statusResult = query.data
+    ? commandJobStateSchema.safeParse(query.data.status)
+    : null
+  const invalidStatus = Boolean(statusResult && !statusResult.success)
+  const status: CommandJobState | undefined = query.isError || invalidStatus
+    ? 'failed'
+    : statusResult?.success
+      ? statusResult.data
+      : undefined
   const isSuccess = Boolean(status && SUCCESS_STATES.has(status))
-  const isFailure = query.isError || Boolean(status && FAILURE_STATES.has(status))
+  const isFailure = query.isError || invalidStatus || Boolean(status && FAILURE_STATES.has(status))
 
   useEffect(() => {
     if (!commandId || isSuccess || isFailure) return
@@ -58,12 +73,14 @@ export function useCommandStatus(
 
   return {
     ...query,
-    status: query.isError ? 'failed' : (query.data?.status ?? (commandId ? 'new' : undefined)),
+    status: status ?? (commandId ? 'new' : undefined),
     isSuccess,
     isFailure,
     isTimedOut,
     errorMessage: query.isError
       ? (query.error instanceof Error ? query.error.message : 'Unable to read task status')
-      : (query.data?.error_message ?? null),
+      : invalidStatus
+        ? `Invalid command status: ${String(query.data?.status)}`
+        : (query.data?.error_message ?? null),
   }
 }

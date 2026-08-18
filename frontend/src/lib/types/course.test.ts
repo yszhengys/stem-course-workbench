@@ -5,6 +5,7 @@ import {
   courseOutlineArtifactSchema,
   courseSchema,
   eligibleCourseSourceSchema,
+  modelSelectionSchema,
 } from './course'
 
 describe('Course V2 contracts', () => {
@@ -91,5 +92,35 @@ describe('Course V2 contracts', () => {
 
     expect(result.options[0].model).toBeNull()
     expect(result.options[0].selectable).toBe(false)
+  })
+
+  it('requires Open Notebook selections and options to use registered model record IDs', () => {
+    const validSelection = {
+      adapter: 'open_notebook',
+      model: 'model:deepseek-v4-pro',
+      reasoning_effort: null,
+    }
+    expect(modelSelectionSchema.parse(validSelection)).toEqual(validSelection)
+
+    expect(() => modelSelectionSchema.parse({
+      ...validSelection,
+      model: 'deepseek-v4-pro',
+    })).toThrow()
+    expect(() => modelSelectionSchema.parse({
+      ...validSelection,
+      model: 'model:   ',
+    })).toThrow()
+
+    expect(() => courseModelOptionsSchema.parse({
+      defaults: {},
+      options: [{
+        adapter: 'open_notebook',
+        model: 'deepseek-v4-pro',
+        reasoning_effort: null,
+        optional: true,
+        configured: true,
+        selectable: true,
+      }],
+    })).toThrow()
   })
 })

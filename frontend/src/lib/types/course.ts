@@ -10,11 +10,29 @@ export const sourceRoleSchema = z.enum(['PRIMARY', 'SUPPLEMENT'])
 export type SourceRole = z.infer<typeof sourceRoleSchema>
 
 export const reasoningEffortSchema = z.enum(['low', 'medium', 'high', 'xhigh', 'max'])
+
+function validateOpenNotebookModelId(
+  selection: { adapter: string; model: string | null },
+  context: z.RefinementCtx,
+): void {
+  if (
+    selection.adapter === 'open_notebook' &&
+    selection.model !== null &&
+    (!selection.model.startsWith('model:') || !selection.model.slice('model:'.length).trim())
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['model'],
+      message: 'Expected a registered model record ID',
+    })
+  }
+}
+
 export const modelSelectionSchema = z.object({
   adapter: z.enum(['codex_cli', 'open_notebook', 'ollama']),
   model: z.string().min(1),
   reasoning_effort: reasoningEffortSchema.nullable(),
-}).strict()
+}).strict().superRefine(validateOpenNotebookModelId)
 export type ModelSelection = z.infer<typeof modelSelectionSchema>
 
 const courseRecordDates = {
@@ -386,7 +404,7 @@ export const courseModelOptionSchema = z.object({
   name: z.string().optional(),
   provider: z.string().optional(),
   display_name: z.string().optional(),
-}).strict()
+}).strict().superRefine(validateOpenNotebookModelId)
 export type CourseModelOption = z.infer<typeof courseModelOptionSchema>
 
 export function isSelectableModel(option: CourseModelOption): option is CourseModelOption & { model: string } {

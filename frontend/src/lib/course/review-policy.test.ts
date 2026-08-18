@@ -26,11 +26,25 @@ function chapter(overrides: Partial<Chapter>): Chapter {
 }
 
 describe('canRequestChapterReview', () => {
-  it('allows only a reviewing chapter with pending review or validation work', () => {
-    expect(canRequestChapterReview(chapter({}))).toBe(true)
-    expect(canRequestChapterReview(chapter({ review_status: 'passed' }))).toBe(true)
-    expect(canRequestChapterReview(chapter({ status: 'ready' }))).toBe(false)
-    expect(canRequestChapterReview(chapter({ status: 'published' }))).toBe(false)
-    expect(canRequestChapterReview(chapter({ review_status: 'passed', validation_status: 'passed' }))).toBe(false)
+  it.each(['generating', 'reviewing', 'blocked', 'ready'])(
+    'allows backend-supported review state %s even after a prior review completed',
+    (status) => {
+      expect(canRequestChapterReview(chapter({
+        status,
+        review_status: 'passed',
+        validation_status: 'passed',
+      }))).toBe(true)
+    }
+  )
+
+  it.each(['draft', 'published', 'unknown'])(
+    'rejects non-reviewable chapter state %s',
+    (status) => {
+      expect(canRequestChapterReview(chapter({ status }))).toBe(false)
+    }
+  )
+
+  it('rejects a missing chapter', () => {
+    expect(canRequestChapterReview(undefined)).toBe(false)
   })
 })

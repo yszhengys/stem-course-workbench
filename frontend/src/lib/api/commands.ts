@@ -2,9 +2,21 @@ import { z } from 'zod'
 
 import { apiClient } from '@/lib/api/client'
 
+export const commandJobStateSchema = z.enum([
+  'new',
+  'running',
+  'completed',
+  'failed',
+  'canceled',
+  'queued',
+  'succeeded',
+  'cancelled',
+])
+export type CommandJobState = z.infer<typeof commandJobStateSchema>
+
 export const commandJobStatusSchema = z.object({
   job_id: z.string().min(1),
-  status: z.string().min(1),
+  status: commandJobStateSchema,
   result: z.record(z.string(), z.unknown()).nullable().optional(),
   error_message: z.string().nullable().optional(),
   created: z.string().nullable().optional(),

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { ArrowLeft, Beaker, BookCheck, FileWarning, NotebookPen } from 'lucide-react'
@@ -97,6 +97,7 @@ export default function CourseChapterPage() {
   const [noteBlockKey, setNoteBlockKey] = useState('')
   const [reattachBlocks, setReattachBlocks] = useState<Record<string, string>>({})
   const [attemptAnswers, setAttemptAnswers] = useState<Record<string, string>>({})
+  const modelSelectionsInitialized = useRef(false)
 
   const generationStatus = useCommandStatus(generationCommandId, [
     QUERY_KEYS.course(courseId),
@@ -114,6 +115,12 @@ export default function CourseChapterPage() {
   const artifact = currentChapter?.artifact
   const reviewAllowed = canRequestChapterReview(currentChapter)
   const requiresNewVersion = currentChapter?.status === 'ready' || currentChapter?.status === 'published'
+  const selectedContentModel = models.data && contentModel
+    ? selectableDefaultModel(models.data.options, contentModel)
+    : null
+  const selectedReviewModel = models.data && reviewModel
+    ? selectableDefaultModel(models.data.options, reviewModel)
+    : null
   const blockKeys = useMemo(() => artifact ? [
     ...artifact.sections.map((item) => item.key),
     ...artifact.formulas.map((item) => item.key),
@@ -124,13 +131,21 @@ export default function CourseChapterPage() {
 
   useEffect(() => {
     if (!models.data) return
-    if (!contentModel) {
+    if (!modelSelectionsInitialized.current) {
+      modelSelectionsInitialized.current = true
       setContentModel(selectableDefaultModel(models.data.options, models.data.defaults.chapter_content))
-    }
-    if (!reviewModel) {
       setReviewModel(selectableDefaultModel(models.data.options, models.data.defaults.review))
+      return
     }
-  }, [contentModel, models.data, reviewModel])
+    setContentModel((current) => current
+      ? selectableDefaultModel(models.data.options, current)
+      : null
+    )
+    setReviewModel((current) => current
+      ? selectableDefaultModel(models.data.options, current)
+      : null
+    )
+  }, [models.data])
 
   useEffect(() => {
     if (!anchors.data) return
@@ -145,22 +160,22 @@ export default function CourseChapterPage() {
   }, [blockKeys, noteBlockKey])
 
   const generate = async () => {
-    if (!contentModel || selectedAnchorIds.length === 0) return
+    if (!selectedContentModel || selectedAnchorIds.length === 0) return
     const job = await generateChapter.mutateAsync({
       anchor_ids: selectedAnchorIds,
       prompt_version: 'v1',
-      model: contentModel,
+      model: selectedContentModel,
       force: requiresNewVersion,
     })
     setGenerationCommandId(job.command_id)
   }
 
   const review = async () => {
-    if (!reviewModel || selectedAnchorIds.length === 0) return
+    if (!selectedReviewModel || selectedAnchorIds.length === 0) return
     const job = await reviewChapter.mutateAsync({
       anchor_ids: selectedAnchorIds,
       prompt_version: 'v1',
-      model: reviewModel,
+      model: selectedReviewModel,
       force: false,
     })
     setReviewCommandId(job.command_id)
@@ -240,11 +255,11 @@ export default function CourseChapterPage() {
                   <>
                     <div className="space-y-3">
                       <h3 className="font-medium">{t('course.contentModel')}</h3>
-                      <CourseModelPicker options={models.data?.options ?? []} value={contentModel} onChange={setContentModel} />
+                      <CourseModelPicker options={models.data?.options ?? []} value={contentModel} onChange={setContentModel} disabled={models.isFetching} />
                     </div>
                     <div className="space-y-3">
                       <h3 className="font-medium">{t('course.reviewModel')}</h3>
-                      <CourseModelPicker options={models.data?.options ?? []} value={reviewModel} onChange={setReviewModel} />
+                      <CourseModelPicker options={models.data?.options ?? []} value={reviewModel} onChange={setReviewModel} disabled={models.isFetching} />
                     </div>
                   </>
                 )}
@@ -273,10 +288,10 @@ export default function CourseChapterPage() {
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button onClick={() => void generate()} disabled={models.isError || anchors.isError || !contentModel || !selectedAnchorIds.length || generateChapter.isPending || generationStatus.isFetching}>
+                <Button onClick={() => void generate()} disabled={models.isError || models.isFetching || anchors.isError || !selectedContentModel || !selectedAnchorIds.length || generateChapter.isPending || generationStatus.isFetching}>
                   {requiresNewVersion ? t('course.regenerateChapter') : t('course.generateChapter')}
                 </Button>
-                <Button variant="outline" onClick={() => void review()} disabled={models.isError || anchors.isError || !artifact || !reviewModel || !selectedAnchorIds.length || !reviewAllowed || reviewChapter.isPending || reviewStatus.isFetching}>
+                <Button variant="outline" onClick={() => void review()} disabled={models.isError || models.isFetching || anchors.isError || !artifact || !selectedReviewModel || !selectedAnchorIds.length || !reviewAllowed || reviewChapter.isPending || reviewStatus.isFetching}>
                   {t('course.reviewChapter')}
                 </Button>
               </div>

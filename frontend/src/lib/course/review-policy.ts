@@ -1,6 +1,7 @@
 import type { Chapter } from '@/lib/types/course'
 
+const REVIEWABLE_CHAPTER_STATES = new Set(['generating', 'reviewing', 'blocked', 'ready'])
+
 export function canRequestChapterReview(chapter: Chapter | undefined): boolean {
-  if (!chapter || chapter.status !== 'reviewing') return false
-  return chapter.review_status === 'pending' || chapter.validation_status === 'pending'
+  return Boolean(chapter && REVIEWABLE_CHAPTER_STATES.has(chapter.status))
 }
