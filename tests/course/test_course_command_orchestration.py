@@ -1034,7 +1034,7 @@ async def test_chapter_completion_and_stable_links_are_one_atomic_promotion(
 ) -> None:
     import open_notebook.course.workflow_service as module
     from open_notebook.course.contracts import ChapterArtifact, ChapterSection
-    from open_notebook.course.models import Chapter, CourseGenerationRun
+    from open_notebook.course.models import Chapter, CourseGenerationRun, CourseVersion
 
     artifact = ChapterArtifact(
         chapter_key="limits",
@@ -1084,6 +1084,9 @@ async def test_chapter_completion_and_stable_links_are_one_atomic_promotion(
 
     monkeypatch.setattr(module, "repo_query", conflict)
     monkeypatch.setattr(
+        CourseVersion, "chapters", AsyncMock(return_value=[chapter])
+    )
+    monkeypatch.setattr(
         module.CourseGenerationRun, "get", AsyncMock(return_value=terminal)
     )
 
@@ -1096,12 +1099,132 @@ async def test_chapter_completion_and_stable_links_are_one_atomic_promotion(
 
     assert len(statements) == 1
     assert "BEGIN TRANSACTION" in statements[0]
+    assert statements[0].index("UPDATE course_version") < statements[0].index(
+        "UPDATE course_generation_run"
+    )
+    assert "status = 'generating'" in statements[0]
     assert statements[0].index("WHERE id = $run_id AND status = 'running'") < statements[
         0
     ].index("UPDATE course_note")
     assert "THROW 'Course generation run completion conflict'" in statements[0]
     assert "COMMIT TRANSACTION" in statements[0]
     assert stale.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_stable_link_promotion_uses_exact_legacy_current_snapshot(
+    monkeypatch,
+) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.contracts import ChapterArtifact, ChapterSection
+    from open_notebook.course.models import Chapter, CourseGenerationRun, CourseVersion
+
+    old_artifact = ChapterArtifact(
+        chapter_key="limits",
+        purpose="Old limits.",
+        objectives=["Understand old limits"],
+        sections=[
+            ChapterSection(
+                key="old",
+                title="Old",
+                markdown="Old grounded content.",
+                anchor_ids=["anchor:one"],
+            )
+        ],
+    )
+    new_artifact = ChapterArtifact(
+        chapter_key="limits",
+        purpose="New limits.",
+        objectives=["Understand new limits"],
+        sections=[
+            ChapterSection(
+                key="new",
+                title="New",
+                markdown="New grounded content.",
+                anchor_ids=["anchor:one"],
+            )
+        ],
+    )
+    completing_run = CourseGenerationRun(
+        id="course_generation_run:old",
+        course="course:one",
+        course_version="course_version:one",
+        chapter="chapter:old",
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        status="running",
+        prompt_version="v1",
+        input_hash="old-claim",
+        command="command:old",
+    )
+    old_chapter = Chapter(
+        id="chapter:old",
+        course_version="course_version:one",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=1,
+        title="Old limits",
+        status="reviewing",
+        input_hash=module.artifact_replay_hash(completing_run),
+        artifact=old_artifact.model_dump(mode="json"),
+    )
+    legacy_run = CourseGenerationRun(
+        id="course_generation_run:legacy",
+        course="course:one",
+        course_version="course_version:one",
+        chapter=None,
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        status="succeeded",
+        prompt_version="v1",
+        input_hash="legacy-claim",
+    )
+    new_chapter = Chapter(
+        id="chapter:new",
+        course_version="course_version:one",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=2,
+        title="New limits",
+        status="published",
+        input_hash=module.artifact_replay_hash(legacy_run),
+        artifact=new_artifact.model_dump(mode="json"),
+    )
+    legacy_run.output_hash = module._artifact_hash(
+        {"output": new_chapter.artifact or {}}
+    )
+    transaction_variables: dict[str, object] = {}
+
+    async def query(statement: str, variables=None):
+        if statement.lstrip().startswith("SELECT * FROM course_generation_run"):
+            return [legacy_run.model_dump(mode="json")]
+        assert statement.lstrip().startswith("BEGIN TRANSACTION")
+        transaction_variables.update(variables or {})
+        return []
+
+    monkeypatch.setattr(module, "repo_query", query)
+    monkeypatch.setattr(
+        CourseVersion,
+        "chapters",
+        AsyncMock(return_value=[old_chapter, new_chapter]),
+    )
+
+    await module.CourseWorkflowService.complete_chapter_run(
+        run=completing_run,
+        chapter=old_chapter,
+        artifact=old_artifact,
+    )
+
+    assert transaction_variables["refresh_stable_links"] is False
+    known_succeeded_run_ids = transaction_variables["known_succeeded_run_ids"]
+    assert isinstance(known_succeeded_run_ids, list)
+    assert [str(item) for item in known_succeeded_run_ids] == [
+        "course_generation_run:legacy"
+    ]
 
 
 @pytest.mark.asyncio

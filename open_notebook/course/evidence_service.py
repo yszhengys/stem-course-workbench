@@ -178,6 +178,16 @@ class EvidenceService:
                 "The PPTX is corrupt or cannot be read; export it again."
             ) from exc
 
+    def validate_local_source_file(
+        self, file_path: str | Path
+    ) -> tuple[Path, EvidenceKind]:
+        """Validate a local original without running extraction or OCR."""
+
+        path = self.resolve_safe_source_path(file_path)
+        kind = self.validate_extension(path)
+        self._validate_file(path, kind)
+        return path, kind
+
     @staticmethod
     def _serialize_docling_document(document: Any) -> str:
         export_json = getattr(document, "export_to_json", None)
@@ -548,9 +558,7 @@ COMMIT TRANSACTION;
             raise EvidenceInputError(
                 "Course Source has no local asset file; upload a PDF or PPTX."
             )
-        path = self.resolve_safe_source_path(file_path)
-        kind = self.validate_extension(path)
-        self._validate_file(path, kind)
+        path, kind = self.validate_local_source_file(file_path)
         source_hash = self.sha256_file(path)
 
         async with course_job_lock():

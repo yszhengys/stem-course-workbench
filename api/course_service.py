@@ -388,8 +388,7 @@ class CourseService:
                 "Course Source has no local PDF or PPTX asset."
             )
         evidence = EvidenceService()
-        safe_path = evidence.resolve_safe_source_path(file_path)
-        evidence.validate_extension(safe_path)
+        evidence.validate_local_source_file(file_path)
 
         course.source_ids.append(source_id)
         if role == "PRIMARY":
@@ -602,20 +601,41 @@ class CourseService:
             raise CourseConflictError("Approved outline hash does not match") from exc
         chapters = await CourseVersion.chapters(version_id)
         expected_keys = {proposal.key for proposal in outline.chapters}
-        try:
-            latest = [
-                await CourseWorkflowService.resolve_current_chapter(
-                    course_id=version.course,
-                    version_id=version_id,
-                    chapter_key=key,
-                    chapters=chapters,
-                )
-                for key in sorted(expected_keys)
-            ]
-        except NotFoundError as exc:
-            raise CourseConflictError("All chapters must be published first") from exc
-        if any(chapter.status != sm.ChapterStatus.PUBLISHED for chapter in latest):
+        promotions = []
+        for key in sorted(expected_keys):
+            promotion = await CourseWorkflowService.chapter_promotion_snapshot(
+                course_id=version.course,
+                version_id=version_id,
+                chapter_key=key,
+                chapters=chapters,
+            )
+            if promotion.current is None:
+                raise CourseConflictError("All chapters must be published first")
+            promotions.append(promotion)
+        latest = [
+            promotion.current
+            for promotion in promotions
+            if promotion.current is not None
+        ]
+        if len(latest) != len(expected_keys) or any(
+            chapter.status != sm.ChapterStatus.PUBLISHED for chapter in latest
+        ):
             raise CourseConflictError("All chapters must be published first")
+
+        known_succeeded_run_ids = sorted(
+            {
+                run_id
+                for promotion in promotions
+                for run_id in promotion.succeeded_run_ids
+            }
+        )
+        known_manual_chapter_ids = sorted(
+            {
+                chapter_id
+                for promotion in promotions
+                for chapter_id in promotion.manual_chapter_ids
+            }
+        )
 
         if course.status not in {
             sm.CourseStatus.GENERATING,
@@ -648,6 +668,39 @@ class CourseService:
                       AND outline_hash = $outline_hash
                     RETURN AFTER
                 );
+                LET $published_current_chapters = (
+                    SELECT VALUE id FROM chapter
+                    WHERE id IN $current_chapter_ids
+                      AND course_version = $version_id
+                      AND chapter_key IN $expected_chapter_keys
+                      AND status = 'published'
+                );
+                IF array::len($published_current_chapters)
+                   != $expected_chapter_count {
+                    THROW 'Course publication chapter snapshot changed'
+                };
+                LET $unexpected_succeeded_runs = (
+                    SELECT VALUE id FROM course_generation_run
+                    WHERE course = $course_id
+                      AND course_version = $version_id
+                      AND chapter_key IN $expected_chapter_keys
+                      AND stage = 'chapter_content'
+                      AND status = 'succeeded'
+                      AND id NOT IN $known_succeeded_run_ids
+                );
+                IF array::len($unexpected_succeeded_runs) != 0 {
+                    THROW 'Course publication chapter snapshot changed'
+                };
+                LET $unexpected_manual_chapters = (
+                    SELECT VALUE id FROM chapter
+                    WHERE course_version = $version_id
+                      AND chapter_key IN $expected_chapter_keys
+                      AND input_hash = NONE
+                      AND id NOT IN $known_manual_chapter_ids
+                );
+                IF array::len($unexpected_manual_chapters) != 0 {
+                    THROW 'Course publication chapter snapshot changed'
+                };
                 LET $course_update = (
                     UPDATE course
                     SET status = 'ready'
@@ -680,6 +733,19 @@ class CourseService:
                     "version_id": ensure_record_id(version_id),
                     "outline_hash": version.outline_hash,
                     "published_at": published_at,
+                    "expected_chapter_keys": sorted(expected_keys),
+                    "expected_chapter_count": len(expected_keys),
+                    "current_chapter_ids": [
+                        ensure_record_id(str(chapter.id)) for chapter in latest
+                    ],
+                    "known_succeeded_run_ids": [
+                        ensure_record_id(run_id)
+                        for run_id in known_succeeded_run_ids
+                    ],
+                    "known_manual_chapter_ids": [
+                        ensure_record_id(chapter_id)
+                        for chapter_id in known_manual_chapter_ids
+                    ],
                 },
             )
         except RuntimeError as exc:

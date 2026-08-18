@@ -231,6 +231,11 @@ async def test_source_association_keeps_exactly_one_role(monkeypatch):
         "resolve_safe_source_path",
         lambda _self, path: Path(path),
     )
+    monkeypatch.setattr(
+        EvidenceService,
+        "_validate_file",
+        staticmethod(lambda _path, _kind: None),
+    )
     save = AsyncMock()
     monkeypatch.setattr(Course, "save", save)
 

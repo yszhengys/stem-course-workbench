@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from open_notebook.database.repository import ensure_record_id, repo_query
@@ -137,6 +138,15 @@ def _canonical_review_output(
 def _rows(model: type[Any], result: Any) -> list[Any]:
     values = result if isinstance(result, list) else [result] if result else []
     return [model(**row) for row in values if isinstance(row, dict)]
+
+
+@dataclass(frozen=True)
+class ChapterPromotionSnapshot:
+    """Exact promoted-current inputs used by facades and promotion transactions."""
+
+    current: Chapter | None
+    succeeded_run_ids: tuple[str, ...]
+    manual_chapter_ids: tuple[str, ...]
 
 
 class CourseWorkflowService:
@@ -314,6 +324,17 @@ class CourseWorkflowService:
         if run.status != sm.RunStatus.RUNNING:
             raise ValueError("Course generation run is no longer active")
         sm.transition("run", run.status, sm.RunStatus.SUCCEEDED)
+        siblings = await CourseVersion.chapters(chapter.course_version)
+        promotion = await CourseWorkflowService.chapter_promotion_snapshot(
+            course_id=run.course,
+            version_id=chapter.course_version,
+            chapter_key=chapter.chapter_key,
+            chapters=siblings,
+        )
+        refresh_stable_links = (
+            promotion.current is None
+            or chapter.version_no >= promotion.current.version_no
+        )
         block_keys = {
             item.key
             for values in (
@@ -330,6 +351,39 @@ class CourseWorkflowService:
             await repo_query(
                 """
                 BEGIN TRANSACTION;
+                LET $mutable_version = (
+                    UPDATE course_version
+                    SET updated = time::now()
+                    WHERE id = $version_id
+                      AND course = $course_id
+                      AND status = 'generating'
+                    RETURN VALUE id
+                );
+                IF array::len($mutable_version) != 1 {
+                    THROW 'Course version is no longer mutable'
+                };
+                LET $unexpected_succeeded_runs = (
+                    SELECT VALUE id FROM course_generation_run
+                    WHERE course = $course_id
+                      AND course_version = $version_id
+                      AND chapter_key = $chapter_key
+                      AND stage = 'chapter_content'
+                      AND status = 'succeeded'
+                      AND id NOT IN $known_succeeded_run_ids
+                );
+                IF array::len($unexpected_succeeded_runs) != 0 {
+                    THROW 'Course chapter promotion snapshot changed'
+                };
+                LET $unexpected_manual_chapters = (
+                    SELECT VALUE id FROM chapter
+                    WHERE course_version = $version_id
+                      AND chapter_key = $chapter_key
+                      AND input_hash = NONE
+                      AND id NOT IN $known_manual_chapter_ids
+                );
+                IF array::len($unexpected_manual_chapters) != 0 {
+                    THROW 'Course chapter promotion snapshot changed'
+                };
                 LET $completed = (
                     UPDATE course_generation_run
                     SET status = 'succeeded',
@@ -343,23 +397,7 @@ class CourseWorkflowService:
                 IF array::len($completed) != 1 {
                     THROW 'Course generation run completion conflict'
                 };
-                LET $promoted_chapters = (
-                    SELECT VALUE chapter FROM course_generation_run
-                    WHERE course = $course_id
-                      AND course_version = $version_id
-                      AND chapter_key = $chapter_key
-                      AND stage = 'chapter_content'
-                      AND status = 'succeeded'
-                      AND chapter != NONE
-                );
-                LET $newer_current = (
-                    SELECT VALUE id FROM chapter
-                    WHERE course_version = $version_id
-                      AND chapter_key = $chapter_key
-                      AND version_no > $chapter_version
-                      AND (input_hash = NONE OR id IN $promoted_chapters)
-                );
-                IF array::len($newer_current) = 0 {
+                IF $refresh_stable_links {
                     UPDATE course_note SET orphan_status =
                         IF block_key != NONE AND block_key NOT IN $block_keys
                         THEN 'orphaned' ELSE 'active' END
@@ -381,10 +419,18 @@ class CourseWorkflowService:
                     "version_id": ensure_record_id(chapter.course_version),
                     "chapter_id": ensure_record_id(str(chapter.id)),
                     "chapter_key": chapter.chapter_key,
-                    "chapter_version": chapter.version_no,
                     "output_hash": output_hash,
                     "block_keys": sorted(block_keys),
                     "exercise_keys": sorted(exercise_keys),
+                    "known_succeeded_run_ids": [
+                        ensure_record_id(run_id)
+                        for run_id in promotion.succeeded_run_ids
+                    ],
+                    "known_manual_chapter_ids": [
+                        ensure_record_id(chapter_id)
+                        for chapter_id in promotion.manual_chapter_ids
+                    ],
+                    "refresh_stable_links": refresh_stable_links,
                 },
             )
         except RuntimeError:
@@ -582,14 +628,14 @@ class CourseWorkflowService:
         return version, cls.validate_approved_version(course, version)
 
     @staticmethod
-    async def resolve_current_chapter(
+    async def chapter_promotion_snapshot(
         *,
         course_id: str,
         version_id: str,
         chapter_key: str,
         chapters: list[Chapter] | None = None,
-    ) -> Chapter:
-        """Return the latest Chapter fully promoted by a successful content run."""
+    ) -> ChapterPromotionSnapshot:
+        """Build one exact promotion snapshot for reads and transaction guards."""
 
         candidates = [
             chapter
@@ -602,13 +648,11 @@ class CourseWorkflowService:
             and chapter.chapter_key == chapter_key
             and chapter.id is not None
         ]
-        if not candidates:
-            raise NotFoundError("Chapter not found")
-
         generated = [
             chapter for chapter in candidates if chapter.input_hash is not None
         ]
         promoted_ids: set[str] = set()
+        succeeded_run_ids: set[str] = set()
         if generated:
             rows = await repo_query(
                 """
@@ -627,8 +671,15 @@ class CourseWorkflowService:
             runs = _rows(CourseGenerationRun, rows)
             generated_by_id = {str(chapter.id): chapter for chapter in generated}
             for run in runs:
-                if run.status != sm.RunStatus.SUCCEEDED:
+                if (
+                    run.course != course_id
+                    or run.course_version != version_id
+                    or run.chapter_key != chapter_key
+                    or run.stage != "chapter_content"
+                    or run.status != sm.RunStatus.SUCCEEDED
+                ):
                     continue
+                succeeded_run_ids.add(str(run.id))
                 replay_hash = artifact_replay_hash(run)
                 if run.chapter is None:
                     legacy_matches = [
@@ -653,9 +704,39 @@ class CourseWorkflowService:
             for chapter in candidates
             if chapter.input_hash is None or str(chapter.id) in promoted_ids
         ]
-        if not eligible:
+        return ChapterPromotionSnapshot(
+            current=max(eligible, key=lambda chapter: chapter.version_no)
+            if eligible
+            else None,
+            succeeded_run_ids=tuple(sorted(succeeded_run_ids)),
+            manual_chapter_ids=tuple(
+                sorted(
+                    str(chapter.id)
+                    for chapter in candidates
+                    if chapter.input_hash is None
+                )
+            ),
+        )
+
+    @staticmethod
+    async def resolve_current_chapter(
+        *,
+        course_id: str,
+        version_id: str,
+        chapter_key: str,
+        chapters: list[Chapter] | None = None,
+    ) -> Chapter:
+        """Return the latest Chapter fully promoted by a successful content run."""
+
+        snapshot = await CourseWorkflowService.chapter_promotion_snapshot(
+            course_id=course_id,
+            version_id=version_id,
+            chapter_key=chapter_key,
+            chapters=chapters,
+        )
+        if snapshot.current is None:
             raise NotFoundError("Chapter not found")
-        return max(eligible, key=lambda chapter: chapter.version_no)
+        return snapshot.current
 
     async def build_evidence(
         self,
