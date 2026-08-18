@@ -443,6 +443,27 @@ def _with_ui_contract(env: dict[str, str]) -> dict[str, str]:
     return {**env, "FAKE_UI_CONTRACT_READY": "1"}
 
 
+def _discover_real_uv(project_root: Path = PROJECT_ROOT) -> str:
+    path_uv = shutil.which("uv")
+    if path_uv:
+        return path_uv
+
+    repository_uv = project_root / ".tools" / "bin" / "uv"
+    if repository_uv.is_file() and os.access(repository_uv, os.X_OK):
+        return str(repository_uv)
+
+    pytest.skip("real uv is required for the dotenv integration test")
+
+
+def test_real_uv_discovery_skips_when_clean_checkout_has_no_uv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _command: None)
+
+    with pytest.raises(pytest.skip.Exception, match="real uv.*dotenv"):
+        _discover_real_uv(tmp_path)
+
+
 def _effective_course_env_with_real_uv(
     env_file: Path, cache_dir: Path
 ) -> tuple[str, str]:
@@ -453,7 +474,7 @@ def _effective_course_env_with_real_uv(
     command_env["UV_CACHE_DIR"] = str(cache_dir)
     result = subprocess.run(
         [
-            str(PROJECT_ROOT / ".tools" / "bin" / "uv"),
+            _discover_real_uv(),
             "run",
             "--no-project",
             "--env-file",
