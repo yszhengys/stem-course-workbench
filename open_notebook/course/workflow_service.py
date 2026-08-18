@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 
 from open_notebook.database.repository import ensure_record_id, repo_query
@@ -309,6 +310,7 @@ class CourseWorkflowService:
         run: CourseGenerationRun,
         chapter: Chapter,
         artifact: ChapterArtifact,
+        expected_version_updated: datetime | None,
     ) -> None:
         """Atomically promote a Chapter run and refresh its stable-key links."""
 
@@ -357,6 +359,7 @@ class CourseWorkflowService:
                     WHERE id = $version_id
                       AND course = $course_id
                       AND status = 'generating'
+                      AND updated = $expected_version_updated
                     RETURN VALUE id
                 );
                 IF array::len($mutable_version) != 1 {
@@ -417,6 +420,7 @@ class CourseWorkflowService:
                     "run_id": ensure_record_id(str(run.id)),
                     "course_id": ensure_record_id(run.course),
                     "version_id": ensure_record_id(chapter.course_version),
+                    "expected_version_updated": expected_version_updated,
                     "chapter_id": ensure_record_id(str(chapter.id)),
                     "chapter_key": chapter.chapter_key,
                     "output_hash": output_hash,
@@ -1071,6 +1075,7 @@ class CourseWorkflowService:
             run=run,
             chapter=chapter,
             artifact=artifact,
+            expected_version_updated=version.updated,
         )
         return chapter
 

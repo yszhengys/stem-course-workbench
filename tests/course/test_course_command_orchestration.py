@@ -1095,6 +1095,7 @@ async def test_chapter_completion_and_stable_links_are_one_atomic_promotion(
             run=stale,
             chapter=chapter,
             artifact=artifact,
+            expected_version_updated=None,
         )
 
     assert len(statements) == 1
@@ -1103,6 +1104,7 @@ async def test_chapter_completion_and_stable_links_are_one_atomic_promotion(
         "UPDATE course_generation_run"
     )
     assert "status = 'generating'" in statements[0]
+    assert "AND updated = $expected_version_updated" in statements[0]
     assert statements[0].index("WHERE id = $run_id AND status = 'running'") < statements[
         0
     ].index("UPDATE course_note")
@@ -1217,6 +1219,7 @@ async def test_stable_link_promotion_uses_exact_legacy_current_snapshot(
         run=completing_run,
         chapter=old_chapter,
         artifact=old_artifact,
+        expected_version_updated=None,
     )
 
     assert transaction_variables["refresh_stable_links"] is False

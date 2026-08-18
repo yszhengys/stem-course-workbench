@@ -593,6 +593,7 @@ class CourseService:
                     SET updated = time::now()
                     WHERE id = $version_id
                       AND status IN ['draft', 'generating']
+                      AND updated = $expected_version_updated
                     RETURN VALUE id
                 );
                 IF array::len($mutable_version) != 1 {
@@ -620,6 +621,7 @@ class CourseService:
                 """,
                 {
                     "version_id": ensure_record_id(version_id),
+                    "expected_version_updated": version.updated,
                     "chapter_id": ensure_record_id(chapter_id),
                     "title": updated.title,
                     "content": updated.content,
@@ -783,6 +785,7 @@ class CourseService:
                       AND course = $course_id
                       AND status = 'generating'
                       AND outline_hash = $outline_hash
+                      AND updated = $expected_version_updated
                     RETURN AFTER
                 );
                 LET $published_current_chapters = (
@@ -849,6 +852,7 @@ class CourseService:
                     "course_id": ensure_record_id(str(course.id)),
                     "version_id": ensure_record_id(version_id),
                     "outline_hash": version.outline_hash,
+                    "expected_version_updated": version.updated,
                     "published_at": published_at,
                     "expected_chapter_keys": sorted(expected_keys),
                     "expected_chapter_count": len(expected_keys),

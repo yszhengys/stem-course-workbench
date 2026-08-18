@@ -237,11 +237,13 @@ async def test_version_publish_uses_legal_generating_to_published_transition(
         assert "id NOT IN $known_succeeded_run_ids" in normalized
         assert "SELECT VALUE id FROM chapter" in normalized
         assert "status = 'published'" in normalized
+        assert "updated = $expected_version_updated" in normalized
         assert "UPDATE course SET" in normalized
         assert "UPDATE course_version SET" in normalized
         assert normalized.count("status = 'generating'") >= 2
         assert "COMMIT TRANSACTION" in normalized
         assert variables is not None
+        assert variables["expected_version_updated"] is None
         assert [str(item) for item in variables["current_chapter_ids"]] == [
             "chapter:one"
         ]
@@ -746,6 +748,127 @@ async def test_publish_transaction_rejects_newly_promoted_chapter_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_publish_transaction_rejects_same_run_content_promotion_race(
+    monkeypatch,
+):
+    import open_notebook.course.workflow_service as workflow_module
+    import open_notebook.database.repository as repository
+
+    database = AsyncSurreal("mem://")
+    await database.use("course_publish_content_race", "course_publish_content_race")
+
+    @asynccontextmanager
+    async def memory_connection():
+        yield database
+
+    monkeypatch.setattr(repository, "db_connection", memory_connection)
+    artifact = approved_outline()
+    outline_hash = artifact_hash(artifact)
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        status="generating",
+        outline_version_id="course_version:one",
+    )
+    version = CourseVersion(
+        id="course_version:one",
+        course="course:one",
+        version_no=1,
+        status="generating",
+        outline_artifact=artifact,
+        outline_hash=outline_hash,
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+        updated="2026-08-18T00:00:00Z",
+    )
+    published = Chapter(
+        id="chapter:published",
+        course_version="course_version:one",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=1,
+        title="Published limits",
+        status="published",
+    )
+    partial_artifact = {"chapter_key": "limits", "sections": []}
+    run = CourseGenerationRun(
+        id="course_generation_run:known",
+        course="course:one",
+        course_version="course_version:one",
+        chapter="chapter:partial",
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        status="succeeded",
+        prompt_version="v1",
+        input_hash="claim",
+        output_hash=artifact_hash({"output": partial_artifact}),
+        command="command:known",
+    )
+    partial = Chapter(
+        id="chapter:partial",
+        course_version="course_version:one",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=2,
+        title="Partial limits",
+        status="reviewing",
+        input_hash="wrong",
+        artifact=partial_artifact,
+    )
+    for record in (course, version, published, partial, run):
+        data = record._prepare_save_data()
+        record_id = data.pop("id")
+        await repository.repo_query(
+            "CREATE ONLY $id CONTENT $data;",
+            {"id": RecordID.parse(str(record_id)), "data": data},
+        )
+
+    changed_content = False
+
+    async def mutate_known_chapter_before_publish(statement: str, variables=None):
+        nonlocal changed_content
+        if "LET $version_update" in statement and not changed_content:
+            changed_content = True
+            await CourseService.update_chapter(
+                "course_version:one",
+                "chapter:partial",
+                {"input_hash": artifact_replay_hash(run)},
+            )
+        return await repository.repo_query(statement, variables)
+
+    monkeypatch.setattr(
+        "api.course_service.repo_query", mutate_known_chapter_before_publish
+    )
+    monkeypatch.setattr(workflow_module, "repo_query", repository.repo_query)
+
+    with pytest.raises(CourseConflictError, match="no longer generating"):
+        await CourseService.publish_version("course_version:one")
+
+    assert changed_content is True
+    assert await repository.repo_query("SELECT status FROM course_version:one;") == [
+        {"status": "generating"}
+    ]
+    assert await repository.repo_query("SELECT status FROM course:one;") == [
+        {"status": "generating"}
+    ]
+    persisted_version = await repository.repo_query(
+        "SELECT updated FROM course_version:one;"
+    )
+    assert persisted_version[0]["updated"] != version.updated
+    current = await workflow_module.CourseWorkflowService.resolve_current_chapter(
+        course_id="course:one",
+        version_id="course_version:one",
+        chapter_key="limits",
+    )
+    assert str(current.id) == "chapter:partial"
+    assert current.status == "reviewing"
+    await database.close()
+
+
+@pytest.mark.asyncio
 async def test_manual_chapter_create_cas_rejects_stale_generating_version(
     monkeypatch,
 ):
@@ -932,6 +1055,7 @@ async def test_chapter_promotion_transaction_rejects_published_version_in_embedd
             run=run,
             chapter=chapter,
             artifact=artifact,
+            expected_version_updated=None,
         )
 
     assert await repository.repo_query(
@@ -946,6 +1070,7 @@ async def test_chapter_promotion_transaction_rejects_published_version_in_embedd
         run=run,
         chapter=chapter,
         artifact=artifact,
+        expected_version_updated=None,
     )
 
     assert await repository.repo_query(
