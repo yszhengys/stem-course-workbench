@@ -65,7 +65,10 @@ if "comm=" in args:
 if "command=" in args:
     command_file = state / f"pid.{pid}.command"
     if command_file.exists():
-        print(command_file.read_text(encoding="utf-8").strip())
+        command = command_file.read_text(encoding="utf-8").strip()
+        print(command)
+        if os.environ.get("FAKE_NPM_EXEC_TRANSITION") == "1" and command == "npm":
+            (state / "frontend.transition-observed").touch()
     else:
         print("")
     raise SystemExit(0)
@@ -78,6 +81,7 @@ raise SystemExit(1)
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -100,14 +104,35 @@ if sys.argv[1:] == ["ci"]:
     raise SystemExit(0)
 if sys.argv[1:] == ["run", "dev"]:
     pid = os.getpid()
+    (state / "frontend.pid").write_text(str(pid), encoding="utf-8")
     (state / "frontend.allowed_origins").write_text(
         os.environ.get("NEXT_ALLOWED_DEV_ORIGINS", ""), encoding="utf-8"
     )
     (state / "port.3000").write_text(str(pid), encoding="utf-8")
     (state / f"pid.{pid}.cwd").write_text(str(Path.cwd()), encoding="utf-8")
-    (state / f"pid.{pid}.command").write_text("npm run dev", encoding="utf-8")
-    (state / f"pid.{pid}.executable").write_text("/fake/node", encoding="utf-8")
+    command = "npm run dev"
+    executable = "/fake/node"
+    if os.environ.get("FAKE_NPM_EXEC_TRANSITION") == "1":
+        command = "npm"
+        executable = "/fake/npm"
+    elif os.environ.get("FAKE_NPM_PERMANENT_WRONG_MARKER") == "1":
+        command = "npm --unexpected"
+    (state / f"pid.{pid}.command").write_text(command, encoding="utf-8")
+    (state / f"pid.{pid}.executable").write_text(executable, encoding="utf-8")
     (state / f"pid.{pid}.start").write_text("Mon Aug 18 01:00:00 2026", encoding="utf-8")
+    if os.environ.get("FAKE_NPM_EXEC_TRANSITION") == "1":
+
+        def settle_exec_transition():
+            while not (state / "frontend.transition-observed").exists():
+                time.sleep(0.001)
+            (state / f"pid.{pid}.command").write_text(
+                "npm run dev", encoding="utf-8"
+            )
+            (state / f"pid.{pid}.executable").write_text(
+                "/fake/node", encoding="utf-8"
+            )
+
+        threading.Thread(target=settle_exec_transition, daemon=True).start()
     print("frontend ready", flush=True)
     signal.signal(signal.SIGTERM, lambda *_: raise_exit())
     while True:
@@ -624,6 +649,55 @@ def test_frontend_dev_origin_appends_loopback_without_replacing_existing_values(
     assert entries.count("127.0.0.1") == 1
     assert "example.local" in entries
     assert _run(repo, env, "stop").returncode == 0
+
+
+def test_frontend_launch_waits_for_same_pid_npm_exec_transition(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "FAKE_NPM_EXEC_TRANSITION": "1",
+    }
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "frontend.transition-observed").exists()
+    frontend_pid = (state / "frontend.pid").read_text(encoding="utf-8").strip()
+    runtime = repo / ".runtime" / "course-workbench"
+    assert (
+        runtime / "frontend.pid"
+    ).read_text(encoding="utf-8").strip() == frontend_pid
+    assert (
+        runtime / "frontend.argv"
+    ).read_text(encoding="utf-8").strip() == "npm run dev"
+    assert (
+        runtime / "frontend.executable"
+    ).read_text(encoding="utf-8").strip() == "/fake/node"
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_frontend_launch_rejects_marker_that_never_matches_and_clears_metadata(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "FAKE_NPM_PERMANENT_WRONG_MARKER": "1",
+    }
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode != 0
+    assert "frontend did not start as an owned process group" in (
+        result.stdout + result.stderr
+    )
+    frontend_pid = (state / "frontend.pid").read_text(encoding="utf-8").strip()
+    assert (state / f"pid.{frontend_pid}.dead").exists()
+    assert not (state / "port.3000").exists()
+    runtime = repo / ".runtime" / "course-workbench"
+    assert not list(runtime.glob("frontend.*"))
 
 
 @pytest.mark.parametrize(

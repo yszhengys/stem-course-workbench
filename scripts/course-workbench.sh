@@ -836,8 +836,14 @@ os.execvpe(command[0], command, os.environ)
                [ -n "$actual_pgid" ] && [ -n "$actual_cwd" ] && \
                [ -n "$actual_argv" ] && [ -n "$actual_executable" ] && \
                [ -n "$actual_started" ]; then
-                if [ "$actual_pgid" = "$pid" ] && [ "$actual_cwd" = "$cwd" ] && \
-                   [ "$marker_matches" -eq 1 ]; then
+                if [ "$actual_pgid" != "$pid" ] || [ "$actual_cwd" != "$cwd" ]; then
+                    break
+                fi
+                # npm keeps the verified PID/session/cwd while its argv briefly
+                # transitions from `npm` to `npm run dev`. Only commit metadata
+                # after the expected marker appears; a permanently wrong marker
+                # still exhausts this bounded loop and is terminated below.
+                if [ "$marker_matches" -eq 1 ]; then
                     if write_service_metadata "$service" "$pid" "$pid" "$cwd" \
                         "$marker" "$actual_argv" "$actual_executable" "$actual_started"; then
                         if validate_process "$service"; then
@@ -846,7 +852,6 @@ os.execvpe(command[0], command, os.environ)
                         fi
                     fi
                 fi
-                break
             fi
         fi
         process_alive "$pid" || break
