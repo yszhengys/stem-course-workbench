@@ -1039,12 +1039,21 @@ stop_verified_service() {
     if [ ! -f "$(runtime_path "$service" pid)" ]; then
         return 0
     fi
+    pid=$(read_first_line "$(runtime_path "$service" pid)")
+    pgid=$(read_first_line "$(runtime_path "$service" pgid)")
+    if ! process_alive "$pid"; then
+        if process_group_has_members "$pgid"; then
+            error "Refusing to clean stale $service metadata: process group $pgid still has live members."
+            return 1
+        fi
+        say "Cleaning stale $service process metadata (PID ${pid:-unknown} is not alive)..."
+        cleanup_process_metadata "$service"
+        return 0
+    fi
     if ! validate_process "$service"; then
         error "Refusing to stop unverified $service process: $PROCESS_REASON"
         return 1
     fi
-    pid=$(read_first_line "$(runtime_path "$service" pid)")
-    pgid=$(read_first_line "$(runtime_path "$service" pgid)")
     say "Stopping $service process group $pgid..."
     if ! terminate_owned_process_group "$pgid"; then
         error "$service process group $pgid did not stop."

@@ -1000,6 +1000,54 @@ def test_stale_pid_is_replaced_only_during_start(
     assert _run(repo, env, "stop").returncode == 0
 
 
+def test_restart_cleans_dead_service_metadata_before_starting_again(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, _ = fake_repo
+    env = _with_ui_contract(env)
+    runtime = repo / ".runtime" / "course-workbench"
+
+    started = _run(repo, env, "start", "--no-open")
+    assert started.returncode == 0, started.stdout + started.stderr
+    stale_pid = int((runtime / "frontend.pid").read_text(encoding="utf-8"))
+    os.kill(stale_pid, signal.SIGTERM)
+    assert _wait_for_pid_exit(stale_pid)
+
+    restarted = _run(repo, env, "restart", "--no-open")
+
+    assert restarted.returncode == 0, restarted.stdout + restarted.stderr
+    assert int((runtime / "frontend.pid").read_text(encoding="utf-8")) != stale_pid
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_stop_keeps_metadata_when_dead_leader_still_has_live_group_members(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {**_with_ui_contract(env), "FAKE_STUBBORN_API_CHILD": "1"}
+    runtime = repo / ".runtime" / "course-workbench"
+
+    try:
+        started = _run(repo, env, "start", "--no-open")
+        assert started.returncode == 0, started.stdout + started.stderr
+        leader_pid = int((runtime / "api.pid").read_text(encoding="utf-8"))
+        child_pid = int((state / "api.child").read_text(encoding="utf-8"))
+        os.kill(leader_pid, signal.SIGKILL)
+        assert _wait_for_pid_exit(leader_pid)
+        (state / f"pid.{leader_pid}.dead").touch()
+        assert _pid_is_running(child_pid)
+
+        stopped = _run(repo, env, "stop", timeout=8)
+
+        assert stopped.returncode != 0
+        assert "process group" in (stopped.stdout + stopped.stderr).lower()
+        assert (runtime / "api.pid").exists()
+        assert _pid_is_running(child_pid)
+    finally:
+        if (state / "api.child").exists():
+            _force_stop_pid(int((state / "api.child").read_text(encoding="utf-8")))
+
+
 def test_external_port_owner_is_rejected_with_diagnostic(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
