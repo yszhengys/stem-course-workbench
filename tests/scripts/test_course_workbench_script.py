@@ -100,6 +100,9 @@ if sys.argv[1:] == ["ci"]:
     raise SystemExit(0)
 if sys.argv[1:] == ["run", "dev"]:
     pid = os.getpid()
+    (state / "frontend.allowed_origins").write_text(
+        os.environ.get("NEXT_ALLOWED_DEV_ORIGINS", ""), encoding="utf-8"
+    )
     (state / "port.3000").write_text(str(pid), encoding="utf-8")
     (state / f"pid.{pid}.cwd").write_text(str(Path.cwd()), encoding="utf-8")
     (state / f"pid.{pid}.command").write_text("npm run dev", encoding="utf-8")
@@ -281,6 +284,7 @@ def _fake_uv(repo: Path) -> None:
         """#!/usr/bin/env python3
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -302,6 +306,13 @@ def raise_exit():
 with (state / "uv.calls").open("a", encoding="utf-8") as handle:
     handle.write(" ".join(args) + "\\n")
 if args[:2] == ["sync", "--locked"]:
+    fake_pythonpath = Path(os.environ["FAKE_PYTHONPATH"])
+    typer_package = fake_pythonpath / "typer"
+    if "--reinstall-package" in args and args[-1] == "typer":
+        typer_package.mkdir(parents=True, exist_ok=True)
+        (typer_package / "__init__.py").write_text("", encoding="utf-8")
+    elif os.environ.get("FAKE_TYPER_MISSING_AFTER_SYNC") == "1":
+        shutil.rmtree(typer_package, ignore_errors=True)
     python_bin = Path.cwd() / ".venv" / "bin" / "python"
     python_bin.parent.mkdir(parents=True, exist_ok=True)
     if not python_bin.exists():
@@ -393,11 +404,16 @@ def fake_repo(tmp_path: Path) -> Iterator[tuple[Path, dict[str, str], Path]]:
     (repo / "run_api.py").write_text("# fake\n", encoding="utf-8")
     fake_bin, state = _fake_tools(repo)
     _fake_uv(repo)
+    fake_pythonpath = state / "pythonpath"
+    (fake_pythonpath / "typer").mkdir(parents=True)
+    (fake_pythonpath / "typer" / "__init__.py").write_text("", encoding="utf-8")
     env = os.environ.copy()
     env.update(
         {
             "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
             "FAKE_STATE": str(state),
+            "FAKE_PYTHONPATH": str(fake_pythonpath),
+            "PYTHONPATH": str(fake_pythonpath),
             "COURSE_WORKBENCH_READY_TIMEOUT": "2",
             "COURSE_WORKBENCH_POLL_INTERVAL": "0.05",
         }
@@ -570,6 +586,44 @@ def test_start_creates_secure_env_uses_locked_dependencies_and_is_idempotent(
 
     stopped = _run(repo, env, "stop")
     assert stopped.returncode == 0, stopped.stdout + stopped.stderr
+
+
+def test_frontend_dev_origin_allows_the_launchers_loopback_url(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "NEXT_ALLOWED_DEV_ORIGINS": "example.local,127.0.0.1",
+    }
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    allowed = (state / "frontend.allowed_origins").read_text(encoding="utf-8")
+    entries = [item.strip() for item in allowed.split(",")]
+    assert entries.count("127.0.0.1") == 1
+    assert "example.local" in entries
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_frontend_dev_origin_appends_loopback_without_replacing_existing_values(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "NEXT_ALLOWED_DEV_ORIGINS": "example.local",
+    }
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    allowed = (state / "frontend.allowed_origins").read_text(encoding="utf-8")
+    entries = [item.strip() for item in allowed.split(",")]
+    assert entries.count("127.0.0.1") == 1
+    assert "example.local" in entries
+    assert _run(repo, env, "stop").returncode == 0
 
 
 @pytest.mark.parametrize(
@@ -810,6 +864,25 @@ def test_leading_whitespace_valid_key_and_explicit_model_opt_out_are_preserved(
         line.lstrip() == "OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1"
         for line in lines
     )
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_missing_typer_after_locked_sync_is_reinstalled_before_worker_start(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "FAKE_TYPER_MISSING_AFTER_SYNC": "1",
+    }
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _calls(state / "uv.calls").count("sync --locked") == 1
+    assert _calls(state / "uv.calls").count(
+        "sync --locked --reinstall-package typer"
+    ) == 1
     assert _run(repo, env, "stop").returncode == 0
 
 

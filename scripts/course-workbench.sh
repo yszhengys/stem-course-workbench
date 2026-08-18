@@ -419,6 +419,18 @@ ensure_dependencies() {
         fi
         write_atomic "$uv_stamp" "$uv_hash" || return 1
     fi
+    if ! "$PYTHON_BIN" -c 'import typer' >/dev/null 2>&1; then
+        say "Repairing the worker command runtime..."
+        if ! (cd "$REPO_ROOT" && \
+            "$UV_BIN" sync --locked --reinstall-package typer); then
+            error "Could not restore the locked Typer runtime required by the worker."
+            return 1
+        fi
+        if ! "$PYTHON_BIN" -c 'import typer' >/dev/null 2>&1; then
+            error "Worker dependency verification failed after reinstalling Typer."
+            return 1
+        fi
+    fi
 
     npm_lock="$REPO_ROOT/frontend/package-lock.json"
     if [ ! -f "$npm_lock" ]; then
@@ -886,6 +898,23 @@ start_frontend() {
     fi
     assert_host_port_available frontend 3000 || return 1
     say "Starting frontend on 127.0.0.1:3000..."
+    # Next.js dev mode otherwise blocks hydration/HMR when the launcher URL
+    # uses 127.0.0.1 while the dev server identifies itself as localhost.
+    if ! printf '%s\n' "${NEXT_ALLOWED_DEV_ORIGINS:-}" | awk -F ',' '
+        {
+            for (field_no = 1; field_no <= NF; field_no++) {
+                value = $field_no
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+                if (value == "127.0.0.1") {
+                    found = 1
+                }
+            }
+        }
+        END { exit found ? 0 : 1 }
+    '; then
+        NEXT_ALLOWED_DEV_ORIGINS="127.0.0.1${NEXT_ALLOWED_DEV_ORIGINS:+,$NEXT_ALLOWED_DEV_ORIGINS}"
+    fi
+    export NEXT_ALLOWED_DEV_ORIGINS
     if ! launch_service frontend "$REPO_ROOT/frontend" "npm run dev" npm run dev; then
         return 1
     fi
