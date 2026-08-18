@@ -119,7 +119,7 @@ jobs:
         run: echo "No image-affecting paths changed — skipping the Docker build. Reporting success."
 
       - name: Free up disk space
-        if: needs.extract-version.outputs.is_push_to_main == 'true'
+        if: needs.extract-version.outputs.is_push_to_main == 'true' || needs.changes.outputs.image == 'true'
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
