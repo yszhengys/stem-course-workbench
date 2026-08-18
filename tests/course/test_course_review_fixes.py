@@ -1,14 +1,20 @@
 import hashlib
 import json
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pypdf import PdfWriter
 from surrealdb import AsyncSurreal, RecordID
 
-from api.course_service import CourseConflictError, CourseService
+from api.course_service import (
+    CourseConflictError,
+    CourseImmutableError,
+    CourseService,
+)
 from open_notebook.course.evidence_service import EvidenceService
 from open_notebook.course.models import (
     Attempt,
@@ -190,7 +196,9 @@ async def test_version_publish_revalidates_current_approved_outline_hash(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_version_publish_uses_legal_generating_to_published_transition(monkeypatch):
+async def test_version_publish_uses_legal_generating_to_published_transition(
+    monkeypatch,
+):
     artifact = approved_outline()
     course = Course(
         id="course:one",
@@ -589,9 +597,9 @@ async def test_publish_transaction_uses_embedded_surreal_rollback_and_commit(
     published = await CourseService.publish_version("course_version:one")
 
     assert published.status == "published"
-    assert await repository.repo_query(
-        "SELECT status FROM course_version:one;"
-    ) == [{"status": "published"}]
+    assert await repository.repo_query("SELECT status FROM course_version:one;") == [
+        {"status": "published"}
+    ]
     assert await repository.repo_query("SELECT status FROM course:one;") == [
         {"status": "ready"}
     ]
@@ -725,15 +733,125 @@ async def test_publish_transaction_rejects_newly_promoted_chapter_snapshot(
         await CourseService.publish_version("course_version:one")
 
     assert transaction_started is True
-    assert await repository.repo_query(
-        "SELECT status FROM course_version:one;"
-    ) == [{"status": "generating"}]
+    assert await repository.repo_query("SELECT status FROM course_version:one;") == [
+        {"status": "generating"}
+    ]
     assert await repository.repo_query("SELECT status FROM course:one;") == [
         {"status": "generating"}
     ]
     assert await repository.repo_query(
         "SELECT status FROM course_generation_run:new;"
     ) == [{"status": "succeeded"}]
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_chapter_create_cas_rejects_stale_generating_version(
+    monkeypatch,
+):
+    import open_notebook.database.repository as repository
+
+    database = AsyncSurreal("mem://")
+    await database.use("manual_create_race", "manual_create_race")
+
+    @asynccontextmanager
+    async def memory_connection():
+        yield database
+
+    monkeypatch.setattr(repository, "db_connection", memory_connection)
+    await repository.repo_query(
+        "CREATE course_version:one SET course = course:one, "
+        "version_no = 1, status = 'published';"
+    )
+    stale = CourseVersion(
+        id="course_version:one",
+        course="course:one",
+        version_no=1,
+        status="generating",
+    )
+    published = stale.model_copy(update={"status": "published"})
+    monkeypatch.setattr(
+        CourseVersion,
+        "get",
+        AsyncMock(side_effect=[stale, published]),
+    )
+
+    with pytest.raises(CourseImmutableError):
+        await CourseService.create_chapter(
+            "course_version:one",
+            {
+                "chapter_no": 1,
+                "chapter_key": "limits",
+                "title": "Late manual chapter",
+            },
+        )
+
+    assert (
+        await repository.repo_query(
+            "SELECT id FROM chapter WHERE course_version = course_version:one;"
+        )
+        == []
+    )
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_chapter_update_cas_rejects_stale_generating_version(
+    monkeypatch,
+):
+    import open_notebook.database.repository as repository
+
+    database = AsyncSurreal("mem://")
+    await database.use("manual_update_race", "manual_update_race")
+
+    @asynccontextmanager
+    async def memory_connection():
+        yield database
+
+    monkeypatch.setattr(repository, "db_connection", memory_connection)
+    await repository.repo_query(
+        "CREATE course_version:one SET course = course:one, "
+        "version_no = 1, status = 'published';"
+    )
+    await repository.repo_query(
+        "CREATE chapter:one SET course_version = course_version:one, "
+        "chapter_no = 1, chapter_key = 'limits', version_no = 1, "
+        "title = 'Before', status = 'draft', review_status = 'pending', "
+        "validation_status = 'pending';"
+    )
+    stale = CourseVersion(
+        id="course_version:one",
+        course="course:one",
+        version_no=1,
+        status="generating",
+    )
+    published = stale.model_copy(update={"status": "published"})
+    chapter = Chapter(
+        id="chapter:one",
+        course_version="course_version:one",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=1,
+        title="Before",
+        status="draft",
+    )
+    monkeypatch.setattr(
+        CourseVersion,
+        "get",
+        AsyncMock(side_effect=[stale, published]),
+    )
+    monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
+
+    with pytest.raises(CourseImmutableError):
+        await CourseService.update_chapter(
+            "course_version:one",
+            "chapter:one",
+            {"title": "Late mutation"},
+        )
+
+    assert await repository.repo_query("SELECT title FROM chapter:one;") == [
+        {"title": "Before"}
+    ]
     await database.close()
 
 
@@ -823,9 +941,7 @@ async def test_chapter_promotion_transaction_rejects_published_version_in_embedd
         "SELECT orphan_status FROM course_note:one;"
     ) == [{"orphan_status": "active"}]
 
-    await repository.repo_query(
-        "UPDATE course_version:one SET status = 'generating';"
-    )
+    await repository.repo_query("UPDATE course_version:one SET status = 'generating';")
     await workflow_module.CourseWorkflowService.complete_chapter_run(
         run=run,
         chapter=chapter,
@@ -1100,9 +1216,7 @@ async def test_stable_chapter_key_requires_owned_persisted_chapter(
         id="course_version:1", course="course:other", version_no=1
     )
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
-    monkeypatch.setattr(
-        CourseVersion, "get", AsyncMock(return_value=foreign_version)
-    )
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=foreign_version))
     monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[]))
     monkeypatch.setattr("api.course_service.repo_query", AsyncMock(return_value=[]))
     progress_save = AsyncMock()
@@ -1133,9 +1247,7 @@ async def test_attempt_keys_must_match_owned_chapter_artifact(monkeypatch):
         lab_type="function_plot",
         payload={},
     )
-    version = CourseVersion(
-        id="course_version:1", course="course:one", version_no=1
-    )
+    version = CourseVersion(id="course_version:1", course="course:one", version_no=1)
     chapter = Chapter(
         id="chapter:one",
         course_version="course_version:1",
@@ -1179,9 +1291,7 @@ async def test_attempt_transition_rejects_exercise_without_owned_chapter(monkeyp
         lab_type="function_plot",
         payload={},
     )
-    version = CourseVersion(
-        id="course_version:1", course="course:one", version_no=1
-    )
+    version = CourseVersion(id="course_version:1", course="course:one", version_no=1)
     monkeypatch.setattr(Attempt, "get", AsyncMock(return_value=attempt))
     monkeypatch.setattr(Lab, "get", AsyncMock(return_value=lab))
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
@@ -1210,9 +1320,7 @@ async def test_migration_24_attempt_transition_validates_lab_chapter_ownership(
         lab_type="function_plot",
         payload={},
     )
-    version = CourseVersion(
-        id="course_version:1", course="course:one", version_no=1
-    )
+    version = CourseVersion(id="course_version:1", course="course:one", version_no=1)
     foreign_chapter = Chapter(
         id="chapter:foreign",
         course_version="course_version:other",
@@ -1250,9 +1358,7 @@ async def test_attempt_transition_rejects_chapter_mismatch_with_lab(monkeypatch)
         lab_type="function_plot",
         payload={},
     )
-    version = CourseVersion(
-        id="course_version:1", course="course:one", version_no=1
-    )
+    version = CourseVersion(id="course_version:1", course="course:one", version_no=1)
     attempt_chapter = Chapter(
         id="chapter:one",
         course_version="course_version:1",
@@ -1304,7 +1410,9 @@ async def test_lab_requires_chapter_owned_by_requested_version(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_published_chapter_rejects_mutation_under_unpublished_version(monkeypatch):
+async def test_published_chapter_rejects_mutation_under_unpublished_version(
+    monkeypatch,
+):
     version = CourseVersion(
         id="course_version:1", course="course:one", version_no=1, status="generating"
     )
@@ -1332,9 +1440,7 @@ async def test_published_chapter_rejects_mutation_under_unpublished_version(monk
 
 @pytest.mark.asyncio
 async def test_source_association_rejects_source_outside_course_notebook(monkeypatch):
-    course = Course(
-        id="course:one", title="Calculus", notebook="notebook:one"
-    )
+    course = Course(id="course:one", title="Calculus", notebook="notebook:one")
     notebook = Notebook(id="notebook:one", name="N", description="")
     source = Source(
         id="source:one",
@@ -1353,9 +1459,7 @@ async def test_source_association_rejects_source_outside_course_notebook(monkeyp
     monkeypatch.setattr("api.course_service.repo_query", cleanup)
 
     with pytest.raises(CourseConflictError, match="not attached") as exc_info:
-        await CourseService.associate_source(
-            "course:one", "source:one", "PRIMARY"
-        )
+        await CourseService.associate_source("course:one", "source:one", "PRIMARY")
 
     assert "/private/other-notebook" not in str(exc_info.value)
     assert course.source_ids == []
@@ -1371,9 +1475,7 @@ async def test_source_association_rejects_missing_or_unsupported_original_file(
     monkeypatch,
     file_path,
 ):
-    course = Course(
-        id="course:one", title="Calculus", notebook="notebook:one"
-    )
+    course = Course(id="course:one", title="Calculus", notebook="notebook:one")
     notebook = Notebook(id="notebook:one", name="N", description="")
     source = Source(
         id="source:one",
@@ -1400,9 +1502,7 @@ async def test_source_association_rejects_missing_or_unsupported_original_file(
     monkeypatch.setattr(Course, "save", save)
 
     with pytest.raises(InvalidInputError) as exc_info:
-        await CourseService.associate_source(
-            "course:one", "source:one", "SUPPLEMENT"
-        )
+        await CourseService.associate_source("course:one", "source:one", "SUPPLEMENT")
 
     assert "/private/course" not in str(exc_info.value)
     assert course.source_ids == []
@@ -1420,9 +1520,7 @@ async def test_source_association_rejects_disguised_or_corrupt_course_file(
 ):
     fake_document = tmp_path / f"not-a-document{suffix}"
     fake_document.write_text("plain text masquerading as a course document")
-    course = Course(
-        id="course:one", title="Calculus", notebook="notebook:one"
-    )
+    course = Course(id="course:one", title="Calculus", notebook="notebook:one")
     notebook = Notebook(id="notebook:one", name="N", description="")
     source = Source(
         id="source:one",
@@ -1442,9 +1540,7 @@ async def test_source_association_rejects_disguised_or_corrupt_course_file(
     monkeypatch.setattr(Course, "save", save)
 
     with pytest.raises(InvalidInputError, match="corrupt|cannot be read"):
-        await CourseService.associate_source(
-            "course:one", "source:one", "PRIMARY"
-        )
+        await CourseService.associate_source("course:one", "source:one", "PRIMARY")
 
     assert course.source_ids == []
     assert course.primary_source_ids == []
@@ -1452,10 +1548,54 @@ async def test_source_association_rejects_disguised_or_corrupt_course_file(
 
 
 @pytest.mark.asyncio
-async def test_source_association_rolls_back_roles_when_course_save_fails(monkeypatch):
-    course = Course(
-        id="course:one", title="Calculus", notebook="notebook:one"
+@pytest.mark.parametrize("document_kind", ["empty-pdf", "fake-pptx"])
+async def test_source_association_rejects_structurally_empty_or_fake_document(
+    monkeypatch,
+    tmp_path,
+    document_kind,
+):
+    if document_kind == "empty-pdf":
+        document = tmp_path / "empty.pdf"
+        writer = PdfWriter()
+        with document.open("wb") as stream:
+            writer.write(stream)
+    else:
+        document = tmp_path / "fake.pptx"
+        with zipfile.ZipFile(document, "w") as archive:
+            archive.writestr("[Content_Types].xml", "not xml")
+            archive.writestr("ppt/slides/slide1.xml", "not xml")
+
+    course = Course(id="course:one", title="Calculus", notebook="notebook:one")
+    notebook = Notebook(id="notebook:one", name="N", description="")
+    source = Source(
+        id="source:one",
+        title="Textbook",
+        asset=Asset(file_path=str(document)),
     )
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(Notebook, "get", AsyncMock(return_value=notebook))
+    monkeypatch.setattr(Source, "get", AsyncMock(return_value=source))
+    monkeypatch.setattr(Notebook, "get_sources", AsyncMock(return_value=[source]))
+    monkeypatch.setattr(
+        EvidenceService,
+        "resolve_safe_source_path",
+        lambda _self, _path: document,
+    )
+    save = AsyncMock()
+    monkeypatch.setattr(Course, "save", save)
+
+    with pytest.raises(InvalidInputError, match="no readable|corrupt"):
+        await CourseService.associate_source("course:one", "source:one", "PRIMARY")
+
+    assert str(tmp_path) not in str(save.call_args_list)
+    assert course.source_ids == []
+    assert course.primary_source_ids == []
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_source_association_rolls_back_roles_when_course_save_fails(monkeypatch):
+    course = Course(id="course:one", title="Calculus", notebook="notebook:one")
     notebook = Notebook(id="notebook:one", name="N", description="")
     source = Source(
         id="source:one",
@@ -1481,9 +1621,7 @@ async def test_source_association_rolls_back_roles_when_course_save_fails(monkey
     monkeypatch.setattr(Course, "save", AsyncMock(side_effect=RuntimeError("db")))
 
     with pytest.raises(RuntimeError, match="db"):
-        await CourseService.associate_source(
-            "course:one", "source:one", "PRIMARY"
-        )
+        await CourseService.associate_source("course:one", "source:one", "PRIMARY")
 
     assert course.source_ids == []
     assert course.primary_source_ids == []

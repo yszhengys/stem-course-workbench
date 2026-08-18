@@ -22,9 +22,7 @@ from .models import Course, CourseEvidenceAnchor
 
 EvidenceKind = Literal["pdf", "pptx"]
 SourceRole = Literal["PRIMARY", "SUPPLEMENT"]
-DoclingRecord = tuple[
-    int, str, str, tuple[float, float, float, float] | None
-]
+DoclingRecord = tuple[int, str, str, tuple[float, float, float, float] | None]
 
 
 class EvidenceInputError(InvalidInputError, ValueError):
@@ -39,6 +37,8 @@ class EvidenceService:
     """Build and persist anchors from a Course-owned Source asset."""
 
     MAX_SOURCE_BYTES = 100 * 1024 * 1024
+    MAX_PPTX_MEMBERS = 10_000
+    MAX_PPTX_EXPANDED_BYTES = 500 * 1024 * 1024
 
     def __init__(
         self,
@@ -46,9 +46,7 @@ class EvidenceService:
         allowed_roots: list[Path] | None = None,
         model_root: Path | None = None,
     ) -> None:
-        self.data_root = (
-            data_root or Path("notebook_data/course_evidence")
-        ).resolve()
+        self.data_root = (data_root or Path("notebook_data/course_evidence")).resolve()
         self.model_root = (
             model_root or self.data_root.parent / "course_models"
         ).resolve()
@@ -149,7 +147,10 @@ class EvidenceService:
                     raise EvidenceInputError(
                         "Encrypted PDF files are not supported; remove the password first."
                     )
-                len(reader.pages)
+                if len(reader.pages) == 0:
+                    raise EvidenceInputError("The PDF contains no readable pages.")
+                for page in reader.pages:
+                    _ = page.mediabox
             except EvidenceInputError:
                 raise
             except Exception as exc:
@@ -159,7 +160,16 @@ class EvidenceService:
             return
         try:
             with zipfile.ZipFile(path) as archive:
-                names = set(archive.namelist())
+                members = archive.infolist()
+                if (
+                    len(members) > EvidenceService.MAX_PPTX_MEMBERS
+                    or sum(member.file_size for member in members)
+                    > EvidenceService.MAX_PPTX_EXPANDED_BYTES
+                ):
+                    raise EvidenceInputError(
+                        "The PPTX expands beyond the safe validation limit."
+                    )
+                names = {member.filename for member in members}
                 if "[Content_Types].xml" not in names or not any(
                     name.startswith("ppt/slides/slide") for name in names
                 ):
@@ -171,9 +181,19 @@ class EvidenceService:
                     raise EvidenceInputError(
                         f"The PPTX is corrupt near {Path(bad_member).name}."
                     )
+            # Opening the package validates its OPC relationships and XML,
+            # unlike a filename-only ZIP check. This is intentionally local
+            # structural validation: it does not invoke Docling or OCR.
+            from pptx import Presentation
+
+            presentation = Presentation(str(path))
+            if len(presentation.slides) == 0:
+                raise EvidenceInputError("The PPTX contains no readable slides.")
+            for slide in presentation.slides:
+                _ = len(slide.shapes)
         except EvidenceInputError:
             raise
-        except (OSError, zipfile.BadZipFile) as exc:
+        except Exception as exc:
             raise EvidenceInputError(
                 "The PPTX is corrupt or cannot be read; export it again."
             ) from exc
@@ -240,7 +260,9 @@ class EvidenceService:
         return await asyncio.to_thread(self._extract_docling_sync, path, kind)
 
     @classmethod
-    def docling_records(cls, raw_content: str, kind: EvidenceKind) -> list[DoclingRecord]:
+    def docling_records(
+        cls, raw_content: str, kind: EvidenceKind
+    ) -> list[DoclingRecord]:
         del kind
         try:
             payload = json.loads(raw_content)
@@ -258,7 +280,11 @@ class EvidenceService:
                 continue
             quote = item.get("text") or item.get("orig") or ""
             provenance = item.get("prov") or []
-            if not isinstance(quote, str) or not quote.strip() or not isinstance(provenance, list):
+            if (
+                not isinstance(quote, str)
+                or not quote.strip()
+                or not isinstance(provenance, list)
+            ):
                 continue
             for prov_index, prov in enumerate(provenance, start=1):
                 if not isinstance(prov, dict):
@@ -293,9 +319,7 @@ class EvidenceService:
                         tuple[float | int, float | int, float | int, float | int],
                         tuple(values),
                     )
-                    left, top, right, bottom = (
-                        float(value) for value in numeric
-                    )
+                    left, top, right, bottom = (float(value) for value in numeric)
                     if origin == "BOTTOMLEFT":
                         top, bottom = height - top, height - bottom
                     bbox = tuple(
@@ -310,7 +334,10 @@ class EvidenceService:
                 records.append(
                     (
                         page_no,
-                        str(item.get("self_ref") or f"docling-text-{item_index}-prov-{prov_index}"),
+                        str(
+                            item.get("self_ref")
+                            or f"docling-text-{item_index}-prov-{prov_index}"
+                        ),
                         cls.normalize_text(quote)[:4000],
                         bbox,
                     )
@@ -362,9 +389,7 @@ class EvidenceService:
             preview_path=preview_path,
         )
 
-    def manifest_path(
-        self, course_id: str, source_id: str, source_sha256: str
-    ) -> Path:
+    def manifest_path(self, course_id: str, source_id: str, source_sha256: str) -> Path:
         course_namespace = hashlib.sha256(course_id.encode("utf-8")).hexdigest()
         safe_name = hashlib.sha256(source_id.encode("utf-8")).hexdigest() + ".json"
         return self.data_root / course_namespace / source_sha256 / safe_name

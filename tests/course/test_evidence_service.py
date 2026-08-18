@@ -38,6 +38,15 @@ def _pdf(path: Path, *, encrypted: bool = False) -> None:
         writer.write(handle)
 
 
+def _pptx(path: Path, *, with_slide: bool = True) -> None:
+    from pptx import Presentation
+
+    presentation = Presentation()
+    if with_slide:
+        presentation.slides.add_slide(presentation.slide_layouts[6])
+    presentation.save(str(path))
+
+
 def _source(path: Path) -> Source:
     return Source(id="source:one", title="Lesson", asset=Asset(file_path=str(path)))
 
@@ -141,6 +150,26 @@ def test_source_path_cannot_escape_or_use_symlink(tmp_path: Path):
         service.resolve_safe_source_path(outside)
     with pytest.raises(EvidenceInputError, match="allowed|symbolic"):
         service.resolve_safe_source_path(link)
+
+
+def test_local_validation_accepts_structurally_valid_pptx(tmp_path: Path):
+    path = tmp_path / "lesson.pptx"
+    _pptx(path)
+    service = EvidenceService(data_root=tmp_path / "cache", allowed_roots=[tmp_path])
+
+    validated_path, kind = service.validate_local_source_file(path)
+
+    assert validated_path == path.resolve()
+    assert kind == "pptx"
+
+
+def test_local_validation_rejects_pptx_without_slides(tmp_path: Path):
+    path = tmp_path / "empty.pptx"
+    _pptx(path, with_slide=False)
+    service = EvidenceService(data_root=tmp_path / "cache", allowed_roots=[tmp_path])
+
+    with pytest.raises(EvidenceInputError, match="no readable slides"):
+        service.validate_local_source_file(path)
 
 
 def test_docling_provenance_produces_one_based_bbox_record():

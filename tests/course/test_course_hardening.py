@@ -1,10 +1,11 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from surrealdb import RecordID
+from surrealdb import AsyncSurreal, RecordID
 
 from api.course_service import (
     CourseApprovalError,
@@ -123,7 +124,9 @@ async def test_typed_id_confusion_is_rejected_before_lookup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_outline_approval_requires_current_version_state_and_exact_phrase(monkeypatch):
+async def test_outline_approval_requires_current_version_state_and_exact_phrase(
+    monkeypatch,
+):
     course = Course(
         id="course:one",
         title="Calculus",
@@ -172,7 +175,11 @@ async def test_chapter_patch_validates_all_transitions_before_one_save(monkeypat
         await CourseService.update_chapter(
             "course_version:1",
             "chapter:1",
-            {"title": "After", "review_status": "passed", "validation_status": "nonsense"},
+            {
+                "title": "After",
+                "review_status": "passed",
+                "validation_status": "nonsense",
+            },
         )
 
     assert chapter.title == "Before"
@@ -181,7 +188,9 @@ async def test_chapter_patch_validates_all_transitions_before_one_save(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_published_version_rejects_child_mutation_and_parent_mismatch(monkeypatch):
+async def test_published_version_rejects_child_mutation_and_parent_mismatch(
+    monkeypatch,
+):
     published = CourseVersion(
         id="course_version:1", course="course:one", version_no=1, status="published"
     )
@@ -208,9 +217,7 @@ async def test_published_version_rejects_child_mutation_and_parent_mismatch(monk
 
 @pytest.mark.asyncio
 async def test_source_association_keeps_exactly_one_role(monkeypatch):
-    course = Course(
-        id="course:one", title="Calculus", notebook="notebook:one"
-    )
+    course = Course(id="course:one", title="Calculus", notebook="notebook:one")
     source = Source(
         id="source:one",
         title="Textbook",
@@ -268,27 +275,74 @@ async def test_course_creation_compensates_new_notebook_on_course_failure(monkey
 
 @pytest.mark.asyncio
 async def test_chapter_regeneration_uses_next_unique_version(monkeypatch):
-    version = CourseVersion(id="course_version:1", course="course:one", version_no=1)
-    prior = Chapter(
-        id="chapter:1",
-        course_version="course_version:1",
-        chapter_no=1,
-        chapter_key="limits",
-        version_no=2,
-        title="Limits",
-        status="ready",
+    import open_notebook.database.repository as repository
+
+    database = AsyncSurreal("mem://")
+    await database.use("manual_chapter_versions", "manual_chapter_versions")
+
+    @asynccontextmanager
+    async def memory_connection():
+        yield database
+
+    monkeypatch.setattr(repository, "db_connection", memory_connection)
+    await repository.repo_query(
+        "CREATE course_version:one SET course = course:one, "
+        "version_no = 1, status = 'draft';"
     )
-    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
-    monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[prior]))
-    monkeypatch.setattr(Chapter, "save", AsyncMock())
+    await repository.repo_query(
+        "CREATE chapter:prior SET course_version = course_version:one, "
+        "chapter_no = 1, chapter_key = 'limits', version_no = 2, "
+        "title = 'Limits', status = 'ready';"
+    )
 
     regenerated = await CourseService.create_chapter(
-        "course_version:1",
+        "course_version:one",
         {"chapter_no": 1, "chapter_key": "limits", "title": "Limits v3"},
     )
 
     assert regenerated.version_no == 3
-    assert prior.title == "Limits"
+    assert regenerated.status == "draft"
+    assert await repository.repo_query("SELECT title FROM chapter:prior;") == [
+        {"title": "Limits"}
+    ]
+    await database.close()
+
+
+@pytest.mark.asyncio
+async def test_manual_chapter_update_commits_on_mutable_version(monkeypatch):
+    import open_notebook.database.repository as repository
+
+    database = AsyncSurreal("mem://")
+    await database.use("manual_chapter_update", "manual_chapter_update")
+
+    @asynccontextmanager
+    async def memory_connection():
+        yield database
+
+    monkeypatch.setattr(repository, "db_connection", memory_connection)
+    await repository.repo_query(
+        "CREATE course_version:one SET course = course:one, "
+        "version_no = 1, status = 'generating';"
+    )
+    await repository.repo_query(
+        "CREATE chapter:one SET course_version = course_version:one, "
+        "chapter_no = 1, chapter_key = 'limits', version_no = 1, "
+        "title = 'Before', status = 'draft', review_status = 'pending', "
+        "validation_status = 'pending';"
+    )
+
+    updated = await CourseService.update_chapter(
+        "course_version:one",
+        "chapter:one",
+        {"title": "After", "status": "generating"},
+    )
+
+    assert updated.title == "After"
+    assert updated.status == "generating"
+    assert await repository.repo_query(
+        "SELECT title, status FROM chapter:one;"
+    ) == [{"status": "generating", "title": "After"}]
+    await database.close()
 
 
 def test_course_record_fields_serialize_to_record_ids_and_return_as_strings():
@@ -313,10 +367,10 @@ def client():
     return TestClient(app)
 
 
-def test_course_router_uses_service_201_and_has_no_generic_status_bypass(client, monkeypatch):
-    created = Course(
-        id="course:one", title="Calculus", notebook="notebook:one"
-    )
+def test_course_router_uses_service_201_and_has_no_generic_status_bypass(
+    client, monkeypatch
+):
+    created = Course(id="course:one", title="Calculus", notebook="notebook:one")
     create = AsyncMock(return_value=created)
     monkeypatch.setattr(CourseService, "create_course", create)
 

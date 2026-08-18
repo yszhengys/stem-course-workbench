@@ -7,6 +7,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
+from uuid import uuid4
 
 import httpx
 
@@ -225,9 +226,7 @@ class CourseService:
     async def get_model_options() -> dict[str, Any]:
         """Return explicit Course-only selections without changing global defaults."""
         configured_models = await Model.get_models_by_type("language")
-        real_models_enabled = (
-            os.getenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS") == "1"
-        )
+        real_models_enabled = os.getenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS") == "1"
         codex_available = real_models_enabled and CodexCliAdapter.is_available()
         installed_ollama = (
             await _installed_ollama_models() if real_models_enabled else set()
@@ -313,9 +312,7 @@ class CourseService:
             if not notebook.id:
                 raise NotFoundError("notebook record not found")
         else:
-            created_notebook = Notebook(
-                name=title, description=f"STEM Course: {title}"
-            )
+            created_notebook = Notebook(name=title, description=f"STEM Course: {title}")
             await created_notebook.save()
             if not created_notebook.id:
                 raise OpenNotebookError("Course notebook creation failed")
@@ -379,14 +376,10 @@ class CourseService:
             )
         notebook_sources = await notebook.get_sources()
         if source_id not in {str(item.id) for item in notebook_sources}:
-            raise CourseConflictError(
-                "Source is not attached to this Course notebook"
-            )
+            raise CourseConflictError("Source is not attached to this Course notebook")
         file_path = source.asset.file_path if source.asset else None
         if not file_path:
-            raise EvidenceInputError(
-                "Course Source has no local PDF or PPTX asset."
-            )
+            raise EvidenceInputError("Course Source has no local PDF or PPTX asset.")
         evidence = EvidenceService()
         evidence.validate_local_source_file(file_path)
 
@@ -407,9 +400,7 @@ class CourseService:
         return course
 
     @staticmethod
-    async def create_version(
-        course_id: str, values: dict[str, Any]
-    ) -> CourseVersion:
+    async def create_version(course_id: str, values: dict[str, Any]) -> CourseVersion:
         course = await CourseService.get_course(course_id)
         versions = await Course.versions(course_id)
         next_no = max((version.version_no for version in versions), default=0) + 1
@@ -444,45 +435,105 @@ class CourseService:
         if version.course != course_id:
             raise CourseConflictError("Outline version is stale")
         if version.status in {sm.VersionStatus.PUBLISHED, sm.VersionStatus.FAILED}:
-            raise CourseConflictError("Course version cannot be approved in its current state")
+            raise CourseConflictError(
+                "Course version cannot be approved in its current state"
+            )
         if version.outline_artifact is None:
             raise CourseConflictError("Outline version has no artifact")
         version.confirmation = normalized
         version.approved_at = datetime.now(timezone.utc)
         version.outline_hash = _artifact_hash(version.outline_artifact)
-        course.status = sm.transition("course", course.status, sm.CourseStatus.OUTLINE_APPROVED)
+        course.status = sm.transition(
+            "course", course.status, sm.CourseStatus.OUTLINE_APPROVED
+        )
         await version.save()
         await course.save()
         return version
 
     @staticmethod
-    async def create_chapter(
-        version_id: str, values: dict[str, Any]
-    ) -> Chapter:
+    async def create_chapter(version_id: str, values: dict[str, Any]) -> Chapter:
         version = await _typed_get(CourseVersion, version_id, "course_version")
-        if version.status == sm.VersionStatus.PUBLISHED:
-            raise CourseImmutableError("Published course versions are immutable")
+        mutable_statuses = {
+            sm.VersionStatus.DRAFT,
+            sm.VersionStatus.GENERATING,
+        }
+        if version.status not in mutable_statuses:
+            raise CourseImmutableError("Course version is immutable")
         chapter_key = values.get("chapter_key") or f"chapter-{values['chapter_no']}"
-        existing = await CourseVersion.chapters(version_id)
-        next_no = max(
-            (
-                chapter.version_no
-                for chapter in existing
-                if chapter.chapter_key == chapter_key
-            ),
-            default=0,
-        ) + 1
         chapter = Chapter(
             course_version=version_id,
             chapter_no=values["chapter_no"],
             title=values["title"],
             chapter_key=chapter_key,
-            version_no=next_no,
             artifact=values.get("artifact"),
             input_hash=values.get("input_hash"),
         )
-        await chapter.save()
-        return chapter
+        chapter_id = f"chapter:{uuid4().hex}"
+        try:
+            await repo_query(
+                """
+                BEGIN TRANSACTION;
+                LET $mutable_version = (
+                    UPDATE course_version
+                    SET updated = time::now()
+                    WHERE id = $version_id
+                      AND status IN ['draft', 'generating']
+                    RETURN VALUE id
+                );
+                IF array::len($mutable_version) != 1 {
+                    THROW 'Course version is immutable'
+                };
+                LET $existing_version_nos = (
+                    SELECT VALUE version_no FROM chapter
+                    WHERE course_version = $version_id
+                      AND chapter_key = $chapter_key
+                    ORDER BY version_no DESC
+                    LIMIT 1
+                );
+                LET $next_version_no = IF array::len($existing_version_nos) = 0 {
+                    1
+                } ELSE {
+                    $existing_version_nos[0] + 1
+                };
+                LET $created_chapter = (
+                    CREATE ONLY $chapter_id
+                    SET course_version = $version_id,
+                        chapter_no = $chapter_no,
+                        title = $title,
+                        chapter_key = $chapter_key,
+                        version_no = $next_version_no,
+                        artifact = $artifact,
+                        input_hash = $input_hash,
+                        status = 'draft',
+                        review_status = 'pending',
+                        validation_status = 'pending',
+                        created = time::now(),
+                        updated = time::now()
+                    RETURN AFTER
+                );
+                IF $created_chapter = NONE {
+                    THROW 'Chapter creation failed'
+                };
+                COMMIT TRANSACTION;
+                """,
+                {
+                    "version_id": ensure_record_id(version_id),
+                    "chapter_id": ensure_record_id(chapter_id),
+                    "chapter_no": chapter.chapter_no,
+                    "title": chapter.title,
+                    "chapter_key": chapter.chapter_key,
+                    "artifact": chapter.artifact,
+                    "input_hash": chapter.input_hash,
+                },
+            )
+        except RuntimeError as exc:
+            current = await _typed_get(CourseVersion, version_id, "course_version")
+            if current.status not in mutable_statuses:
+                raise CourseImmutableError("Course version is immutable") from exc
+            raise CourseConflictError(
+                "Chapter creation conflicted with another Course update"
+            ) from exc
+        return await _typed_get(Chapter, chapter_id, "chapter")
 
     @staticmethod
     async def list_chapters(version_id: str) -> list[Chapter]:
@@ -497,8 +548,15 @@ class CourseService:
         chapter = await _typed_get(Chapter, chapter_id, "chapter")
         if chapter.course_version != version_id:
             raise NotFoundError("Chapter not found in course version")
-        if version.status == sm.VersionStatus.PUBLISHED or chapter.status == sm.ChapterStatus.PUBLISHED:
-            raise CourseImmutableError("Published artifacts are immutable")
+        mutable_statuses = {
+            sm.VersionStatus.DRAFT,
+            sm.VersionStatus.GENERATING,
+        }
+        if (
+            version.status not in mutable_statuses
+            or chapter.status == sm.ChapterStatus.PUBLISHED
+        ):
+            raise CourseImmutableError("Course artifact is immutable")
 
         next_status = chapter.status
         next_review = chapter.review_status
@@ -516,14 +574,76 @@ class CourseService:
                 values["validation_status"],
             )
 
+        updated = chapter.model_copy(deep=True)
         for field in ("title", "content", "citations", "artifact", "input_hash"):
             if field in values and values[field] is not None:
-                setattr(chapter, field, values[field])
-        chapter.status = next_status
-        chapter.review_status = next_review
-        chapter.validation_status = next_validation
-        await chapter.save()
-        return chapter
+                setattr(updated, field, values[field])
+        updated.status = next_status
+        updated.review_status = next_review
+        updated.validation_status = next_validation
+        # Validate the complete candidate before entering the transaction so a
+        # rejected patch cannot partially mutate either memory or persistence.
+        updated = Chapter.model_validate(updated.model_dump())
+        try:
+            await repo_query(
+                """
+                BEGIN TRANSACTION;
+                LET $mutable_version = (
+                    UPDATE course_version
+                    SET updated = time::now()
+                    WHERE id = $version_id
+                      AND status IN ['draft', 'generating']
+                    RETURN VALUE id
+                );
+                IF array::len($mutable_version) != 1 {
+                    THROW 'Course version is immutable'
+                };
+                LET $updated_chapter = (
+                    UPDATE $chapter_id
+                    SET title = $title,
+                        content = $content,
+                        citations = $citations,
+                        artifact = $artifact,
+                        input_hash = $input_hash,
+                        status = $status,
+                        review_status = $review_status,
+                        validation_status = $validation_status,
+                        updated = time::now()
+                    WHERE course_version = $version_id
+                      AND status != 'published'
+                    RETURN AFTER
+                );
+                IF array::len($updated_chapter) != 1 {
+                    THROW 'Chapter is immutable or stale'
+                };
+                COMMIT TRANSACTION;
+                """,
+                {
+                    "version_id": ensure_record_id(version_id),
+                    "chapter_id": ensure_record_id(chapter_id),
+                    "title": updated.title,
+                    "content": updated.content,
+                    "citations": updated.citations,
+                    "artifact": updated.artifact,
+                    "input_hash": updated.input_hash,
+                    "status": updated.status,
+                    "review_status": updated.review_status,
+                    "validation_status": updated.validation_status,
+                },
+            )
+        except RuntimeError as exc:
+            current_version = await _typed_get(
+                CourseVersion, version_id, "course_version"
+            )
+            if current_version.status not in mutable_statuses:
+                raise CourseImmutableError("Course version is immutable") from exc
+            current_chapter = await _typed_get(Chapter, chapter_id, "chapter")
+            if current_chapter.status == sm.ChapterStatus.PUBLISHED:
+                raise CourseImmutableError("Course artifact is immutable") from exc
+            raise CourseConflictError(
+                "Chapter update conflicted with another Course update"
+            ) from exc
+        return await _typed_get(Chapter, chapter_id, "chapter")
 
     @staticmethod
     async def publish_chapter(
@@ -560,28 +680,25 @@ class CourseService:
         )
         try:
             findings = [
-                ValidationFinding.model_validate(row["finding"])
-                for row in rows
+                ValidationFinding.model_validate(row["finding"]) for row in rows
             ]
             CourseGenerationService.assert_publishable(findings)
         except (KeyError, TypeError, ValueError, PublicationBlocked) as exc:
             raise CourseConflictError(
                 "Chapter has unresolved validation findings"
             ) from exc
-        chapter.status = sm.transition("chapter", chapter.status, sm.ChapterStatus.PUBLISHED)
+        chapter.status = sm.transition(
+            "chapter", chapter.status, sm.ChapterStatus.PUBLISHED
+        )
         chapter.published_at = datetime.now(timezone.utc)
         await chapter.save()
         return chapter
 
     @staticmethod
-    async def publish_current_chapter(
-        course_id: str, chapter_key: str
-    ) -> Chapter:
+    async def publish_current_chapter(course_id: str, chapter_key: str) -> Chapter:
         """Publish the latest chapter from the current approved Course version."""
 
-        _, version, chapter = await _current_chapter_records(
-            course_id, chapter_key
-        )
+        _, version, chapter = await _current_chapter_records(course_id, chapter_key)
         return await CourseService.publish_chapter(
             course_id, str(version.id), str(chapter.id)
         )
@@ -739,8 +856,7 @@ class CourseService:
                         ensure_record_id(str(chapter.id)) for chapter in latest
                     ],
                     "known_succeeded_run_ids": [
-                        ensure_record_id(run_id)
-                        for run_id in known_succeeded_run_ids
+                        ensure_record_id(run_id) for run_id in known_succeeded_run_ids
                     ],
                     "known_manual_chapter_ids": [
                         ensure_record_id(chapter_id)
@@ -876,9 +992,7 @@ class CourseService:
             )
             if lab.chapter is None:
                 raise NotFoundError("Course attempt ownership mismatch")
-            historical_chapter = await _typed_get(
-                Chapter, lab.chapter, "chapter"
-            )
+            historical_chapter = await _typed_get(Chapter, lab.chapter, "chapter")
             lab_key = _persistent_lab_key(lab)
             if (
                 str(lab.id) != attempt.lab
@@ -1006,11 +1120,7 @@ class CourseService:
             not in _artifact_block_keys(chapter.artifact if chapter else None)
             else "active"
         )
-        progress = (
-            Progress(**result[0])
-            if result
-            else Progress(course=course_id)
-        )
+        progress = Progress(**result[0]) if result else Progress(course=course_id)
         progress.chapter = chapter_id
         progress.chapter_key = chapter_key
         progress.block_key = block_key
