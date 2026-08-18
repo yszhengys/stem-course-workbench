@@ -3,14 +3,24 @@ import { describe, expect, it, vi } from 'vitest'
 import { submitEvidenceSource } from './evidence-source'
 import type { EligibleCourseSource } from '@/lib/types/course'
 
-const sources: EligibleCourseSource[] = [{
-  source_id: 'source:listed',
-  title: 'Slides',
-  filename: 'slides.pptx',
-  kind: 'pptx',
-  role: 'SUPPLEMENT',
-  associated: true,
-}]
+const sources: EligibleCourseSource[] = [
+  {
+    source_id: 'source:listed',
+    title: 'Slides',
+    filename: 'slides.pptx',
+    kind: 'pptx',
+    role: 'SUPPLEMENT',
+    associated: true,
+  },
+  {
+    source_id: 'source:manual',
+    title: 'Handout',
+    filename: 'handout.pdf',
+    kind: 'pdf',
+    role: null,
+    associated: false,
+  },
+]
 
 describe('submitEvidenceSource', () => {
   it('associates and builds a manually entered Source ID without sending a path', async () => {
@@ -30,9 +40,8 @@ describe('submitEvidenceSource', () => {
     expect(JSON.stringify(build.mock.calls)).not.toContain('path')
   })
 
-  it('surfaces an invalid manual Source error and never queues evidence', async () => {
-    const error = new Error('Source does not belong to this course Notebook')
-    const associate = vi.fn().mockRejectedValue(error)
+  it('rejects a Source ID missing from the eligible list before any request', async () => {
+    const associate = vi.fn()
     const build = vi.fn()
 
     await expect(submitEvidenceSource({
@@ -41,8 +50,9 @@ describe('submitEvidenceSource', () => {
       sources,
       associate,
       build,
-    })).rejects.toBe(error)
+    })).rejects.toThrow('eligible')
 
+    expect(associate).not.toHaveBeenCalled()
     expect(build).not.toHaveBeenCalled()
   })
 })

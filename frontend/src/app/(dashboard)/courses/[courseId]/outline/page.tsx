@@ -8,7 +8,13 @@ import { AlertTriangle, ArrowLeft, BookOpen, CheckCircle2, FileText, Network } f
 import { AppShell } from '@/components/layout/AppShell'
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
 import { CourseModelPicker } from '@/components/course/CourseModelPicker'
-import { CoursePageError, CoursePageLoading, CoursePageNotFound } from '@/components/course/CoursePageState'
+import {
+  CourseInlineError,
+  CourseInlineLoading,
+  CoursePageError,
+  CoursePageLoading,
+  CoursePageNotFound,
+} from '@/components/course/CoursePageState'
 import { CourseSourcePicker } from '@/components/course/CourseSourcePicker'
 import { OutlineApproval } from '@/components/course/OutlineApproval'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -17,7 +23,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import { QUERY_KEYS } from '@/lib/api/query-client'
-import { submitEvidenceSource } from '@/lib/course/evidence-source'
+import { IneligibleEvidenceSourceError, submitEvidenceSource } from '@/lib/course/evidence-source'
+import { courseStatusLabel, locatorKindLabel, sourceRoleLabel } from '@/lib/course/course-labels'
 import { selectableDefaultModel } from '@/lib/course/model-selection'
 import { useCommandStatus } from '@/lib/hooks/use-command-status'
 import {
@@ -55,6 +62,7 @@ export default function CourseOutlinePage() {
   const [outlineModel, setOutlineModel] = useState<ModelSelection | null>(null)
   const [evidenceCommandId, setEvidenceCommandId] = useState<string>()
   const [outlineCommandId, setOutlineCommandId] = useState<string>()
+  const [sourceValidationError, setSourceValidationError] = useState<string>()
 
   const evidenceStatus = useCommandStatus(evidenceCommandId, [
     QUERY_KEYS.course(courseId),
@@ -91,20 +99,28 @@ export default function CourseOutlinePage() {
 
   const handleSourceChange = (nextSourceId: string) => {
     setSourceId(nextSourceId)
+    setSourceValidationError(undefined)
     const source = sources.data?.find((item) => item.source_id === nextSourceId)
     if (source?.role) setSourceRole(source.role)
   }
 
   const handleEvidenceBuild = async () => {
     if (!sourceId.trim()) return
-    const job = await submitEvidenceSource({
-      sourceId,
-      role: sourceRole,
-      sources: sources.data ?? [],
-      associate: associateSource.mutateAsync,
-      build: buildEvidence.mutateAsync,
-    })
-    setEvidenceCommandId(job.command_id)
+    setSourceValidationError(undefined)
+    try {
+      const job = await submitEvidenceSource({
+        sourceId,
+        role: sourceRole,
+        sources: sources.data ?? [],
+        associate: associateSource.mutateAsync,
+        build: buildEvidence.mutateAsync,
+      })
+      setEvidenceCommandId(job.command_id)
+    } catch (error) {
+      if (error instanceof IneligibleEvidenceSourceError) {
+        setSourceValidationError(t('course.sourceNotEligible'))
+      }
+    }
   }
 
   const handleOutlineGenerate = async () => {
@@ -142,7 +158,7 @@ export default function CourseOutlinePage() {
               <h1 className="font-display text-2xl font-bold">{course.data.title}</h1>
               <p className="mt-1 text-sm text-muted-foreground">{t('course.outlineWorkspace')}</p>
             </div>
-            <Badge variant="secondary">{course.data.status}</Badge>
+            <Badge variant="secondary">{courseStatusLabel(t, course.data.status)}</Badge>
           </div>
 
           {(course.data.status === 'failed' || course.data.error_message) && (
@@ -172,10 +188,17 @@ export default function CourseOutlinePage() {
                     disabled={buildEvidence.isPending || evidenceStatus.isFetching}
                   />
                 )}
+                {sourceValidationError && (
+                  <Alert variant="destructive" role="alert">
+                    <AlertTriangle />
+                    <AlertTitle>{t('course.sourceNotEligibleTitle')}</AlertTitle>
+                    <AlertDescription>{sourceValidationError}</AlertDescription>
+                  </Alert>
+                )}
                 <Button
                   type="button"
                   onClick={() => void handleEvidenceBuild()}
-                  disabled={!sourceId.trim() || buildEvidence.isPending || evidenceStatus.isFetching}
+                  disabled={!sourceId.trim() || sources.isLoading || sources.isError || buildEvidence.isPending || evidenceStatus.isFetching}
                 >
                   {buildEvidence.isPending ? t('common.processing') : t('course.buildEvidence')}
                 </Button>
@@ -193,15 +216,23 @@ export default function CourseOutlinePage() {
                 <CardDescription>{t('course.generateOutlineDescription')}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
-                <CourseModelPicker
-                  options={models.data?.options ?? []}
-                  value={outlineModel}
-                  onChange={setOutlineModel}
-                  disabled={models.isLoading || generateOutline.isPending || outlineStatus.isFetching}
-                />
+                {models.isLoading ? (
+                  <CourseInlineLoading />
+                ) : models.isError ? (
+                  <CourseInlineError onRetry={() => void models.refetch()} />
+                ) : (
+                  <CourseModelPicker
+                    options={models.data?.options ?? []}
+                    value={outlineModel}
+                    onChange={setOutlineModel}
+                    disabled={generateOutline.isPending || outlineStatus.isFetching}
+                  />
+                )}
                 <div className="space-y-2">
                   <p className="text-sm font-medium">{t('course.evidenceAnchors')}</p>
-                  {anchors.isLoading ? <CoursePageLoading /> : anchors.data?.length ? (
+                  {anchors.isLoading ? <CourseInlineLoading /> : anchors.isError ? (
+                    <CourseInlineError onRetry={() => void anchors.refetch()} />
+                  ) : anchors.data?.length ? (
                     <div className="max-h-56 space-y-2 overflow-y-auto rounded-md border p-3">
                       {anchors.data.map((anchor) => (
                         <label key={anchor.anchor_id} className="flex cursor-pointer items-start gap-3 text-sm">
@@ -214,7 +245,9 @@ export default function CourseOutlinePage() {
                             )}
                           />
                           <span>
-                            <span className="font-medium">{anchor.source_role} · {anchor.locator.kind} {anchor.locator.index}</span>
+                            <span className="font-medium">
+                              {sourceRoleLabel(t, anchor.source_role)} · {locatorKindLabel(t, anchor.locator.kind)} {anchor.locator.index}
+                            </span>
                             <span className="mt-1 block text-muted-foreground">{anchor.locator.quote}</span>
                           </span>
                         </label>
@@ -225,7 +258,7 @@ export default function CourseOutlinePage() {
                 <Button
                   type="button"
                   onClick={() => void handleOutlineGenerate()}
-                  disabled={!outlineModel || selectedAnchorIds.length === 0 || generateOutline.isPending || outlineStatus.isFetching}
+                  disabled={models.isError || anchors.isError || !outlineModel || selectedAnchorIds.length === 0 || generateOutline.isPending || outlineStatus.isFetching}
                 >
                   {generateOutline.isPending ? t('common.processing') : t('course.generateOutline')}
                 </Button>
@@ -237,6 +270,11 @@ export default function CourseOutlinePage() {
               </CardContent>
             </Card>
           </div>
+
+          {course.data.outline_version_id && outline.isLoading && <CourseInlineLoading />}
+          {course.data.outline_version_id && outline.isError && (
+            <CourseInlineError onRetry={() => void outline.refetch()} />
+          )}
 
           {outlineArtifact && currentOutline && (
             <Card>
@@ -271,7 +309,7 @@ export default function CourseOutlinePage() {
                           const anchor = anchorsById.get(anchorId)
                           return (
                             <Badge key={anchorId} variant="outline" title={anchor?.locator.quote}>
-                              {anchor?.source_role ?? t('course.citation')} · {anchor?.locator.index ?? anchorId}
+                              {anchor ? sourceRoleLabel(t, anchor.source_role) : t('course.citation')} · {anchor?.locator.index ?? anchorId}
                             </Badge>
                           )
                         })}

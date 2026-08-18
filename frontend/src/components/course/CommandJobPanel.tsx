@@ -4,6 +4,7 @@ import { AlertCircle, CheckCircle2, Clock3, Loader2 } from 'lucide-react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { courseStatusLabel } from '@/lib/course/course-labels'
 
 interface CommandJobPanelProps {
   status?: string
@@ -24,7 +25,7 @@ export function CommandJobPanel({ status, errorMessage, timedOut = false }: Comm
   return (
     <Alert variant={timedOut || failed ? 'destructive' : 'default'}>
       <Icon className={running ? 'animate-spin' : ''} />
-      <AlertTitle>{timedOut ? t('course.jobTimedOut') : t('course.jobStatus', { status: status ?? '' })}</AlertTitle>
+      <AlertTitle>{timedOut ? t('course.jobTimedOut') : t('course.jobStatus', { status: courseStatusLabel(t, status ?? '') })}</AlertTitle>
       <AlertDescription>
         {timedOut
           ? t('course.jobTimedOutDescription')

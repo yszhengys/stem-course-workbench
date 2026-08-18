@@ -20,10 +20,6 @@ export function useCommandStatus(
   useEffect(() => {
     setIsTimedOut(false)
     invalidatedCommandRef.current = null
-    if (!commandId) return
-
-    const timer = window.setTimeout(() => setIsTimedOut(true), COMMAND_POLL_TIMEOUT_MS)
-    return () => window.clearTimeout(timer)
   }, [commandId])
 
   const query = useQuery({
@@ -32,6 +28,7 @@ export function useCommandStatus(
     enabled: Boolean(commandId) && !isTimedOut,
     retry: false,
     refetchInterval: (currentQuery) => {
+      if (currentQuery.state.error) return false
       const status = currentQuery.state.data?.status?.toLowerCase()
       if (isTimedOut || (status && (SUCCESS_STATES.has(status) || FAILURE_STATES.has(status)))) {
         return false
@@ -41,9 +38,15 @@ export function useCommandStatus(
     refetchIntervalInBackground: true,
   })
 
-  const status = query.data?.status.toLowerCase()
+  const status = query.isError ? 'failed' : query.data?.status.toLowerCase()
   const isSuccess = Boolean(status && SUCCESS_STATES.has(status))
-  const isFailure = Boolean(status && FAILURE_STATES.has(status))
+  const isFailure = query.isError || Boolean(status && FAILURE_STATES.has(status))
+
+  useEffect(() => {
+    if (!commandId || isSuccess || isFailure) return
+    const timer = window.setTimeout(() => setIsTimedOut(true), COMMAND_POLL_TIMEOUT_MS)
+    return () => window.clearTimeout(timer)
+  }, [commandId, isFailure, isSuccess])
 
   useEffect(() => {
     if (!commandId || !isSuccess || invalidatedCommandRef.current === commandId) return
@@ -55,10 +58,12 @@ export function useCommandStatus(
 
   return {
     ...query,
-    status: query.data?.status ?? (commandId ? 'new' : undefined),
+    status: query.isError ? 'failed' : (query.data?.status ?? (commandId ? 'new' : undefined)),
     isSuccess,
     isFailure,
     isTimedOut,
-    errorMessage: query.data?.error_message ?? null,
+    errorMessage: query.isError
+      ? (query.error instanceof Error ? query.error.message : 'Unable to read task status')
+      : (query.data?.error_message ?? null),
   }
 }

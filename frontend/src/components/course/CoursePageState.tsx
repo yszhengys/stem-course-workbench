@@ -29,6 +29,26 @@ export function CoursePageError({ onRetry }: { onRetry: () => void }) {
   )
 }
 
+export function CourseInlineLoading({ label }: { label?: string }) {
+  const { t } = useTranslation()
+  return (
+    <div role="status" className="flex items-center gap-2 rounded-md border p-3 text-sm text-muted-foreground">
+      <LoadingSpinner />
+      <span>{label ?? t('common.loading')}</span>
+    </div>
+  )
+}
+
+export function CourseInlineError({ onRetry }: { onRetry: () => void }) {
+  const { t } = useTranslation()
+  return (
+    <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+      <span>{t('course.sectionLoadFailed')}</span>
+      <Button size="sm" variant="outline" onClick={onRetry}>{t('common.retry')}</Button>
+    </div>
+  )
+}
+
 export function CoursePageEmpty({ action }: { action?: React.ReactNode }) {
   const { t } = useTranslation()
   return (

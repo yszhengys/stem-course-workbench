@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { findingKindLabel, findingSeverityLabel, findingStatusLabel } from '@/lib/course/course-labels'
 import type { CourseFinding } from '@/lib/types/course'
 
 export function ValidationFindingsPanel({
@@ -34,10 +35,10 @@ export function ValidationFindingsPanel({
           <div key={record.id} className="space-y-3 rounded-md border p-4">
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant={finding.severity === 'error' || finding.severity === 'high' ? 'destructive' : 'secondary'}>
-                {finding.severity}
+                {findingSeverityLabel(t, finding.severity)}
               </Badge>
-              <Badge variant="outline">{finding.kind}</Badge>
-              <Badge variant="outline">{finding.status}</Badge>
+              <Badge variant="outline">{findingKindLabel(t, finding.kind)}</Badge>
+              <Badge variant="outline">{findingStatusLabel(t, finding.status)}</Badge>
               <span className="font-mono text-xs text-muted-foreground">{finding.item_key}</span>
             </div>
             <p className="text-sm">{finding.message}</p>

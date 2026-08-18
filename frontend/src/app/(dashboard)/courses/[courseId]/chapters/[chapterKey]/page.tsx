@@ -3,22 +3,27 @@
 import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
-import { ArrowLeft, Beaker, BookCheck, CheckCircle2, FileWarning, NotebookPen } from 'lucide-react'
+import { ArrowLeft, Beaker, BookCheck, FileWarning, NotebookPen } from 'lucide-react'
 
 import { AppShell } from '@/components/layout/AppShell'
+import { ChapterPublicationGate } from '@/components/course/ChapterPublicationGate'
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
 import { CourseModelPicker } from '@/components/course/CourseModelPicker'
 import { CourseExercises } from '@/components/course/CourseExercises'
-import { CoursePageError, CoursePageLoading, CoursePageNotFound } from '@/components/course/CoursePageState'
+import {
+  CourseInlineError,
+  CourseInlineLoading,
+  CoursePageError,
+  CoursePageLoading,
+  CoursePageNotFound,
+} from '@/components/course/CoursePageState'
 import { LabRenderer } from '@/components/course/LabRenderer'
-import { ValidationFindingsPanel } from '@/components/course/ValidationFindingsPanel'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { MarkdownRenderer } from '@/components/ui/markdown-renderer'
 import { Textarea } from '@/components/ui/textarea'
 import { QUERY_KEYS } from '@/lib/api/query-client'
@@ -44,7 +49,16 @@ import {
   useUpdateCourseProgress,
 } from '@/lib/hooks/use-courses'
 import { useTranslation } from '@/lib/hooks/use-translation'
-import { isFindingBlockingPublication } from '@/lib/course/publication-policy'
+import {
+  canTransitionChapterProgress,
+  nextChapterProgressStatus,
+  selectChapterNotes,
+} from '@/lib/course/chapter-workflow'
+import {
+  courseStatusLabel,
+  provenanceLabel,
+  sourceRoleLabel,
+} from '@/lib/course/course-labels'
 import { selectableDefaultModel } from '@/lib/course/model-selection'
 import { canRequestChapterReview } from '@/lib/course/review-policy'
 import { isNotFoundError } from '@/lib/utils/error-handler'
@@ -162,15 +176,12 @@ export default function CourseChapterPage() {
     setNoteContent('')
   }
 
-  const chapterNotes = (notes.data ?? []).filter(
-    (note) => note.chapter_key === chapterKey || note.orphan_status === 'orphaned'
-  )
+  const chapterNotes = selectChapterNotes(notes.data ?? [], chapterKey)
   const chapterProgress = (progress.data ?? []).find(
     (item) => item.chapter_key === chapterKey && !item.block_key
   )
-  const publicationBlocked = (findings.data ?? []).some((record) =>
-    isFindingBlockingPublication(record.finding)
-  )
+  const progressStatus = chapterProgress?.status ?? 'not_started'
+  const nextProgressStatus = nextChapterProgressStatus(progressStatus)
 
   if (course.isLoading || outline.isLoading) {
     return <AppShell><CoursePageLoading /></AppShell>
@@ -190,6 +201,9 @@ export default function CourseChapterPage() {
   if (chapter.isError && !isNotFoundError(chapter.error)) {
     return <AppShell><div className="flex-1 overflow-y-auto p-6"><CoursePageError onRetry={() => void chapter.refetch()} /></div></AppShell>
   }
+  if (chapter.isLoading) {
+    return <AppShell><CoursePageLoading /></AppShell>
+  }
 
   return (
     <AppShell>
@@ -206,7 +220,7 @@ export default function CourseChapterPage() {
               <p className="mt-1 text-sm text-muted-foreground">{outlineChapter.purpose}</p>
             </div>
             <div className="flex gap-2">
-              <Badge variant="secondary">{chapter.data?.status ?? 'draft'}</Badge>
+              <Badge variant="secondary">{courseStatusLabel(t, chapter.data?.status ?? 'draft')}</Badge>
               {chapter.data?.version_no && <Badge variant="outline">v{chapter.data.version_no}</Badge>}
             </div>
           </div>
@@ -218,20 +232,31 @@ export default function CourseChapterPage() {
             </CardHeader>
             <CardContent className="space-y-5">
               <div className="grid gap-5 lg:grid-cols-2">
-                <div className="space-y-3">
-                  <h3 className="font-medium">{t('course.contentModel')}</h3>
-                  <CourseModelPicker options={models.data?.options ?? []} value={contentModel} onChange={setContentModel} />
-                </div>
-                <div className="space-y-3">
-                  <h3 className="font-medium">{t('course.reviewModel')}</h3>
-                  <CourseModelPicker options={models.data?.options ?? []} value={reviewModel} onChange={setReviewModel} />
-                </div>
+                {models.isLoading ? (
+                  <CourseInlineLoading />
+                ) : models.isError ? (
+                  <CourseInlineError onRetry={() => void models.refetch()} />
+                ) : (
+                  <>
+                    <div className="space-y-3">
+                      <h3 className="font-medium">{t('course.contentModel')}</h3>
+                      <CourseModelPicker options={models.data?.options ?? []} value={contentModel} onChange={setContentModel} />
+                    </div>
+                    <div className="space-y-3">
+                      <h3 className="font-medium">{t('course.reviewModel')}</h3>
+                      <CourseModelPicker options={models.data?.options ?? []} value={reviewModel} onChange={setReviewModel} />
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="space-y-2">
                 <p className="text-sm font-medium">{t('course.evidenceAnchors')}</p>
-                <div className="grid max-h-52 gap-2 overflow-y-auto rounded-md border p-3 md:grid-cols-2">
-                  {(anchors.data ?? []).map((anchor) => (
+                {anchors.isLoading ? <CourseInlineLoading /> : anchors.isError ? (
+                  <CourseInlineError onRetry={() => void anchors.refetch()} />
+                ) : (
+                  <div className="grid max-h-52 gap-2 overflow-y-auto rounded-md border p-3 md:grid-cols-2">
+                    {(anchors.data ?? []).map((anchor) => (
                     <label key={anchor.anchor_id} className="flex cursor-pointer items-start gap-2 text-xs">
                       <Checkbox
                         checked={selectedAnchorIds.includes(anchor.anchor_id)}
@@ -240,17 +265,18 @@ export default function CourseChapterPage() {
                           : previous.filter((item) => item !== anchor.anchor_id)
                         )}
                       />
-                      <span>{anchor.source_role} · {anchor.locator.index} · {anchor.locator.quote}</span>
+                      <span>{sourceRoleLabel(t, anchor.source_role)} · {anchor.locator.index} · {anchor.locator.quote}</span>
                     </label>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button onClick={() => void generate()} disabled={!contentModel || !selectedAnchorIds.length || generateChapter.isPending || generationStatus.isFetching}>
+                <Button onClick={() => void generate()} disabled={models.isError || anchors.isError || !contentModel || !selectedAnchorIds.length || generateChapter.isPending || generationStatus.isFetching}>
                   {requiresNewVersion ? t('course.regenerateChapter') : t('course.generateChapter')}
                 </Button>
-                <Button variant="outline" onClick={() => void review()} disabled={!artifact || !reviewModel || !selectedAnchorIds.length || !reviewAllowed || reviewChapter.isPending || reviewStatus.isFetching}>
+                <Button variant="outline" onClick={() => void review()} disabled={models.isError || anchors.isError || !artifact || !reviewModel || !selectedAnchorIds.length || !reviewAllowed || reviewChapter.isPending || reviewStatus.isFetching}>
                   {t('course.reviewChapter')}
                 </Button>
               </div>
@@ -283,7 +309,7 @@ export default function CourseChapterPage() {
                     <section key={section.key} id={section.key} className="scroll-mt-6 border-t pt-6">
                       <div className="mb-3 flex items-center justify-between gap-3">
                         <h3 className="font-display text-lg font-bold">{section.title}</h3>
-                        <Badge variant="outline">{section.provenance}</Badge>
+                        <Badge variant="outline">{provenanceLabel(t, section.provenance)}</Badge>
                       </div>
                       <MarkdownRenderer>{section.markdown}</MarkdownRenderer>
                     </section>
@@ -325,7 +351,9 @@ export default function CourseChapterPage() {
               <Card>
                 <CardHeader><CardTitle className="flex items-center gap-2"><Beaker className="size-5 text-teal" />{t('course.interactiveLabs')}</CardTitle><CardDescription>{t('course.safeLabNotice')}</CardDescription></CardHeader>
                 <CardContent className="space-y-6">
-                  {(labs.data ?? []).map((lab) => (
+                  {labs.isLoading ? <CourseInlineLoading /> : labs.isError ? (
+                    <CourseInlineError onRetry={() => void labs.refetch()} />
+                  ) : (labs.data ?? []).map((lab) => (
                     <div key={lab.lab_key} className="space-y-3">
                       <LabRenderer spec={lab.spec} />
                       <div className="flex gap-2">
@@ -358,7 +386,7 @@ export default function CourseChapterPage() {
                   <CourseExercises
                     exercises={artifact.exercises}
                     persistentLabKey={labs.data?.[0]?.lab_key}
-                    disabled={createAttempt.isPending}
+                    disabled={labs.isLoading || labs.isError || createAttempt.isPending}
                     onSave={(submission) => createAttempt.mutate(submission)}
                   />
                 </CardContent>
@@ -366,19 +394,18 @@ export default function CourseChapterPage() {
 
               <Card>
                 <CardHeader><CardTitle className="flex items-center gap-2"><BookCheck className="size-5 text-fern" />{t('course.reviewAndPublish')}</CardTitle></CardHeader>
-                <CardContent className="space-y-5">
-                  <ValidationFindingsPanel
-                    findings={findings.data ?? []}
-                    disabled={updateFinding.isPending}
+                <CardContent>
+                  <ChapterPublicationGate
+                    chapterStatus={currentChapter.status}
+                    findings={findings.data}
+                    isLoading={findings.isLoading}
+                    isError={findings.isError}
+                    isUpdating={updateFinding.isPending}
+                    isPublishing={publishChapter.isPending}
+                    onRetry={() => void findings.refetch()}
                     onUpdate={(findingId, status, resolution_reason) => updateFinding.mutate({ findingId, status, resolution_reason })}
+                    onPublish={() => publishChapter.mutate()}
                   />
-                  {publicationBlocked && <p className="text-sm text-destructive">{t('course.publishBlocked')}</p>}
-                  <Button
-                    onClick={() => publishChapter.mutate()}
-                    disabled={currentChapter.status !== 'ready' || publicationBlocked || publishChapter.isPending}
-                  >
-                    {currentChapter.status === 'published' ? t('course.published') : t('course.publishChapter')}
-                  </Button>
                 </CardContent>
               </Card>
 
@@ -386,6 +413,9 @@ export default function CourseChapterPage() {
                 <Card>
                   <CardHeader><CardTitle className="flex items-center gap-2"><NotebookPen className="size-5 text-gold" />{t('course.notes')}</CardTitle></CardHeader>
                   <CardContent className="space-y-4">
+                    {notes.isLoading ? <CourseInlineLoading /> : notes.isError ? (
+                      <CourseInlineError onRetry={() => void notes.refetch()} />
+                    ) : null}
                     <Textarea value={noteContent} onChange={(event) => setNoteContent(event.target.value)} placeholder={t('course.notePlaceholder')} />
                     <select value={noteBlockKey} onChange={(event) => setNoteBlockKey(event.target.value)} className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm">
                       {blockKeys.map((key) => <option key={key} value={key}>{key}</option>)}
@@ -394,7 +424,7 @@ export default function CourseChapterPage() {
                     <div className="space-y-3">
                       {chapterNotes.map((note) => (
                         <div key={note.id} className="rounded-md border p-3 text-sm">
-                          <div className="mb-2 flex items-center justify-between gap-2"><Badge variant={note.orphan_status === 'orphaned' ? 'destructive' : 'outline'}>{note.orphan_status}</Badge><span className="font-mono text-xs">{note.block_key}</span></div>
+                          <div className="mb-2 flex items-center justify-between gap-2"><Badge variant={note.orphan_status === 'orphaned' ? 'destructive' : 'outline'}>{courseStatusLabel(t, note.orphan_status)}</Badge><span className="font-mono text-xs">{note.block_key}</span></div>
                           <p>{note.content}</p>
                           {note.orphan_status === 'orphaned' && (
                             <div className="mt-3 flex gap-2">
@@ -414,16 +444,30 @@ export default function CourseChapterPage() {
                 <Card>
                   <CardHeader><CardTitle>{t('course.learningRecord')}</CardTitle></CardHeader>
                   <CardContent className="space-y-4">
-                    <div className="flex items-center justify-between gap-3"><span>{t('course.chapterProgress')}</span><Badge variant="outline">{chapterProgress?.status ?? 'not_started'}</Badge></div>
-                    <div className="flex gap-2">
-                      <Button variant="outline" onClick={() => updateProgress.mutate({ chapter_key: chapterKey, block_key: null, status: 'in_progress' })}>{t('course.markInProgress')}</Button>
-                      <Button onClick={() => updateProgress.mutate({ chapter_key: chapterKey, block_key: null, status: 'completed' })}>{t('course.markComplete')}</Button>
-                    </div>
+                    {progress.isLoading ? <CourseInlineLoading /> : progress.isError ? (
+                      <CourseInlineError onRetry={() => void progress.refetch()} />
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between gap-3"><span>{t('course.chapterProgress')}</span><Badge variant="outline">{courseStatusLabel(t, progressStatus)}</Badge></div>
+                        {nextProgressStatus && (
+                          <Button
+                            variant={nextProgressStatus === 'completed' ? 'default' : 'outline'}
+                            disabled={updateProgress.isPending || !canTransitionChapterProgress(progressStatus, nextProgressStatus)}
+                            onClick={() => updateProgress.mutate({ chapter_key: chapterKey, block_key: null, status: nextProgressStatus })}
+                          >
+                            {nextProgressStatus === 'completed' ? t('course.markComplete') : t('course.markInProgress')}
+                          </Button>
+                        )}
+                      </>
+                    )}
                     <div>
                       <h4 className="mb-2 font-medium">{t('course.attemptHistory')}</h4>
-                      {(attempts.data ?? []).map(({ lab_key, attempt }) => (
+                      {attempts.isLoading ? <CourseInlineLoading /> : attempts.isError ? (
+                        <CourseInlineError onRetry={() => void attempts.refetch()} />
+                      ) : (attempts.data ?? []).map(({ lab_key, attempt }) => (
                         <div key={attempt.id} className="mb-2 rounded-md border p-3 text-xs">
                           <span className="font-mono">{attempt.exercise_key ?? lab_key}</span>
+                          <Badge className="ml-2" variant="secondary">{courseStatusLabel(t, attempt.status)}</Badge>
                           <span className="ml-2 text-muted-foreground">{JSON.stringify(attempt.answers)}</span>
                           {attempt.answer_revealed && <Badge className="ml-2" variant="outline">{t('course.answerRevealed')}</Badge>}
                           {attempt.transfer_completed && <Badge className="ml-2" variant="outline">{t('course.transferComplete')}</Badge>}

@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useCourses } from '@/lib/hooks/use-courses'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { courseStatusLabel } from '@/lib/course/course-labels'
 
 export default function CoursesPage() {
   const { t } = useTranslation()
@@ -41,7 +42,7 @@ export default function CoursesPage() {
                     <CardHeader>
                       <div className="mb-2 flex items-center justify-between gap-3">
                         <BookOpen className="size-5 text-fern" />
-                        <Badge variant="secondary">{course.status}</Badge>
+                        <Badge variant="secondary">{courseStatusLabel(t, course.status)}</Badge>
                       </div>
                       <CardTitle>{course.title}</CardTitle>
                       <CardDescription>{course.subject ?? t('course.subjectUnknown')}</CardDescription>

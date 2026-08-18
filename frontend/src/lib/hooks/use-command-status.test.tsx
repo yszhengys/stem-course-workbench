@@ -106,4 +106,26 @@ describe('useCommandStatus', () => {
     expect(result.current.isTimedOut).toBe(true)
     expect(invalidate).not.toHaveBeenCalled()
   })
+
+  it('fails closed and stops polling when the request or response validation fails', async () => {
+    vi.mocked(commandsApi.getStatus).mockRejectedValue(new Error('Invalid command response'))
+
+    const { result } = renderHook(
+      () => useCommandStatus('command:one', [['courses']]),
+      { wrapper }
+    )
+
+    await flush()
+
+    expect(result.current.status).toBe('failed')
+    expect(result.current.isFailure).toBe(true)
+    expect(result.current.errorMessage).toBe('Invalid command response')
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(COMMAND_POLL_TIMEOUT_MS)
+    })
+    expect(commandsApi.getStatus).toHaveBeenCalledTimes(1)
+    expect(result.current.isTimedOut).toBe(false)
+    expect(invalidate).not.toHaveBeenCalled()
+  })
 })
