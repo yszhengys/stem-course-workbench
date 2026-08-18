@@ -52,8 +52,8 @@ STEM Course Workbench 是基于 Open Notebook 的本地优先课程制作工作�
 1. 启动后，在“新建课程”页面输入课程名称。
 2. 学科选择“数学”或“物理”。课程内容语言可以选择简体中文或英文；界面语言与课程内容语言相互独立。
 3. 点击“创建课程”。系统会同时创建并绑定一个 Open Notebook Notebook，然后进入课程大纲工作区。
-4. 如果材料尚未存在，打开“Sources/来源”页面上传 PDF 或 PPTX，再回到课程大纲页。
-5. 在来源选择器中选择文件；必要时也可手动输入现有的 `source:...` ID。选择 `PRIMARY`（主要教材）或 `SUPPLEMENT`（补充材料）。
+4. 如果材料尚未存在，打开“Sources/来源”页面上传 PDF 或 PPTX，并把 Source 加入与课程同名、由系统自动创建的 Notebook，再回到课程大纲页。
+5. 在来源选择器中选择文件；必要时也可手动输入已经属于该 Course Notebook 的 `source:...` ID。系统会拒绝其他 Notebook、非 PDF/PPTX 或没有本地原文件的 Source。选择 `PRIMARY`（主要教材）或 `SUPPLEMENT`（补充材料）。
 6. 点击“构建证据”，等待任务状态从 queued/running 变为 succeeded。失败时页面显示后台错误，不会自动换模型或静默重试。
 
 课程只接受带原始文件的 `.pdf` 和 `.pptx` Source：
@@ -177,7 +177,7 @@ API 和 worker 使用 `.env`，worker 默认并发为 5。Course 的 Docling 与
 | 页面空白或一直检查连接 | 运行 `status`；查看 `logs api` 与 `logs frontend`；确认 `5055/health` 和 `3000/courses/new` 可访问后刷新。 |
 | Docker 未运行 | 启动 Docker Desktop，再重新运行启动脚本。 |
 | 8000/5055/3000 被占用 | 脚本会拒绝接管不属于本项目的服务。先确认并正常停止占用者，不要按端口强杀。 |
-| 没有可选材料 | 到 Sources 上传 PDF/PPTX；或在课程页手动输入该 Source 的 `source:...` ID。 |
+| 没有可选材料 | 到 Sources 上传 PDF/PPTX，并把它加入与课程同名的 Notebook；手动 ID 也必须已经属于该 Notebook。 |
 | `.ppt` 被拒绝 | 用 PowerPoint/LibreOffice 转换为 `.pptx`。 |
 | Docling 报错或无锚点 | 检查文件是否损坏、加密或为空；查看 worker 日志；确认本地 Docling 依赖和模型缓存可用。 |
 | 模型不可选 | Codex 需安装并登录；Ollama 需运行且已拉取受支持模型；Open Notebook 模型需先注册。 |
