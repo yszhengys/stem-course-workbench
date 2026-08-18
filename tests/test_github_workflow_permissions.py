@@ -33,3 +33,18 @@ def test_development_build_frees_disk_whenever_an_image_is_built() -> None:
     )
 
     assert cleanup["if"] == image_build["if"]
+
+
+def test_regular_image_build_does_not_duplicate_large_cache_on_runner() -> None:
+    """Exporting the ML image cache locally can exhaust the runner disk."""
+    workflow = _development_workflow()
+    steps = workflow["jobs"]["build-regular"]["steps"]
+    step_names = {step["name"] for step in steps}
+    image_build = next(
+        step for step in steps if step["name"] == "Build and push regular image"
+    )
+
+    assert "Cache Docker layers" not in step_names
+    assert "Move cache" not in step_names
+    assert "cache-from" not in image_build["with"]
+    assert "cache-to" not in image_build["with"]
