@@ -77,7 +77,7 @@ export const outlineChapterSchema = z.object({
   prerequisite_keys: z.array(z.string()),
   objective_keys: z.array(z.string()).min(1),
   anchor_ids: z.array(z.string()).min(1),
-  lab_keys: z.array(z.string()),
+  lab_keys: z.array(z.string()).min(1),
 }).strict()
 
 export const courseOutlineArtifactSchema = z.object({

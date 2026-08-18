@@ -144,6 +144,7 @@ def test_outline_requires_grounded_dag_prerequisites_and_proposed_labs():
                 "prerequisite_keys": ["limits"],
                 "objective_keys": ["derivative"],
                 "anchor_ids": ["anchor:one"],
+                "lab_keys": ["derivative-plot"],
             },
         ],
         "concepts": [
@@ -159,20 +160,49 @@ def test_outline_requires_grounded_dag_prerequisites_and_proposed_labs():
     service = CourseGenerationService()
 
     outline = service.validate_outline(
-        valid, {"anchor:one"}, available_lab_keys={"limit-plot"}
+        valid,
+        {"anchor:one"},
+        available_lab_keys={"derivative-plot", "limit-plot"},
     )
     assert outline.chapters[1].prerequisite_keys == ["limits"]
 
     invalid = {**valid, "chapters": list(reversed(valid["chapters"]))}
     with pytest.raises(ValueError, match="earlier"):
         service.validate_outline(
-            invalid, {"anchor:one"}, available_lab_keys={"limit-plot"}
+            invalid,
+            {"anchor:one"},
+            available_lab_keys={"derivative-plot", "limit-plot"},
         )
     with pytest.raises(ValueError, match="Lab"):
         service.validate_outline(valid, {"anchor:one"}, available_lab_keys=set())
 
     with pytest.raises(TypeError):
         service.validate_outline(valid, {"anchor:one"})  # type: ignore[call-arg]
+
+
+def test_outline_validation_fails_closed_when_a_constructed_chapter_has_no_lab():
+    from open_notebook.course.contracts import CourseOutlineArtifact, OutlineChapter
+
+    unsafe_outline = CourseOutlineArtifact.model_construct(
+        title="Course",
+        chapters=[
+            OutlineChapter.model_construct(
+                key="limits",
+                title="Limits",
+                purpose="Learn limits.",
+                objective_keys=["limit"],
+                anchor_ids=["anchor:one"],
+                lab_keys=[],
+            )
+        ],
+        concepts=[],
+        dependency_edges=[],
+    )
+
+    with pytest.raises(ValueError, match="at least one Lab"):
+        CourseGenerationService.validate_outline(
+            unsafe_outline, {"anchor:one"}, available_lab_keys={"limit-plot"}
+        )
 
 
 @pytest.mark.asyncio
@@ -200,7 +230,7 @@ async def test_outline_generation_requires_and_applies_approved_lab_set():
             course_id="course:one",
             anchor_ids=["anchor:one"],
             evidence=["[anchor:one]: fact"],
-            available_lab_keys=set(),
+            available_lab_keys={"approved"},
             model=ModelSelection(
                 adapter="codex_cli",
                 model="gpt-5.6-sol",
@@ -210,24 +240,8 @@ async def test_outline_generation_requires_and_applies_approved_lab_set():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("available_lab_keys", "expected_policy"),
-    [
-        (
-            {"zeta-lab", "alpha-lab"},
-            'Allowed lab keys (exact sorted set): ["alpha-lab","zeta-lab"]. '
-            "Each chapter may use any subset and must not invent other keys.",
-        ),
-        (
-            set(),
-            "Allowed lab keys (exact sorted set): []. Every chapter must set "
-            "lab_keys to [].",
-        ),
-    ],
-)
-async def test_outline_prompt_declares_exact_sorted_safe_lab_proposal_set(
-    available_lab_keys: set[str], expected_policy: str
-) -> None:
+async def test_outline_prompt_requires_each_chapter_to_select_from_exact_safe_lab_set() -> None:
+    available_lab_keys = {"zeta-lab", "alpha-lab"}
     payload = {
         "title": "Course",
         "chapters": [
@@ -237,7 +251,7 @@ async def test_outline_prompt_declares_exact_sorted_safe_lab_proposal_set(
                 "purpose": "Purpose",
                 "objective_keys": ["concept"],
                 "anchor_ids": ["anchor:one"],
-                "lab_keys": [],
+                "lab_keys": ["alpha-lab"],
             }
         ],
         "concepts": [
@@ -259,7 +273,11 @@ async def test_outline_prompt_declares_exact_sorted_safe_lab_proposal_set(
         ),
     )
 
-    assert expected_policy in adapter.calls[0].prompt
+    assert (
+        'Allowed lab keys (exact sorted set): ["alpha-lab","zeta-lab"]. '
+        "Every chapter must select at least one key from this exact allowed set "
+        "and must not invent other keys."
+    ) in adapter.calls[0].prompt
 
 
 def test_grounded_context_validates_selected_anchor_integrity():

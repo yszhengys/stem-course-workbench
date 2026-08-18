@@ -20,6 +20,7 @@ describe('CourseSourcePicker', () => {
     render(
       <CourseSourcePicker
         sources={sources}
+        notebookId="notebook:course space"
         sourceId=""
         role="PRIMARY"
         onSourceIdChange={onSourceIdChange}
@@ -40,6 +41,7 @@ describe('CourseSourcePicker', () => {
     const { rerender } = render(
       <CourseSourcePicker
         sources={sources}
+        notebookId="notebook:course space"
         sourceId=""
         role="PRIMARY"
         onSourceIdChange={onSourceIdChange}
@@ -55,12 +57,16 @@ describe('CourseSourcePicker', () => {
     rerender(
       <CourseSourcePicker
         sources={[]}
+        notebookId="notebook:course space"
         sourceId=""
         role="PRIMARY"
         onSourceIdChange={onSourceIdChange}
         onRoleChange={vi.fn()}
       />
     )
-    expect(screen.getByRole('link', { name: 'course.goToSources' })).toHaveAttribute('href', '/sources')
+    expect(screen.getByRole('link', { name: 'course.goToSources' })).toHaveAttribute(
+      'href',
+      '/notebooks/notebook%3Acourse%20space'
+    )
   })
 })

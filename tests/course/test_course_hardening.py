@@ -17,6 +17,7 @@ from open_notebook.course.contracts import (
     FunctionPlotLabSpec,
     GenerationResult,
     ModelSelection,
+    OutlineChapter,
 )
 from open_notebook.course.evidence_service import EvidenceService
 from open_notebook.course.models import (
@@ -79,6 +80,18 @@ def test_public_contracts_forbid_extra_input_and_lock_model_defaults():
             code="alert(1)",  # type: ignore[call-arg]
         )
     assert GenerationResult[int](success=True, stage="outline", output=1).output == 1
+
+
+def test_outline_chapter_requires_at_least_one_safe_lab_key():
+    with pytest.raises(ValidationError, match="lab_keys"):
+        OutlineChapter(
+            key="limits",
+            title="Limits",
+            purpose="Learn limits.",
+            objective_keys=["limit"],
+            anchor_ids=["anchor:one"],
+            lab_keys=[],
+        )
 
 
 @pytest.mark.parametrize(

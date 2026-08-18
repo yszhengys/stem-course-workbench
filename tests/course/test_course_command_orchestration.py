@@ -146,6 +146,27 @@ def test_outline_request_forbids_untrusted_generation_inputs(extra: dict[str, ob
         CourseOutlineGenerateRequest.model_validate(payload)
 
 
+@pytest.mark.parametrize("lab_keys", [[], ["  "], ["lab-1", "lab-1"]])
+def test_outline_request_requires_unique_nonblank_safe_lab_keys(
+    lab_keys: list[str],
+) -> None:
+    from api.models import CourseOutlineGenerateRequest
+
+    with pytest.raises(ValidationError, match="available_lab_keys|lab keys"):
+        CourseOutlineGenerateRequest.model_validate(
+            {
+                "anchor_ids": ["anchor:a"],
+                "prompt_version": "v1",
+                "available_lab_keys": lab_keys,
+                "model": {
+                    "adapter": "codex_cli",
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "max",
+                },
+            }
+        )
+
+
 def test_generation_request_rejects_duplicate_anchors_and_invalid_model() -> None:
     from api.models import CourseChapterGenerateRequest
 
@@ -1377,6 +1398,7 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
                 "purpose": "Learn motion.",
                 "objective_keys": ["motion"],
                 "anchor_ids": anchor_ids,
+                "lab_keys": ["motion-plot"],
             }
         ],
         concepts=[
@@ -2101,6 +2123,7 @@ async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
                     "purpose": "Learn.",
                     "objective_keys": ["concept"],
                     "anchor_ids": [anchor.anchor_id],
+                    "lab_keys": ["limit-plot"],
             }
         ],
         concepts=[
@@ -2176,7 +2199,7 @@ async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
     command_args = {
         "course_id": "course:force",
         "anchor_ids": [anchor.anchor_id],
-        "available_lab_keys": [],
+        "available_lab_keys": ["limit-plot"],
         "prompt_version": "v1",
         "model": model.model_dump(mode="json"),
     }
@@ -2210,7 +2233,7 @@ async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
         command_id="command:first",
         course_id="course:force",
         anchor_ids=[anchor.anchor_id],
-        available_lab_keys=[],
+        available_lab_keys=["limit-plot"],
         model=model,
         prompt_version="v1",
     )
@@ -2219,7 +2242,7 @@ async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
         command_id="command:second",
         course_id="course:force",
         anchor_ids=[anchor.anchor_id],
-        available_lab_keys=[],
+        available_lab_keys=["limit-plot"],
         model=model,
         prompt_version="v1",
     )
@@ -2228,7 +2251,7 @@ async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
         command_id="command:first",
         course_id="course:force",
         anchor_ids=[anchor.anchor_id],
-        available_lab_keys=[],
+        available_lab_keys=["limit-plot"],
         model=model,
         prompt_version="v1",
     )
@@ -2441,6 +2464,7 @@ async def test_active_outline_replay_of_approved_artifact_is_read_only(
                 "purpose": "Learn limits.",
                 "objective_keys": ["limit"],
                 "anchor_ids": ["anchor:one"],
+                "lab_keys": ["limit-plot"],
             }
         ],
         concepts=[
@@ -2519,7 +2543,7 @@ async def test_active_outline_replay_of_approved_artifact_is_read_only(
         command_id="command:outline-replay",
         course_id="course:one",
         anchor_ids=["anchor:one"],
-        available_lab_keys=[],
+        available_lab_keys=["limit-plot"],
         model=selection,
         prompt_version="v1",
     )
@@ -2562,6 +2586,7 @@ async def test_re_review_ignores_failed_partial_and_blocks_on_high_finding(
                 "purpose": "Learn limits.",
                 "objective_keys": ["limit"],
                 "anchor_ids": ["anchor:one"],
+                "lab_keys": ["limit-plot"],
             }
         ],
         concepts=[
@@ -2743,6 +2768,7 @@ async def test_current_chapter_requires_key_from_complete_approved_outline(
                 "purpose": "Learn limits.",
                 "objective_keys": ["limit"],
                 "anchor_ids": ["anchor:one"],
+                "lab_keys": ["limit-plot"],
             }
         ],
         concepts=[

@@ -51,6 +51,23 @@ describe('Course V2 contracts', () => {
     })).toThrow()
   })
 
+  it('requires each outline chapter to select a safe lab proposal', () => {
+    expect(() => courseOutlineArtifactSchema.parse({
+      title: 'Outline',
+      chapters: [{
+        key: 'limits',
+        title: 'Limits',
+        purpose: 'Learn limits',
+        prerequisite_keys: [],
+        objective_keys: ['continuity'],
+        anchor_ids: ['anchor:one'],
+        lab_keys: [],
+      }],
+      concepts: [{ key: 'continuity', label: 'Continuity', anchor_ids: ['anchor:one'] }],
+      dependency_edges: [],
+    })).toThrow()
+  })
+
   it('does not accept a server path in eligible Source metadata', () => {
     expect(() => eligibleCourseSourceSchema.parse({
       source_id: 'source:one',

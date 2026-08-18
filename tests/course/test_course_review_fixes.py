@@ -70,6 +70,7 @@ def approved_outline() -> dict:
                 "purpose": "Learn limits.",
                 "objective_keys": ["limit"],
                 "anchor_ids": ["anchor:one"],
+                "lab_keys": ["limit-plot"],
             }
         ],
         "concepts": [
@@ -273,6 +274,7 @@ async def test_version_publish_requires_latest_chapter_for_every_outline_key(
             "purpose": "Learn derivatives.",
             "objective_keys": ["limit"],
             "anchor_ids": ["anchor:one"],
+            "lab_keys": ["derivative-plot"],
         }
     )
     course = Course(

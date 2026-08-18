@@ -177,7 +177,7 @@ class OutlineChapter(CourseContract):
     prerequisite_keys: list[str] = Field(default_factory=list, max_length=100)
     objective_keys: list[str] = Field(min_length=1, max_length=100)
     anchor_ids: list[str] = Field(min_length=1, max_length=100)
-    lab_keys: list[str] = Field(default_factory=list, max_length=20)
+    lab_keys: list[str] = Field(min_length=1, max_length=20)
 
     _safe_text = field_validator("title", "purpose")(_validate_generated_text)
 

@@ -17,7 +17,7 @@ This fork adds a STEM course workbench on top of Open Notebook v1.14.0: PDF/PPTX
 5. **Approval gate contract.** The outline approval (`确认大纲`) is an exact-match gate after normalization (trim + NFC + per-line compare, tolerant of a trailing newline). Normalization rules live in code and are unit-tested.
 6. **Serialization stays domain-scoped.** Docling/Ollama-heavy course jobs serialize via a course-domain lock; the global worker concurrency knob is left at its default (upstream jobs keep their parallelism). No per-command queue changes to the upstream worker.
 7. **Models are configurable, defaults are explicit.** Default routing: DeepSeek V4 Pro for generation (configurable), an independent review pass for high-risk findings, with Codex CLI / Ollama as documented alternatives. Provider-exclusive behavior stays inside provider adapters, per PDR-002.
-8. **Evidence stays out of the repository.** Raw course material lives only in gitignored local directories (`course_evidence/`, `course_originals/`); the repo stays public.
+8. **Evidence stays out of Git.** Raw course material lives only in gitignored local directories (`course_evidence/`, `course_originals/`), regardless of repository visibility; this delivery repository is private.
 
 ## Alternatives considered
 

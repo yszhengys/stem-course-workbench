@@ -108,6 +108,8 @@ Learn more about our project at [https://www.open-notebook.ai](https://www.open-
 
 ## 🚀 Quick Start (2 Minutes)
 
+> **上游 Open Notebook 部署路径：** 以下 Docker quick-start 用于通用 Open Notebook 部署，**不会**启动本分支的 Course Workbench 宿主机工作流。Course 用户请返回上方并运行 `./scripts/course-workbench.sh`。
+
 ### Prerequisites
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed
 - That's it! (API keys configured later in the UI)

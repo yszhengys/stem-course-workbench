@@ -12,6 +12,8 @@ STEM Course Workbench 是基于 Open Notebook 的本地优先课程制作工作�
 ./scripts/course-workbench.sh
 ```
 
+如果保存的界面语言或浏览器 locale 不是中文，可在侧边栏的语言菜单切换为中文；这不会改变其他 Open Notebook 用户的默认语言。
+
 脚本会：
 
 1. 安全创建或补全私有 `.env`，生成非占位加密密钥，并把权限设为 `600`；
@@ -52,7 +54,7 @@ STEM Course Workbench 是基于 Open Notebook 的本地优先课程制作工作�
 1. 启动后，在“新建课程”页面输入课程名称。
 2. 学科选择“数学”或“物理”。课程内容语言可以选择简体中文或英文；界面语言与课程内容语言相互独立。
 3. 点击“创建课程”。系统会同时创建并绑定一个 Open Notebook Notebook，然后进入课程大纲工作区。
-4. 如果材料尚未存在，打开“Sources/来源”页面上传 PDF 或 PPTX，并把 Source 加入与课程同名、由系统自动创建的 Notebook，再回到课程大纲页。
+4. 如果材料尚未存在，点击页面 CTA 会打开这个 Course 自己的 Notebook；在那里上传 PDF 或 PPTX 会自动保留 Notebook 上下文，再回到课程大纲页。
 5. 在来源选择器中选择文件；必要时也可手动输入已经属于该 Course Notebook 的 `source:...` ID。系统会拒绝其他 Notebook、非 PDF/PPTX 或没有本地原文件的 Source。选择 `PRIMARY`（主要教材）或 `SUPPLEMENT`（补充材料）。
 6. 点击“构建证据”，等待任务状态从 queued/running 变为 succeeded。失败时页面显示后台错误，不会自动换模型或静默重试。
 

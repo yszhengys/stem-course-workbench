@@ -194,6 +194,7 @@ export default function CourseOutlinePage() {
                 ) : (
                   <CourseSourcePicker
                     sources={sources.data ?? []}
+                    notebookId={course.data.notebook}
                     sourceId={sourceId}
                     role={sourceRole}
                     onSourceIdChange={handleSourceChange}

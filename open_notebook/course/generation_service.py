@@ -142,6 +142,8 @@ class CourseGenerationService:
         model: ModelSelection,
         prompt_version: str = "v1",
     ) -> CourseOutlineArtifact:
+        if not available_lab_keys:
+            raise ValueError("At least one approved Lab key is required")
         request = GenerationRequest(
             stage="outline",
             course_id=course_id,
@@ -156,16 +158,11 @@ class CourseGenerationService:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        if available_lab_keys:
-            lab_policy = (
-                f"Allowed lab keys (exact sorted set): {lab_keys_json}. "
-                "Each chapter may use any subset and must not invent other keys."
-            )
-        else:
-            lab_policy = (
-                "Allowed lab keys (exact sorted set): []. "
-                "Every chapter must set lab_keys to []."
-            )
+        lab_policy = (
+            f"Allowed lab keys (exact sorted set): {lab_keys_json}. "
+            "Every chapter must select at least one key from this exact allowed set "
+            "and must not invent other keys."
+        )
         generated = await adapter.generate(
             request,
             CourseOutlineArtifact,
@@ -330,6 +327,8 @@ class CourseGenerationService:
         if len(all_lab_keys) != len(set(all_lab_keys)):
             raise ValueError("Outline lab keys must be unique")
         for chapter in outline.chapters:
+            if not chapter.lab_keys:
+                raise ValueError(f"Chapter {chapter.key} must select at least one Lab")
             if not chapter.anchor_ids:
                 raise ValueError(f"Chapter {chapter.key} must be anchored")
             unknown_objectives = set(chapter.objective_keys) - concept_keys

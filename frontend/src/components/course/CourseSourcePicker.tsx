@@ -9,6 +9,7 @@ import type { EligibleCourseSource, SourceRole } from '@/lib/types/course'
 
 interface CourseSourcePickerProps {
   sources: EligibleCourseSource[]
+  notebookId: string
   sourceId: string
   role: SourceRole
   onSourceIdChange: (sourceId: string) => void
@@ -18,6 +19,7 @@ interface CourseSourcePickerProps {
 
 export function CourseSourcePicker({
   sources,
+  notebookId,
   sourceId,
   role,
   onSourceIdChange,
@@ -48,7 +50,10 @@ export function CourseSourcePicker({
         {sources.length === 0 && (
           <p className="text-sm text-muted-foreground">
             {t('course.noEligibleSources')}{' '}
-            <Link className="font-medium text-primary underline-offset-4 hover:underline" href="/sources">
+            <Link
+              className="font-medium text-primary underline-offset-4 hover:underline"
+              href={`/notebooks/${encodeURIComponent(notebookId)}`}
+            >
               {t('course.goToSources')}
             </Link>
           </p>

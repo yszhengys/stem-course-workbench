@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import CourseOutlinePage from './page'
@@ -94,6 +94,7 @@ describe('CourseOutlinePage', () => {
     vi.mocked(useCourse).mockReturnValue(queryResult({
       id: 'course:one',
       title: 'Calculus',
+      notebook: 'notebook:course space',
       status: 'outline_ready',
       error_message: null,
       outline_version_id: null,
@@ -180,5 +181,44 @@ describe('CourseOutlinePage', () => {
 
     expect(screen.queryByText('Cached stale outline v1')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'course.approveOutline' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the no-source CTA in the loaded Course Notebook', () => {
+    render(<CourseOutlinePage />)
+
+    expect(screen.getByRole('link', { name: 'course.goToSources' })).toHaveAttribute(
+      'href',
+      '/notebooks/notebook%3Acourse%20space'
+    )
+  })
+
+  it('continues associating and building the selected eligible Source', async () => {
+    const associate = mutationResult()
+    const build = mutationResult()
+    associate.mutateAsync.mockResolvedValue({})
+    build.mutateAsync.mockResolvedValue({ command_id: 'command:evidence' })
+    vi.mocked(useAssociateCourseSource).mockReturnValue(associate as unknown as ReturnType<typeof useAssociateCourseSource>)
+    vi.mocked(useBuildCourseEvidence).mockReturnValue(build as unknown as ReturnType<typeof useBuildCourseEvidence>)
+    vi.mocked(useEligibleCourseSources).mockReturnValue(queryResult([{
+      source_id: 'source:pdf',
+      title: 'Textbook',
+      filename: 'book.pdf',
+      kind: 'pdf',
+      role: null,
+      associated: false,
+    }]) as unknown as ReturnType<typeof useEligibleCourseSources>)
+
+    render(<CourseOutlinePage />)
+    fireEvent.change(screen.getByLabelText('course.sourcePicker'), {
+      target: { value: 'source:pdf' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'course.buildEvidence' }))
+
+    await waitFor(() => expect(associate.mutateAsync).toHaveBeenCalledWith({
+      source_id: 'source:pdf', role: 'PRIMARY',
+    }))
+    await waitFor(() => expect(build.mutateAsync).toHaveBeenCalledWith({
+      source_id: 'source:pdf', role: 'PRIMARY', force: false,
+    }))
   })
 })
