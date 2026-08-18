@@ -176,8 +176,8 @@ export default function CourseOutlinePage() {
                 <CardDescription>{t('course.sourceAndEvidenceDescription')}</CardDescription>
               </CardHeader>
               <CardContent className="space-y-5">
-                {sources.isLoading ? <CoursePageLoading /> : sources.isError ? (
-                  <CoursePageError onRetry={() => void sources.refetch()} />
+                {sources.isLoading ? <CourseInlineLoading /> : sources.isError ? (
+                  <CourseInlineError onRetry={() => void sources.refetch()} />
                 ) : (
                   <CourseSourcePicker
                     sources={sources.data ?? []}

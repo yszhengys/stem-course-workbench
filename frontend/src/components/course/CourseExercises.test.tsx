@@ -29,6 +29,7 @@ describe('CourseExercises', () => {
       />
     )
 
+    expect(screen.getByText('course.difficultyCore')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'course.viewHints' }))
     expect(screen.getByText('Factor first.')).toBeVisible()
     fireEvent.click(screen.getByRole('button', { name: 'course.revealAnswer' }))

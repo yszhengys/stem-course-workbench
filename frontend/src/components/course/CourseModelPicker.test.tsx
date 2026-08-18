@@ -43,4 +43,31 @@ describe('CourseModelPicker', () => {
       reasoning_effort: null,
     })
   })
+
+  it('localizes every visible reasoning-effort option', () => {
+    render(
+      <CourseModelPicker
+        options={[{
+          adapter: 'codex_cli',
+          model: 'gpt-5.6-sol',
+          reasoning_effort: 'max',
+          optional: false,
+          configured: true,
+          selectable: true,
+        }]}
+        value={{ adapter: 'codex_cli', model: 'gpt-5.6-sol', reasoning_effort: 'max' }}
+        onChange={vi.fn()}
+      />
+    )
+
+    for (const key of ['course.effortLow', 'course.effortMedium', 'course.effortHigh', 'course.effortXhigh', 'course.effortMax']) {
+      expect(screen.getByRole('option', { name: key })).toBeVisible()
+    }
+  })
+
+  it('shows an actionable configuration message when no model option exists', () => {
+    render(<CourseModelPicker options={[]} value={null} onChange={vi.fn()} />)
+
+    expect(screen.getByText('course.noSelectableModels')).toBeVisible()
+  })
 })

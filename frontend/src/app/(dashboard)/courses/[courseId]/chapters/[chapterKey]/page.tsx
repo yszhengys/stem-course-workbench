@@ -254,7 +254,7 @@ export default function CourseChapterPage() {
                 <p className="text-sm font-medium">{t('course.evidenceAnchors')}</p>
                 {anchors.isLoading ? <CourseInlineLoading /> : anchors.isError ? (
                   <CourseInlineError onRetry={() => void anchors.refetch()} />
-                ) : (
+                ) : anchors.data?.length ? (
                   <div className="grid max-h-52 gap-2 overflow-y-auto rounded-md border p-3 md:grid-cols-2">
                     {(anchors.data ?? []).map((anchor) => (
                     <label key={anchor.anchor_id} className="flex cursor-pointer items-start gap-2 text-xs">
@@ -269,7 +269,7 @@ export default function CourseChapterPage() {
                     </label>
                     ))}
                   </div>
-                )}
+                ) : <p className="text-sm text-muted-foreground">{t('course.noAnchors')}</p>}
               </div>
 
               <div className="flex flex-wrap gap-2">
@@ -376,7 +376,7 @@ export default function CourseChapterPage() {
                       </div>
                     </div>
                   ))}
-                  {!labs.isLoading && !(labs.data?.length) && <p className="text-sm text-muted-foreground">{t('course.noLabs')}</p>}
+                  {!labs.isLoading && !labs.isError && !(labs.data?.length) && <p className="text-sm text-muted-foreground">{t('course.noLabs')}</p>}
                 </CardContent>
               </Card>
 
@@ -398,7 +398,7 @@ export default function CourseChapterPage() {
                   <ChapterPublicationGate
                     chapterStatus={currentChapter.status}
                     findings={findings.data}
-                    isLoading={findings.isLoading}
+                    isLoading={findings.isLoading || findings.isFetching}
                     isError={findings.isError}
                     isUpdating={updateFinding.isPending}
                     isPublishing={publishChapter.isPending}
@@ -473,7 +473,7 @@ export default function CourseChapterPage() {
                           {attempt.transfer_completed && <Badge className="ml-2" variant="outline">{t('course.transferComplete')}</Badge>}
                         </div>
                       ))}
-                      {!attempts.isLoading && !(attempts.data?.length) && <p className="text-sm text-muted-foreground">{t('course.noAttempts')}</p>}
+                      {!attempts.isLoading && !attempts.isError && !(attempts.data?.length) && <p className="text-sm text-muted-foreground">{t('course.noAttempts')}</p>}
                     </div>
                   </CardContent>
                 </Card>

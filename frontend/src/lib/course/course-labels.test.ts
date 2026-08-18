@@ -2,11 +2,14 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   courseStatusLabel,
+  exerciseDifficultyLabel,
   findingKindLabel,
   findingSeverityLabel,
   findingStatusLabel,
   locatorKindLabel,
   provenanceLabel,
+  reasoningEffortLabel,
+  subjectLabel,
 } from './course-labels'
 
 const t = vi.fn((key: string) => key)
@@ -20,6 +23,9 @@ describe('localized Course enum labels', () => {
     expect(findingStatusLabel(t, 'manual_check')).toBe('course.findingStatusManualCheck')
     expect(locatorKindLabel(t, 'pptx_slide')).toBe('course.locatorPptxSlide')
     expect(provenanceLabel(t, 'pedagogical')).toBe('course.provenancePedagogical')
+    expect(reasoningEffortLabel(t, 'xhigh')).toBe('course.effortXhigh')
+    expect(subjectLabel(t, 'physics')).toBe('course.subjectPhysics')
+    expect(exerciseDifficultyLabel(t, 'challenge')).toBe('course.difficultyChallenge')
   })
 
   it('uses a localized unknown label instead of exposing an untrusted enum value', () => {

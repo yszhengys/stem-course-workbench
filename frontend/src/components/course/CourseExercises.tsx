@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { exerciseDifficultyLabel } from '@/lib/course/course-labels'
 import type { ChapterArtifact, CreateCourseAttemptRequest } from '@/lib/types/course'
 
 type Exercise = ChapterArtifact['exercises'][number]
@@ -56,7 +57,7 @@ export function CourseExercises({
           <div key={exercise.key} className="space-y-3 rounded-md border p-4">
             <div className="flex items-start justify-between gap-3">
               <p className="font-medium">{exercise.prompt}</p>
-              <Badge variant="secondary">{exercise.difficulty}</Badge>
+              <Badge variant="secondary">{exerciseDifficultyLabel(t, exercise.difficulty)}</Badge>
             </div>
 
             {exercise.hints.length > 0 && (

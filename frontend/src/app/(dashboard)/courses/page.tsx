@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useCourses } from '@/lib/hooks/use-courses'
 import { useTranslation } from '@/lib/hooks/use-translation'
-import { courseStatusLabel } from '@/lib/course/course-labels'
+import { courseStatusLabel, subjectLabel } from '@/lib/course/course-labels'
 
 export default function CoursesPage() {
   const { t } = useTranslation()
@@ -45,7 +45,7 @@ export default function CoursesPage() {
                         <Badge variant="secondary">{courseStatusLabel(t, course.status)}</Badge>
                       </div>
                       <CardTitle>{course.title}</CardTitle>
-                      <CardDescription>{course.subject ?? t('course.subjectUnknown')}</CardDescription>
+                      <CardDescription>{subjectLabel(t, course.subject)}</CardDescription>
                     </CardHeader>
                     <CardContent className="text-sm text-muted-foreground">
                       {course.description || t('course.noDescription')}

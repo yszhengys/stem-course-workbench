@@ -67,6 +67,19 @@ const PROVENANCE_KEYS: Record<string, string> = {
   '补充': 'course.provenanceSupplement',
 }
 
+const REASONING_EFFORT_KEYS: Record<string, string> = {
+  low: 'course.effortLow',
+  medium: 'course.effortMedium',
+  high: 'course.effortHigh',
+  xhigh: 'course.effortXhigh',
+  max: 'course.effortMax',
+}
+
+const EXERCISE_DIFFICULTY_KEYS: Record<string, string> = {
+  core: 'course.difficultyCore',
+  challenge: 'course.difficultyChallenge',
+}
+
 function translatedEnum(t: Translate, keys: Record<string, string>, value: string): string {
   return t(keys[value.toLowerCase()] ?? 'course.statusUnknown')
 }
@@ -88,6 +101,18 @@ export const locatorKindLabel = (t: Translate, value: string) =>
 
 export const provenanceLabel = (t: Translate, value: string) =>
   translatedEnum(t, PROVENANCE_KEYS, value)
+
+export const reasoningEffortLabel = (t: Translate, value: string) =>
+  translatedEnum(t, REASONING_EFFORT_KEYS, value)
+
+export const exerciseDifficultyLabel = (t: Translate, value: string) =>
+  translatedEnum(t, EXERCISE_DIFFICULTY_KEYS, value)
+
+export function subjectLabel(t: Translate, value: string | null | undefined): string {
+  if (value === 'mathematics' || value === 'math') return t('course.subjectMath')
+  if (value === 'physics') return t('course.subjectPhysics')
+  return t('course.subjectUnknown')
+}
 
 export function sourceRoleLabel(t: Translate, value: string): string {
   return t(value === 'PRIMARY' ? 'course.primary' : value === 'SUPPLEMENT' ? 'course.supplement' : 'course.statusUnknown')

@@ -55,4 +55,21 @@ describe('submitEvidenceSource', () => {
     expect(associate).not.toHaveBeenCalled()
     expect(build).not.toHaveBeenCalled()
   })
+
+  it('does not build evidence when association of an eligible Source is rejected', async () => {
+    const error = new Error('Source does not belong to this course Notebook')
+    const associate = vi.fn().mockRejectedValue(error)
+    const build = vi.fn()
+
+    await expect(submitEvidenceSource({
+      sourceId: 'source:manual',
+      role: 'PRIMARY',
+      sources,
+      associate,
+      build,
+    })).rejects.toBe(error)
+
+    expect(associate).toHaveBeenCalledWith({ source_id: 'source:manual', role: 'PRIMARY' })
+    expect(build).not.toHaveBeenCalled()
+  })
 })

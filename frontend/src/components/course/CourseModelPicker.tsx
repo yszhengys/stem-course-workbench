@@ -1,6 +1,7 @@
 'use client'
 
 import { Label } from '@/components/ui/label'
+import { reasoningEffortLabel } from '@/lib/course/course-labels'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import {
   CourseModelOption,
@@ -67,7 +68,7 @@ export function CourseModelPicker({ options, value, onChange, disabled = false }
             </option>
           ))}
         </select>
-        {!hasSelectableModel && options.length > 0 && (
+        {!hasSelectableModel && (
           <p className="text-xs text-muted-foreground">{t('course.noSelectableModels')}</p>
         )}
       </div>
@@ -86,7 +87,7 @@ export function CourseModelPicker({ options, value, onChange, disabled = false }
             className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
           >
             {['low', 'medium', 'high', 'xhigh', 'max'].map((effort) => (
-              <option key={effort} value={effort}>{effort}</option>
+              <option key={effort} value={effort}>{reasoningEffortLabel(t, effort)}</option>
             ))}
           </select>
         </div>
