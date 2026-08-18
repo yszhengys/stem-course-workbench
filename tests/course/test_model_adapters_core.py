@@ -42,7 +42,14 @@ def test_codex_binary_discovery_order(monkeypatch, tmp_path: Path):
     explicit = tmp_path / "explicit"
     env_binary = tmp_path / "env"
     monkeypatch.setenv("CODEX_CLI_PATH", str(env_binary))
-    monkeypatch.setattr("shutil.which", lambda _: "/usr/local/bin/codex")
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda candidate: (
+            str(env_binary)
+            if candidate == str(env_binary)
+            else "/usr/local/bin/codex"
+        ),
+    )
 
     assert CodexCliAdapter(binary=str(explicit)).binary == str(explicit)
     assert CodexCliAdapter().binary == str(env_binary)
@@ -60,6 +67,20 @@ def test_codex_uses_bundled_binary_only_when_it_exists(monkeypatch):
     monkeypatch.setattr(Path, "is_file", lambda _: False)
     with pytest.raises(AdapterError, match="not found"):
         CodexCliAdapter()
+
+
+def test_invalid_configured_codex_path_fails_closed_without_path_fallback(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CODEX_CLI_PATH", "/private/missing/codex")
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda candidate: "/usr/local/bin/codex" if candidate == "codex" else None,
+    )
+
+    with pytest.raises(AdapterError, match="not found"):
+        CodexCliAdapter()
+    assert CodexCliAdapter.is_available() is False
 
 
 @pytest.mark.asyncio

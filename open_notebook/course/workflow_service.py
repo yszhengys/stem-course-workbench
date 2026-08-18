@@ -242,7 +242,10 @@ class CourseWorkflowService:
             anchor_ids=anchor_ids,
             source_hashes=source_hashes,
             course_version_id=run.course_version,
-            chapter_id=run.chapter,
+            # A chapter-content run binds its output Chapter only after the
+            # immutable request claim has been created. Review runs, by
+            # contrast, claim one pre-existing Chapter as an input.
+            chapter_id=run.chapter if run.stage == "review" else None,
             chapter_key=run.chapter_key,
         )
         if run.input_hash != expected:
@@ -252,9 +255,155 @@ class CourseWorkflowService:
     async def complete_run(
         run: CourseGenerationRun, output: dict[str, Any] | list[Any]
     ) -> None:
-        run.output_hash = _artifact_hash({"output": output})
-        if run.status == sm.RunStatus.RUNNING:
-            await run.transition_to(sm.RunStatus.SUCCEEDED)
+        output_hash = _artifact_hash({"output": output})
+        if run.status == sm.RunStatus.SUCCEEDED:
+            CourseWorkflowService.verify_completed_output(run, output)
+            return
+        if run.status != sm.RunStatus.RUNNING:
+            raise ValueError("Course generation run is no longer active")
+        sm.transition("run", run.status, sm.RunStatus.SUCCEEDED)
+        try:
+            rows = await repo_query(
+                """
+                UPDATE $run_id
+                SET status = 'succeeded',
+                    output_hash = $output_hash,
+                    error_message = NONE
+                WHERE status = 'running'
+                RETURN AFTER;
+                """,
+                {
+                    "run_id": ensure_record_id(str(run.id)),
+                    "output_hash": output_hash,
+                },
+            )
+        except RuntimeError:
+            rows = []
+        completed = _rows(CourseGenerationRun, rows)
+        current = (
+            completed[0]
+            if completed
+            else await CourseGenerationRun.get(str(run.id))
+        )
+        run.status = current.status
+        run.output_hash = current.output_hash
+        run.error_message = current.error_message
+        if current.status == sm.RunStatus.SUCCEEDED:
+            CourseWorkflowService.verify_completed_output(run, output)
+            return
+        raise ValueError("Course generation run is no longer active")
+
+    @staticmethod
+    async def complete_chapter_run(
+        *,
+        run: CourseGenerationRun,
+        chapter: Chapter,
+        artifact: ChapterArtifact,
+    ) -> None:
+        """Atomically promote a Chapter run and refresh its stable-key links."""
+
+        if chapter.id is None:
+            raise ValueError("Generated chapter is not persisted")
+        if run.chapter != str(chapter.id):
+            raise ValueError("Course generation run chapter binding mismatch")
+        output = chapter.artifact or {}
+        output_hash = _artifact_hash({"output": output})
+        if run.status == sm.RunStatus.SUCCEEDED:
+            CourseWorkflowService.verify_completed_output(run, output)
+            return
+        if run.status != sm.RunStatus.RUNNING:
+            raise ValueError("Course generation run is no longer active")
+        sm.transition("run", run.status, sm.RunStatus.SUCCEEDED)
+        block_keys = {
+            item.key
+            for values in (
+                artifact.sections,
+                artifact.formulas,
+                artifact.worked_examples,
+                artifact.labs,
+                artifact.exercises,
+            )
+            for item in values
+        }
+        exercise_keys = {item.key for item in artifact.exercises}
+        try:
+            await repo_query(
+                """
+                BEGIN TRANSACTION;
+                LET $completed = (
+                    UPDATE course_generation_run
+                    SET status = 'succeeded',
+                        output_hash = $output_hash,
+                        error_message = NONE
+                    WHERE id = $run_id
+                      AND status = 'running'
+                      AND chapter = $chapter_id
+                    RETURN AFTER
+                );
+                IF array::len($completed) != 1 {
+                    THROW 'Course generation run completion conflict'
+                };
+                LET $promoted_chapters = (
+                    SELECT VALUE chapter FROM course_generation_run
+                    WHERE course = $course_id
+                      AND course_version = $version_id
+                      AND chapter_key = $chapter_key
+                      AND stage = 'chapter_content'
+                      AND status = 'succeeded'
+                      AND chapter != NONE
+                );
+                LET $newer_current = (
+                    SELECT VALUE id FROM chapter
+                    WHERE course_version = $version_id
+                      AND chapter_key = $chapter_key
+                      AND version_no > $chapter_version
+                      AND (input_hash = NONE OR id IN $promoted_chapters)
+                );
+                IF array::len($newer_current) = 0 {
+                    UPDATE course_note SET orphan_status =
+                        IF block_key != NONE AND block_key NOT IN $block_keys
+                        THEN 'orphaned' ELSE 'active' END
+                    WHERE course = $course_id AND chapter_key = $chapter_key;
+                    UPDATE progress SET orphan_status =
+                        IF block_key != NONE AND block_key NOT IN $block_keys
+                        THEN 'orphaned' ELSE 'active' END
+                    WHERE course = $course_id AND chapter_key = $chapter_key;
+                    UPDATE attempt SET orphan_status =
+                        IF exercise_key != NONE AND exercise_key NOT IN $exercise_keys
+                        THEN 'orphaned' ELSE 'active' END
+                    WHERE course = $course_id AND chapter_key = $chapter_key;
+                };
+                COMMIT TRANSACTION;
+                """,
+                {
+                    "run_id": ensure_record_id(str(run.id)),
+                    "course_id": ensure_record_id(run.course),
+                    "version_id": ensure_record_id(chapter.course_version),
+                    "chapter_id": ensure_record_id(str(chapter.id)),
+                    "chapter_key": chapter.chapter_key,
+                    "chapter_version": chapter.version_no,
+                    "output_hash": output_hash,
+                    "block_keys": sorted(block_keys),
+                    "exercise_keys": sorted(exercise_keys),
+                },
+            )
+        except RuntimeError:
+            current = await CourseGenerationRun.get(str(run.id))
+            run.status = current.status
+            run.output_hash = current.output_hash
+            run.error_message = current.error_message
+            run.chapter = current.chapter
+            if current.status == sm.RunStatus.SUCCEEDED:
+                if current.chapter != str(chapter.id):
+                    raise ValueError(
+                        "Course generation run chapter binding mismatch"
+                    )
+                CourseWorkflowService.verify_completed_output(run, output)
+                return
+            raise ValueError("Course generation run is no longer active") from None
+        run.status = sm.RunStatus.SUCCEEDED
+        run.output_hash = output_hash
+        run.error_message = None
 
     @staticmethod
     def verify_completed_output(
@@ -266,9 +415,34 @@ class CourseWorkflowService:
 
     @staticmethod
     async def fail_run(run: CourseGenerationRun, message: str) -> None:
-        if run.status == sm.RunStatus.RUNNING:
-            run.error_message = message[:1000]
-            await run.transition_to(sm.RunStatus.FAILED)
+        if run.status != sm.RunStatus.RUNNING:
+            return
+        sm.transition("run", run.status, sm.RunStatus.FAILED)
+        error_message = message[:1000]
+        try:
+            rows = await repo_query(
+                """
+                UPDATE $run_id
+                SET status = 'failed', error_message = $error_message
+                WHERE status = 'running'
+                RETURN AFTER;
+                """,
+                {
+                    "run_id": ensure_record_id(str(run.id)),
+                    "error_message": error_message,
+                },
+            )
+        except RuntimeError:
+            rows = []
+        failed = _rows(CourseGenerationRun, rows)
+        current = (
+            failed[0]
+            if failed
+            else await CourseGenerationRun.get(str(run.id))
+        )
+        run.status = current.status
+        run.output_hash = current.output_hash
+        run.error_message = current.error_message
 
     @staticmethod
     async def fail_run_reference(
@@ -290,6 +464,52 @@ class CourseWorkflowService:
                 "message": message[:1000],
             },
         )
+
+    @staticmethod
+    async def bind_run_chapter(
+        run: CourseGenerationRun, chapter: Chapter
+    ) -> CourseGenerationRun:
+        """Bind a generated artifact without making it current before success."""
+
+        if chapter.id is None:
+            raise ValueError("Generated chapter is not persisted")
+        chapter_id = str(chapter.id)
+        if run.status == sm.RunStatus.SUCCEEDED:
+            if run.chapter != chapter_id:
+                raise ValueError("Course generation run chapter binding mismatch")
+            return run
+        rows = await repo_query(
+            """
+            UPDATE $run_id SET chapter = $chapter_id
+            WHERE status = 'running'
+              AND command = $command_id
+              AND (chapter = NONE OR chapter = $chapter_id)
+            RETURN AFTER;
+            """,
+            {
+                "run_id": ensure_record_id(str(run.id)),
+                "chapter_id": ensure_record_id(chapter_id),
+                "command_id": ensure_record_id(str(run.command)),
+            },
+        )
+        claimed = _rows(CourseGenerationRun, rows)
+        if not claimed:
+            current = await CourseGenerationRun.get(str(run.id))
+            if current.chapter != chapter_id:
+                raise ValueError("Course generation run chapter binding mismatch")
+            if current.status not in {
+                sm.RunStatus.RUNNING,
+                sm.RunStatus.SUCCEEDED,
+            }:
+                raise ValueError("Course generation run is no longer active")
+            run.chapter = current.chapter
+            run.status = current.status
+            run.output_hash = current.output_hash
+            return run
+        run.chapter = claimed[0].chapter
+        run.status = claimed[0].status
+        run.output_hash = claimed[0].output_hash
+        return run
 
     async def _source_hash(self, source_id: str) -> str:
         source = await Source.get(source_id)
@@ -360,6 +580,82 @@ class CourseWorkflowService:
             raise ValueError("Course has no current outline version")
         version = await CourseVersion.get(course.outline_version_id)
         return version, cls.validate_approved_version(course, version)
+
+    @staticmethod
+    async def resolve_current_chapter(
+        *,
+        course_id: str,
+        version_id: str,
+        chapter_key: str,
+        chapters: list[Chapter] | None = None,
+    ) -> Chapter:
+        """Return the latest Chapter fully promoted by a successful content run."""
+
+        candidates = [
+            chapter
+            for chapter in (
+                chapters
+                if chapters is not None
+                else await CourseVersion.chapters(version_id)
+            )
+            if chapter.course_version == version_id
+            and chapter.chapter_key == chapter_key
+            and chapter.id is not None
+        ]
+        if not candidates:
+            raise NotFoundError("Chapter not found")
+
+        generated = [
+            chapter for chapter in candidates if chapter.input_hash is not None
+        ]
+        promoted_ids: set[str] = set()
+        if generated:
+            rows = await repo_query(
+                """
+                SELECT * FROM course_generation_run
+                WHERE course = $course
+                  AND course_version = $version
+                  AND chapter_key = $chapter_key
+                  AND stage = 'chapter_content';
+                """,
+                {
+                    "course": ensure_record_id(course_id),
+                    "version": ensure_record_id(version_id),
+                    "chapter_key": chapter_key,
+                },
+            )
+            runs = _rows(CourseGenerationRun, rows)
+            generated_by_id = {str(chapter.id): chapter for chapter in generated}
+            for run in runs:
+                if run.status != sm.RunStatus.SUCCEEDED:
+                    continue
+                replay_hash = artifact_replay_hash(run)
+                if run.chapter is None:
+                    legacy_matches = [
+                        chapter
+                        for chapter in generated
+                        if chapter.input_hash == replay_hash
+                        and run.output_hash
+                        == _artifact_hash({"output": chapter.artifact or {}})
+                    ]
+                    if len(legacy_matches) == 1:
+                        promoted_ids.add(str(legacy_matches[0].id))
+                    continue
+                chapter = generated_by_id.get(run.chapter)
+                if chapter is None or chapter.input_hash != replay_hash:
+                    continue
+                expected = _artifact_hash({"output": chapter.artifact or {}})
+                if run.output_hash == expected:
+                    promoted_ids.add(run.chapter)
+
+        eligible = [
+            chapter
+            for chapter in candidates
+            if chapter.input_hash is None or str(chapter.id) in promoted_ids
+        ]
+        if not eligible:
+            raise NotFoundError("Chapter not found")
+        return max(eligible, key=lambda chapter: chapter.version_no)
 
     async def build_evidence(
         self,
@@ -575,42 +871,6 @@ class CourseWorkflowService:
         if chapter.status != sm.ChapterStatus.REVIEWING:
             raise ValueError("Chapter replay is not in a mutable generation state")
 
-    @staticmethod
-    async def _refresh_stable_links(
-        *, course_id: str, chapter: Chapter, artifact: ChapterArtifact
-    ) -> None:
-        block_keys = {
-            item.key
-            for values in (
-                artifact.sections,
-                artifact.formulas,
-                artifact.worked_examples,
-                artifact.labs,
-                artifact.exercises,
-            )
-            for item in values
-        }
-        exercise_keys = {item.key for item in artifact.exercises}
-        await repo_query(
-            """
-            UPDATE course_note SET orphan_status =
-                IF block_key != NONE AND block_key NOT IN $block_keys THEN 'orphaned' ELSE 'active' END
-            WHERE course = $course AND chapter_key = $chapter_key;
-            UPDATE progress SET orphan_status =
-                IF block_key != NONE AND block_key NOT IN $block_keys THEN 'orphaned' ELSE 'active' END
-            WHERE course = $course AND chapter_key = $chapter_key;
-            UPDATE attempt SET orphan_status =
-                IF exercise_key != NONE AND exercise_key NOT IN $exercise_keys THEN 'orphaned' ELSE 'active' END
-            WHERE course = $course AND chapter_key = $chapter_key;
-            """,
-            {
-                "course": ensure_record_id(course_id),
-                "chapter_key": chapter.chapter_key,
-                "block_keys": sorted(block_keys),
-                "exercise_keys": sorted(exercise_keys),
-            },
-        )
-
     async def generate_chapter(
         self,
         *,
@@ -672,6 +932,8 @@ class CourseWorkflowService:
                 if not existing:
                     raise ValueError("Chapter replay artifact is missing")
                 chapter = existing[0]
+                if run.chapter is not None and run.chapter != str(chapter.id):
+                    raise ValueError("Course generation run chapter binding mismatch")
                 self.verify_completed_output(run, chapter.artifact or {})
                 return chapter
             if existing:
@@ -712,29 +974,23 @@ class CourseWorkflowService:
                     citations=[{"anchor_id": item} for item in artifact.citations],
                 )
                 await chapter.save()
+            await self.bind_run_chapter(run, chapter)
+            if run.status == sm.RunStatus.SUCCEEDED:
+                self.verify_completed_output(run, chapter.artifact or {})
+                return chapter
             await self.advance_chapter_to_reviewing(chapter)
 
         await self._ensure_labs(version, chapter)
         artifact = ChapterArtifact.model_validate(chapter.artifact)
-        siblings = await CourseVersion.chapters(str(version.id))
-        latest = max(
-            (item for item in siblings if item.chapter_key == chapter_key),
-            key=lambda item: item.version_no,
-            default=chapter,
-        )
-        is_current_latest = (
-            course.outline_version_id == str(version.id)
-            and str(latest.id) == str(chapter.id)
-        )
-        if is_current_latest:
-            await self._refresh_stable_links(
-                course_id=course_id, chapter=chapter, artifact=artifact
-            )
         if version.status == sm.VersionStatus.DRAFT:
             await version.transition_to(sm.VersionStatus.GENERATING)
         if course.status == sm.CourseStatus.OUTLINE_APPROVED:
             await course.transition_to(sm.CourseStatus.GENERATING)
-        await self.complete_run(run, chapter.artifact or {})
+        await self.complete_chapter_run(
+            run=run,
+            chapter=chapter,
+            artifact=artifact,
+        )
         return chapter
 
     @staticmethod
@@ -852,10 +1108,12 @@ class CourseWorkflowService:
             self.verify_completed_output(run, output)
             return chapter, findings
         chapters = await CourseVersion.chapters(str(version.id))
-        matches = [item for item in chapters if item.chapter_key == chapter_key]
-        if not matches:
-            raise NotFoundError("Chapter not found")
-        chapter = max(matches, key=lambda item: item.version_no)
+        chapter = await self.resolve_current_chapter(
+            course_id=course_id,
+            version_id=str(version.id),
+            chapter_key=chapter_key,
+            chapters=chapters,
+        )
         if run.chapter != str(chapter.id):
             raise ValueError("Course chapter review run is stale")
         if chapter.status == sm.ChapterStatus.PUBLISHED:

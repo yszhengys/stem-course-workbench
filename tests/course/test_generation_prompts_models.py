@@ -1,4 +1,5 @@
 import hashlib
+import json
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,9 +71,8 @@ async def test_course_model_options_keep_defaults_and_deepseek_optional(monkeypa
     )
     monkeypatch.setenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS", "1")
     monkeypatch.setattr(
-        "api.course_service.shutil",
-        SimpleNamespace(which=lambda _binary: "/bin/codex"),
-        raising=False,
+        "api.course_service.CodexCliAdapter.is_available",
+        lambda: True,
     )
     monkeypatch.setattr(
         "api.course_service._installed_ollama_models",
@@ -147,9 +147,8 @@ async def test_configured_deepseek_option_uses_real_id_and_stays_optional(monkey
     )
     monkeypatch.setenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS", "1")
     monkeypatch.setattr(
-        "api.course_service.shutil",
-        SimpleNamespace(which=lambda _binary: None),
-        raising=False,
+        "api.course_service.CodexCliAdapter.is_available",
+        lambda: False,
     )
     monkeypatch.setattr(
         "api.course_service._installed_ollama_models",
@@ -199,10 +198,10 @@ async def test_model_options_disable_every_real_adapter_without_explicit_gate(
     monkeypatch.setattr(
         "api.course_service.Model.get_models_by_type", language_models
     )
+    codex_probe = AsyncMock(return_value=True)
     monkeypatch.setattr(
-        "api.course_service.shutil",
-        SimpleNamespace(which=lambda _binary: "/bin/codex"),
-        raising=False,
+        "api.course_service.CodexCliAdapter.is_available",
+        codex_probe,
     )
     ollama_probe = AsyncMock(return_value={"qwen3.5:9b", "gpt-oss:20b"})
     monkeypatch.setattr(
@@ -216,6 +215,34 @@ async def test_model_options_disable_every_real_adapter_without_explicit_gate(
     assert all(option["configured"] is False for option in options)
     assert all(option.get("selectable") is False for option in options)
     ollama_probe.assert_not_awaited()
+    codex_probe.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_model_options_share_codex_env_discovery_without_leaking_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from open_notebook.course.model_adapters import CodexCliAdapter
+
+    binary = tmp_path / "private-codex"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o700)
+    monkeypatch.setenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS", "1")
+    monkeypatch.setenv("CODEX_CLI_PATH", str(binary))
+    monkeypatch.setattr(
+        "api.course_service.Model.get_models_by_type",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "api.course_service._installed_ollama_models",
+        AsyncMock(return_value=set()),
+    )
+    payload = await CourseService.get_model_options()
+
+    codex = [item for item in payload["options"] if item["adapter"] == "codex_cli"]
+    assert codex and all(item["configured"] and item["selectable"] for item in codex)
+    assert CodexCliAdapter().binary == str(binary)
+    assert str(binary) not in json.dumps(payload)
 
 
 def test_generation_hash_helpers_are_canonical_and_do_not_expose_input():

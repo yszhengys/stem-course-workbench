@@ -17,6 +17,7 @@ from open_notebook.course.contracts import (
     GenerationResult,
     ModelSelection,
 )
+from open_notebook.course.evidence_service import EvidenceService
 from open_notebook.course.models import (
     DEFAULT_MODEL_POLICY,
     Chapter,
@@ -24,7 +25,7 @@ from open_notebook.course.models import (
     CourseVersion,
 )
 from open_notebook.database.async_migrate import AsyncMigrationManager
-from open_notebook.domain.notebook import Notebook, Source
+from open_notebook.domain.notebook import Asset, Notebook, Source
 from open_notebook.exceptions import NotFoundError
 
 
@@ -210,7 +211,11 @@ async def test_source_association_keeps_exactly_one_role(monkeypatch):
     course = Course(
         id="course:one", title="Calculus", notebook="notebook:one"
     )
-    source = Source(id="source:one", title="Textbook")
+    source = Source(
+        id="source:one",
+        title="Textbook",
+        asset=Asset(file_path="/safe/textbook.pdf"),
+    )
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
     monkeypatch.setattr(
         Notebook,
@@ -218,8 +223,14 @@ async def test_source_association_keeps_exactly_one_role(monkeypatch):
         AsyncMock(return_value=Notebook(id="notebook:one", name="N", description="")),
     )
     monkeypatch.setattr(Source, "get", AsyncMock(return_value=source))
-    monkeypatch.setattr(Notebook, "get_sources", AsyncMock(return_value=[]))
-    monkeypatch.setattr(Source, "add_to_notebook", AsyncMock())
+    monkeypatch.setattr(Notebook, "get_sources", AsyncMock(return_value=[source]))
+    add_to_notebook = AsyncMock()
+    monkeypatch.setattr(Source, "add_to_notebook", add_to_notebook)
+    monkeypatch.setattr(
+        EvidenceService,
+        "resolve_safe_source_path",
+        lambda _self, path: Path(path),
+    )
     save = AsyncMock()
     monkeypatch.setattr(Course, "save", save)
 
@@ -231,6 +242,7 @@ async def test_source_association_keeps_exactly_one_role(monkeypatch):
     assert associated.primary_source_ids == ["source:one"]
     assert associated.supplement_source_ids == []
     save.assert_awaited_once()
+    add_to_notebook.assert_not_awaited()
 
 
 @pytest.mark.asyncio

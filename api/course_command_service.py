@@ -478,10 +478,12 @@ class CourseCommandService:
         version, outline = await CourseWorkflowService.approved_version(course)
         CourseWorkflowService._outline_chapter(outline, chapter_key)
         chapters = await CourseVersion.chapters(str(version.id))
-        matches = [item for item in chapters if item.chapter_key == chapter_key]
-        if not matches:
-            raise NotFoundError("Chapter not found")
-        chapter = max(matches, key=lambda item: item.version_no)
+        chapter = await CourseWorkflowService.resolve_current_chapter(
+            course_id=course_id,
+            version_id=str(version.id),
+            chapter_key=chapter_key,
+            chapters=chapters,
+        )
         arguments = {
             "course_id": course_id,
             "chapter_key": chapter_key,
@@ -534,10 +536,15 @@ class CourseCommandService:
         except (NotFoundError, ValueError):
             raise NotFoundError("Chapter not found")
         chapters = await CourseVersion.chapters(str(version.id))
-        matches = [item for item in chapters if item.chapter_key == chapter_key]
-        if not matches:
-            raise NotFoundError("Chapter not found")
-        return max(matches, key=lambda item: item.version_no)
+        try:
+            return await CourseWorkflowService.resolve_current_chapter(
+                course_id=course_id,
+                version_id=str(version.id),
+                chapter_key=chapter_key,
+                chapters=chapters,
+            )
+        except NotFoundError:
+            raise NotFoundError("Chapter not found") from None
 
     @staticmethod
     async def list_findings(

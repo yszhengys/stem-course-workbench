@@ -8,17 +8,20 @@ from fastapi.testclient import TestClient
 from surrealdb import RecordID
 
 from api.course_service import CourseConflictError, CourseService
+from open_notebook.course.evidence_service import EvidenceService
 from open_notebook.course.models import (
     Attempt,
     Chapter,
     Course,
+    CourseGenerationRun,
     CourseNote,
     CourseVersion,
     Lab,
     Progress,
 )
-from open_notebook.domain.notebook import Notebook, Source
-from open_notebook.exceptions import NotFoundError
+from open_notebook.course.workflow_service import artifact_replay_hash
+from open_notebook.domain.notebook import Asset, Notebook, Source
+from open_notebook.exceptions import InvalidInputError, NotFoundError
 
 
 def test_migration_25_extends_and_down_restores_course_delete_event():
@@ -192,7 +195,7 @@ async def test_version_publish_uses_legal_generating_to_published_transition(mon
         id="course:one",
         title="Calculus",
         notebook="notebook:one",
-        status="ready",
+        status="generating",
         outline_version_id="course_version:1",
     )
     version = CourseVersion(
@@ -216,14 +219,278 @@ async def test_version_publish_uses_legal_generating_to_published_transition(mon
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
     monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[chapter]))
-    save = AsyncMock()
-    monkeypatch.setattr(CourseVersion, "save", save)
+    version_save = AsyncMock()
+
+    async def publish_atomically(statement, variables=None):
+        normalized = " ".join(statement.split())
+        assert "BEGIN TRANSACTION" in normalized
+        assert "UPDATE course SET" in normalized
+        assert "UPDATE course_version SET" in normalized
+        assert normalized.count("status = 'generating'") >= 2
+        assert "COMMIT TRANSACTION" in normalized
+        assert variables is not None
+        return []
+
+    monkeypatch.setattr(CourseVersion, "save", version_save)
+    monkeypatch.setattr("api.course_service.repo_query", publish_atomically)
 
     published = await CourseService.publish_version("course_version:1")
 
     assert published.status == "published"
     assert published.published_at is not None
-    save.assert_awaited_once()
+    assert course.status == "ready"
+    version_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_version_publish_requires_latest_chapter_for_every_outline_key(
+    monkeypatch,
+):
+    artifact = approved_outline()
+    artifact["chapters"].append(
+        {
+            "key": "derivatives",
+            "title": "Derivatives",
+            "purpose": "Learn derivatives.",
+            "objective_keys": ["limit"],
+            "anchor_ids": ["anchor:one"],
+        }
+    )
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        status="generating",
+        outline_version_id="course_version:1",
+    )
+    version = CourseVersion(
+        id="course_version:1",
+        course="course:one",
+        version_no=1,
+        status="generating",
+        outline_artifact=artifact,
+        outline_hash=artifact_hash(artifact),
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+    )
+    only_limits = Chapter(
+        id="chapter:limits",
+        course_version="course_version:1",
+        chapter_no=1,
+        chapter_key="limits",
+        title="Limits",
+        status="published",
+    )
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(
+        CourseVersion, "chapters", AsyncMock(return_value=[only_limits])
+    )
+    version_save = AsyncMock()
+    course_save = AsyncMock()
+    monkeypatch.setattr(CourseVersion, "save", version_save)
+    monkeypatch.setattr(Course, "save", course_save)
+
+    with pytest.raises(CourseConflictError, match="All chapters"):
+        await CourseService.publish_version("course_version:1")
+
+    version_save.assert_not_awaited()
+    course_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_version_publish_ignores_older_immutable_chapter_versions(monkeypatch):
+    artifact = approved_outline()
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        status="generating",
+        outline_version_id="course_version:1",
+    )
+    version = CourseVersion(
+        id="course_version:1",
+        course="course:one",
+        version_no=1,
+        status="generating",
+        outline_artifact=artifact,
+        outline_hash=artifact_hash(artifact),
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+    )
+    historical = Chapter(
+        id="chapter:limits-v1",
+        course_version="course_version:1",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=1,
+        title="Limits v1",
+        status="ready",
+    )
+    latest = Chapter(
+        id="chapter:limits-v2",
+        course_version="course_version:1",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=2,
+        title="Limits v2",
+        status="published",
+    )
+    unrelated = Chapter(
+        id="chapter:archived-experiment",
+        course_version="course_version:1",
+        chapter_no=99,
+        chapter_key="not-in-approved-outline",
+        version_no=1,
+        title="Archived experiment",
+        status="ready",
+    )
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(
+        CourseVersion,
+        "chapters",
+        AsyncMock(return_value=[historical, latest, unrelated]),
+    )
+    monkeypatch.setattr(CourseVersion, "save", AsyncMock())
+    monkeypatch.setattr("api.course_service.repo_query", AsyncMock(return_value=[]))
+
+    published = await CourseService.publish_version("course_version:1")
+
+    assert published.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_version_publish_ignores_newer_failed_partial_chapter(monkeypatch):
+    artifact = approved_outline()
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        status="generating",
+        outline_version_id="course_version:1",
+    )
+    version = CourseVersion(
+        id="course_version:1",
+        course="course:one",
+        version_no=1,
+        status="generating",
+        outline_artifact=artifact,
+        outline_hash=artifact_hash(artifact),
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+    )
+    published = Chapter(
+        id="chapter:published",
+        course_version="course_version:1",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=1,
+        title="Limits",
+        status="published",
+    )
+    failed_run = CourseGenerationRun(
+        id="course_generation_run:failed",
+        course="course:one",
+        course_version="course_version:1",
+        chapter="chapter:partial",
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        status="failed",
+        prompt_version="v1",
+        input_hash="f" * 64,
+    )
+    partial = Chapter(
+        id="chapter:partial",
+        course_version="course_version:1",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=2,
+        title="Limits partial",
+        status="reviewing",
+        input_hash=artifact_replay_hash(failed_run),
+    )
+
+    async def query(statement: str, variables=None):
+        del variables
+        if "FROM course_generation_run" in statement:
+            return [failed_run.model_dump(mode="json")]
+        if "BEGIN TRANSACTION" in statement:
+            return []
+        raise AssertionError(statement)
+
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(
+        CourseVersion, "chapters", AsyncMock(return_value=[published, partial])
+    )
+    monkeypatch.setattr("api.course_service.repo_query", query)
+    monkeypatch.setattr("open_notebook.course.workflow_service.repo_query", query)
+
+    result = await CourseService.publish_version("course_version:1")
+
+    assert result.status == "published"
+
+
+@pytest.mark.asyncio
+async def test_version_publish_does_not_regress_concurrent_terminal_course(monkeypatch):
+    artifact = approved_outline()
+    stale_course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        status="generating",
+        outline_version_id="course_version:1",
+    )
+    terminal_course = stale_course.model_copy(update={"status": "failed"})
+    version = CourseVersion(
+        id="course_version:1",
+        course="course:one",
+        version_no=1,
+        status="generating",
+        outline_artifact=artifact,
+        outline_hash=artifact_hash(artifact),
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+    )
+    chapter = Chapter(
+        id="chapter:limits",
+        course_version="course_version:1",
+        chapter_no=1,
+        chapter_key="limits",
+        title="Limits",
+        status="published",
+    )
+    persisted_version = version.model_copy()
+    monkeypatch.setattr(
+        CourseVersion,
+        "get",
+        AsyncMock(side_effect=[version, persisted_version]),
+    )
+    monkeypatch.setattr(
+        Course, "get", AsyncMock(side_effect=[stale_course, terminal_course])
+    )
+    monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[chapter]))
+    version_save = AsyncMock()
+    monkeypatch.setattr(CourseVersion, "save", version_save)
+    course_save = AsyncMock()
+    monkeypatch.setattr(Course, "save", course_save)
+    monkeypatch.setattr(
+        "api.course_service.repo_query",
+        AsyncMock(side_effect=RuntimeError("Course publication conflict")),
+    )
+
+    with pytest.raises(CourseConflictError, match="Course is no longer generating"):
+        await CourseService.publish_version("course_version:1")
+
+    assert terminal_course.status == "failed"
+    assert version.status == "generating"
+    assert persisted_version.status == "generating"
+    version_save.assert_not_awaited()
+    course_save.assert_not_awaited()
 
 
 def publishable_chapter_records():
@@ -716,29 +983,110 @@ async def test_published_chapter_rejects_mutation_under_unpublished_version(monk
 
 
 @pytest.mark.asyncio
-async def test_source_association_compensates_new_notebook_relationship(monkeypatch):
+async def test_source_association_rejects_source_outside_course_notebook(monkeypatch):
     course = Course(
         id="course:one", title="Calculus", notebook="notebook:one"
     )
     notebook = Notebook(id="notebook:one", name="N", description="")
-    source = Source(id="source:one", title="Textbook")
+    source = Source(
+        id="source:one",
+        title="Other notebook textbook",
+        asset=Asset(file_path="/private/other-notebook/textbook.pdf"),
+    )
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
     monkeypatch.setattr(Notebook, "get", AsyncMock(return_value=notebook))
     monkeypatch.setattr(Source, "get", AsyncMock(return_value=source))
     monkeypatch.setattr(Notebook, "get_sources", AsyncMock(return_value=[]))
     add_relationship = AsyncMock()
     monkeypatch.setattr(Source, "add_to_notebook", add_relationship)
-    monkeypatch.setattr(Course, "save", AsyncMock(side_effect=RuntimeError("db")))
+    save = AsyncMock()
+    monkeypatch.setattr(Course, "save", save)
     cleanup = AsyncMock()
     monkeypatch.setattr("api.course_service.repo_query", cleanup)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(CourseConflictError, match="not attached") as exc_info:
         await CourseService.associate_source(
             "course:one", "source:one", "PRIMARY"
         )
 
-    add_relationship.assert_awaited_once_with("notebook:one")
-    cleanup.assert_awaited_once()
-    cleanup_call = cleanup.await_args
-    assert cleanup_call is not None
-    assert "DELETE reference" in cleanup_call.args[0]
+    assert "/private/other-notebook" not in str(exc_info.value)
+    assert course.source_ids == []
+    assert course.primary_source_ids == []
+    add_relationship.assert_not_awaited()
+    save.assert_not_awaited()
+    cleanup.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("file_path", [None, "/private/course/notes.txt"])
+async def test_source_association_rejects_missing_or_unsupported_original_file(
+    monkeypatch,
+    file_path,
+):
+    course = Course(
+        id="course:one", title="Calculus", notebook="notebook:one"
+    )
+    notebook = Notebook(id="notebook:one", name="N", description="")
+    source = Source(
+        id="source:one",
+        title="Textbook",
+        asset=Asset(file_path=file_path) if file_path is not None else None,
+    )
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(Notebook, "get", AsyncMock(return_value=notebook))
+    monkeypatch.setattr(Source, "get", AsyncMock(return_value=source))
+    monkeypatch.setattr(Notebook, "get_sources", AsyncMock(return_value=[source]))
+    monkeypatch.setattr(
+        EvidenceService,
+        "resolve_safe_source_path",
+        lambda _self, path: Path(path),
+    )
+    add_relationship = AsyncMock()
+    save = AsyncMock()
+    monkeypatch.setattr(Source, "add_to_notebook", add_relationship)
+    monkeypatch.setattr(Course, "save", save)
+
+    with pytest.raises(InvalidInputError) as exc_info:
+        await CourseService.associate_source(
+            "course:one", "source:one", "SUPPLEMENT"
+        )
+
+    assert "/private/course" not in str(exc_info.value)
+    assert course.source_ids == []
+    assert course.supplement_source_ids == []
+    add_relationship.assert_not_awaited()
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_source_association_rolls_back_roles_when_course_save_fails(monkeypatch):
+    course = Course(
+        id="course:one", title="Calculus", notebook="notebook:one"
+    )
+    notebook = Notebook(id="notebook:one", name="N", description="")
+    source = Source(
+        id="source:one",
+        title="Textbook",
+        asset=Asset(file_path="/safe/textbook.pptx"),
+    )
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(Notebook, "get", AsyncMock(return_value=notebook))
+    monkeypatch.setattr(Source, "get", AsyncMock(return_value=source))
+    monkeypatch.setattr(Notebook, "get_sources", AsyncMock(return_value=[source]))
+    monkeypatch.setattr(
+        EvidenceService,
+        "resolve_safe_source_path",
+        lambda _self, path: Path(path),
+    )
+    add_relationship = AsyncMock()
+    monkeypatch.setattr(Source, "add_to_notebook", add_relationship)
+    monkeypatch.setattr(Course, "save", AsyncMock(side_effect=RuntimeError("db")))
+
+    with pytest.raises(RuntimeError, match="db"):
+        await CourseService.associate_source(
+            "course:one", "source:one", "PRIMARY"
+        )
+
+    assert course.source_ids == []
+    assert course.primary_source_ids == []
+    add_relationship.assert_not_awaited()

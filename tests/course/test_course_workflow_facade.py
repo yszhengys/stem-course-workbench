@@ -10,15 +10,18 @@ from pydantic import ValidationError
 
 from api.course_service import CourseConflictError, CourseService
 from api.models import CourseNoteCreate, ProgressUpdate
+from open_notebook.course.contracts import ModelSelection
 from open_notebook.course.models import (
     Attempt,
     Chapter,
     Course,
+    CourseGenerationRun,
     CourseNote,
     CourseVersion,
     Lab,
     Progress,
 )
+from open_notebook.course.workflow_service import artifact_replay_hash
 from open_notebook.exceptions import InvalidInputError, NotFoundError
 
 
@@ -90,6 +93,238 @@ def _chapter(*, record_id: str, version_no: int) -> Chapter:
             "exercises": [{"key": "limit-core"}],
         },
     )
+
+
+def _failed_partial_chapter() -> tuple[Chapter, CourseGenerationRun]:
+    run = CourseGenerationRun(
+        id="course_generation_run:failed-partial",
+        course="course:one",
+        course_version="course_version:current",
+        chapter="chapter:partial",
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        status="failed",
+        prompt_version="v1",
+        input_hash="f" * 64,
+    )
+    chapter = _chapter(record_id="chapter:partial", version_no=2)
+    chapter.status = "reviewing"
+    chapter.input_hash = artifact_replay_hash(run)
+    return chapter, run
+
+
+def _run_output_hash(chapter: Chapter) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {"output": chapter.artifact or {}},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_legacy_succeeded_unbound_run_promotes_unique_matching_chapter(
+    monkeypatch,
+):
+    from api.course_command_service import CourseCommandService
+
+    course = _current_course()
+    version = _current_version()
+    previous = _chapter(record_id="chapter:published", version_no=1)
+    generated = _chapter(record_id="chapter:generated", version_no=2)
+    run = CourseGenerationRun(
+        id="course_generation_run:legacy-success",
+        course="course:one",
+        course_version="course_version:current",
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        status="succeeded",
+        prompt_version="v1",
+        input_hash="a" * 64,
+    )
+    generated.input_hash = artifact_replay_hash(run)
+    run.output_hash = _run_output_hash(generated)
+
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(
+        CourseVersion, "chapters", AsyncMock(return_value=[previous, generated])
+    )
+    monkeypatch.setattr(
+        "open_notebook.course.workflow_service.repo_query",
+        AsyncMock(return_value=[run.model_dump(mode="json")]),
+    )
+
+    current = await CourseCommandService.current_chapter("course:one", "limits")
+
+    assert current.id == "chapter:generated"
+
+
+@pytest.mark.asyncio
+async def test_legacy_succeeded_unbound_run_ambiguity_fails_closed(monkeypatch):
+    from api.course_command_service import CourseCommandService
+
+    course = _current_course()
+    version = _current_version()
+    previous = _chapter(record_id="chapter:published", version_no=1)
+    first = _chapter(record_id="chapter:generated-one", version_no=2)
+    duplicate = _chapter(record_id="chapter:generated-two", version_no=3)
+    run = CourseGenerationRun(
+        id="course_generation_run:legacy-ambiguous",
+        course="course:one",
+        course_version="course_version:current",
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        status="succeeded",
+        prompt_version="v1",
+        input_hash="b" * 64,
+    )
+    first.input_hash = artifact_replay_hash(run)
+    duplicate.input_hash = first.input_hash
+    run.output_hash = _run_output_hash(first)
+
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(
+        CourseVersion,
+        "chapters",
+        AsyncMock(return_value=[previous, first, duplicate]),
+    )
+    monkeypatch.setattr(
+        "open_notebook.course.workflow_service.repo_query",
+        AsyncMock(return_value=[run.model_dump(mode="json")]),
+    )
+
+    current = await CourseCommandService.current_chapter("course:one", "limits")
+
+    assert current.id == "chapter:published"
+
+
+@pytest.mark.asyncio
+async def test_failed_partial_chapter_does_not_replace_current_facades(monkeypatch):
+    from api.course_command_service import CourseCommandService
+
+    course = _current_course()
+    version = _current_version()
+    current = _chapter(record_id="chapter:published", version_no=1)
+    current.status = "published"
+    partial, failed_run = _failed_partial_chapter()
+    lab = Lab(
+        id="lab:published",
+        course_version="course_version:current",
+        chapter="chapter:published",
+        lab_type="function_plot",
+        payload={"key": "limit-plot", "kind": "function_plot"},
+    )
+
+    async def query(statement: str, variables=None):
+        del variables
+        if "FROM course_generation_run" in statement:
+            return [failed_run.model_dump(mode="json")]
+        if "FROM progress" in statement:
+            return []
+        raise AssertionError(statement)
+
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(
+        CourseVersion, "chapters", AsyncMock(return_value=[current, partial])
+    )
+    monkeypatch.setattr(CourseVersion, "labs", AsyncMock(return_value=[lab]))
+    monkeypatch.setattr("api.course_service.repo_query", query)
+    monkeypatch.setattr("open_notebook.course.workflow_service.repo_query", query)
+    monkeypatch.setattr(Attempt, "save", AsyncMock())
+    monkeypatch.setattr(Progress, "save", AsyncMock())
+    monkeypatch.setattr(CourseNote, "save", AsyncMock())
+    monkeypatch.setattr(
+        CourseService, "publish_chapter", AsyncMock(return_value=current)
+    )
+
+    fetched = await CourseCommandService.current_chapter("course:one", "limits")
+    published = await CourseService.publish_current_chapter("course:one", "limits")
+    labs = await CourseService.list_chapter_labs("course:one", "limits")
+    attempt = await CourseService.create_chapter_attempt(
+        "course:one",
+        "limits",
+        "limit-plot",
+        {"answers": {"value": "1"}, "exercise_key": "limit-core"},
+    )
+    progress = await CourseService.upsert_progress(
+        "course:one",
+        {"chapter_key": "limits", "block_key": "intro", "status": "in_progress"},
+    )
+    note = await CourseService.create_note(
+        "course:one",
+        {"chapter_key": "limits", "block_key": "intro", "content": "Keep."},
+    )
+
+    assert fetched.id == "chapter:published"
+    assert published.id == "chapter:published"
+    assert labs[0]["id"] == "lab:published"
+    assert attempt.chapter == "chapter:published"
+    assert progress.chapter == "chapter:published"
+    assert note.chapter == "chapter:published"
+
+
+@pytest.mark.asyncio
+async def test_review_submission_targets_last_successfully_promoted_chapter(monkeypatch):
+    from api.course_command_service import CourseCommandService, CourseJobSubmission
+
+    course = _current_course()
+    version = _current_version()
+    current = _chapter(record_id="chapter:published", version_no=1)
+    current.status = "published"
+    partial, failed_run = _failed_partial_chapter()
+    service = CourseCommandService()
+
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(
+        CourseVersion, "chapters", AsyncMock(return_value=[current, partial])
+    )
+    monkeypatch.setattr(
+        "open_notebook.course.workflow_service.repo_query",
+        AsyncMock(return_value=[failed_run.model_dump(mode="json")]),
+    )
+    monkeypatch.setattr(
+        service,
+        "_grounded",
+        AsyncMock(return_value=(course, {"source:one": "a" * 64}, [])),
+    )
+
+    async def submit_stage(**kwargs):
+        return CourseJobSubmission(
+            command_id=str(kwargs["chapter_id"]),
+            run_id="course_generation_run:review",
+            status="queued",
+        )
+
+    monkeypatch.setattr(service, "submit_stage", submit_stage)
+
+    submission = await service.submit_review(
+        course_id="course:one",
+        chapter_key="limits",
+        anchor_ids=["anchor:one"],
+        prompt_version="v1",
+        model=ModelSelection(
+            adapter="codex_cli",
+            model="gpt-5.6-luna",
+            reasoning_effort="max",
+        ),
+    )
+
+    assert submission.command_id == "chapter:published"
 
 
 @pytest.mark.asyncio

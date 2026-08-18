@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
 
@@ -14,10 +13,12 @@ import httpx
 from open_notebook.ai.models import Model
 from open_notebook.course import state_machine as sm
 from open_notebook.course.contracts import CourseOutlineArtifact, ValidationFinding
+from open_notebook.course.evidence_service import EvidenceInputError, EvidenceService
 from open_notebook.course.generation_service import (
     CourseGenerationService,
     PublicationBlocked,
 )
+from open_notebook.course.model_adapters import CodexCliAdapter
 from open_notebook.course.models import (
     DEFAULT_MODEL_POLICY,
     Attempt,
@@ -28,7 +29,9 @@ from open_notebook.course.models import (
     Lab,
     Progress,
 )
-from open_notebook.course.workflow_service import CourseWorkflowService
+from open_notebook.course.workflow_service import (
+    CourseWorkflowService,
+)
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.base import ObjectModel
 from open_notebook.domain.notebook import Notebook, Source
@@ -158,10 +161,12 @@ async def _owned_chapter(
     if chapter_key is None:
         raise NotFoundError("Course resource not found")
     chapters = await CourseVersion.chapters(version_id)
-    matches = [chapter for chapter in chapters if chapter.chapter_key == chapter_key]
-    if not matches:
-        raise NotFoundError("Course resource not found")
-    return max(matches, key=lambda chapter: chapter.version_no)
+    return await CourseWorkflowService.resolve_current_chapter(
+        course_id=course_id,
+        version_id=version_id,
+        chapter_key=chapter_key,
+        chapters=chapters,
+    )
 
 
 async def _current_chapter_records(
@@ -223,7 +228,7 @@ class CourseService:
         real_models_enabled = (
             os.getenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS") == "1"
         )
-        codex_available = real_models_enabled and shutil.which("codex") is not None
+        codex_available = real_models_enabled and CodexCliAdapter.is_available()
         installed_ollama = (
             await _installed_ollama_models() if real_models_enabled else set()
         )
@@ -360,6 +365,8 @@ class CourseService:
         source_id: str,
         role: Literal["PRIMARY", "SUPPLEMENT"],
     ) -> Course:
+        if role not in {"PRIMARY", "SUPPLEMENT"}:
+            raise InvalidInputError("Course Source role is invalid")
         course = await CourseService.get_course(course_id)
         notebook = await _typed_get(Notebook, course.notebook, "notebook")
         source = await _typed_get(Source, source_id, "source")
@@ -371,11 +378,19 @@ class CourseService:
                 f"Source is already associated as {existing_role}"
             )
         notebook_sources = await notebook.get_sources()
-        relationship_created = source_id not in {
-            item.id for item in notebook_sources
-        }
-        if relationship_created:
-            await source.add_to_notebook(course.notebook)
+        if source_id not in {str(item.id) for item in notebook_sources}:
+            raise CourseConflictError(
+                "Source is not attached to this Course notebook"
+            )
+        file_path = source.asset.file_path if source.asset else None
+        if not file_path:
+            raise EvidenceInputError(
+                "Course Source has no local PDF or PPTX asset."
+            )
+        evidence = EvidenceService()
+        safe_path = evidence.resolve_safe_source_path(file_path)
+        evidence.validate_extension(safe_path)
+
         course.source_ids.append(source_id)
         if role == "PRIMARY":
             course.primary_source_ids.append(source_id)
@@ -389,14 +404,6 @@ class CourseService:
                 course.primary_source_ids.remove(source_id)
             else:
                 course.supplement_source_ids.remove(source_id)
-            if relationship_created:
-                await repo_query(
-                    "DELETE reference WHERE in = $source_id AND out = $notebook_id",
-                    {
-                        "source_id": ensure_record_id(source_id),
-                        "notebook_id": ensure_record_id(course.notebook),
-                    },
-                )
             raise
         return course
 
@@ -583,25 +590,116 @@ class CourseService:
     @staticmethod
     async def publish_version(version_id: str) -> CourseVersion:
         version = await _typed_get(CourseVersion, version_id, "course_version")
-        if version.status == sm.VersionStatus.PUBLISHED:
-            return version
-        if version.status != sm.VersionStatus.GENERATING:
+        if version.status not in {
+            sm.VersionStatus.GENERATING,
+            sm.VersionStatus.PUBLISHED,
+        }:
             raise CourseConflictError("Course version is not ready for publication")
         course = await CourseService.get_course(version.course)
         try:
-            CourseWorkflowService.validate_approved_version(course, version)
+            outline = CourseWorkflowService.validate_approved_version(course, version)
         except ValueError as exc:
             raise CourseConflictError("Approved outline hash does not match") from exc
         chapters = await CourseVersion.chapters(version_id)
-        if not chapters or any(
-            chapter.status != sm.ChapterStatus.PUBLISHED for chapter in chapters
-        ):
+        expected_keys = {proposal.key for proposal in outline.chapters}
+        try:
+            latest = [
+                await CourseWorkflowService.resolve_current_chapter(
+                    course_id=version.course,
+                    version_id=version_id,
+                    chapter_key=key,
+                    chapters=chapters,
+                )
+                for key in sorted(expected_keys)
+            ]
+        except NotFoundError as exc:
+            raise CourseConflictError("All chapters must be published first") from exc
+        if any(chapter.status != sm.ChapterStatus.PUBLISHED for chapter in latest):
             raise CourseConflictError("All chapters must be published first")
-        version.status = sm.transition(
-            "version", version.status, sm.VersionStatus.PUBLISHED
-        )
-        version.published_at = datetime.now(timezone.utc)
-        await version.save()
+
+        if course.status not in {
+            sm.CourseStatus.GENERATING,
+            sm.CourseStatus.READY,
+        }:
+            raise CourseConflictError("Course is no longer generating")
+
+        published_at = version.published_at or datetime.now(timezone.utc)
+        next_version_status = version.status
+        if next_version_status == sm.VersionStatus.GENERATING:
+            next_version_status = sm.transition(
+                "version", version.status, sm.VersionStatus.PUBLISHED
+            )
+        next_course_status = course.status
+        if next_course_status == sm.CourseStatus.GENERATING:
+            next_course_status = sm.transition(
+                "course", course.status, sm.CourseStatus.READY
+            )
+
+        try:
+            await repo_query(
+                """
+                BEGIN TRANSACTION;
+                LET $version_update = (
+                    UPDATE course_version
+                    SET status = 'published', published_at = $published_at
+                    WHERE id = $version_id
+                      AND course = $course_id
+                      AND status = 'generating'
+                      AND outline_hash = $outline_hash
+                    RETURN AFTER
+                );
+                LET $course_update = (
+                    UPDATE course
+                    SET status = 'ready'
+                    WHERE id = $course_id
+                      AND status = 'generating'
+                      AND outline_version_id = $version_id
+                    RETURN AFTER
+                );
+                LET $published_version = (
+                    SELECT id FROM course_version
+                    WHERE id = $version_id
+                      AND course = $course_id
+                      AND status = 'published'
+                      AND outline_hash = $outline_hash
+                );
+                LET $ready_course = (
+                    SELECT id FROM course
+                    WHERE id = $course_id
+                      AND status = 'ready'
+                      AND outline_version_id = $version_id
+                );
+                IF array::len($published_version) != 1
+                   OR array::len($ready_course) != 1 {
+                    THROW 'Course publication conflict'
+                };
+                COMMIT TRANSACTION;
+                """,
+                {
+                    "course_id": ensure_record_id(str(course.id)),
+                    "version_id": ensure_record_id(version_id),
+                    "outline_hash": version.outline_hash,
+                    "published_at": published_at,
+                },
+            )
+        except RuntimeError as exc:
+            current_version = await _typed_get(
+                CourseVersion, version_id, "course_version"
+            )
+            current_course = await CourseService.get_course(version.course)
+            if (
+                current_version.status == sm.VersionStatus.PUBLISHED
+                and current_version.course == version.course
+                and current_version.outline_hash == version.outline_hash
+                and current_course.status == sm.CourseStatus.READY
+                and current_course.outline_version_id == version_id
+            ):
+                return current_version
+            raise CourseConflictError("Course is no longer generating") from exc
+
+        version.status = next_version_status
+        version.published_at = published_at
+        course.status = next_course_status
         return version
 
     @staticmethod

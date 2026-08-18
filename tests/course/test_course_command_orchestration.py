@@ -388,6 +388,248 @@ async def test_unexpected_failure_after_activation_terminalizes_run_without_retr
     assert generate.await_count == 1
 
 
+@pytest.mark.asyncio
+async def test_lab_save_failure_keeps_last_successful_chapter_current(
+    monkeypatch,
+) -> None:
+    import api.course_service as service_module
+    import commands.course_commands as command_module
+    import open_notebook.course.workflow_service as workflow_module
+    from api.course_command_service import CourseCommandService
+    from open_notebook.course.contracts import (
+        ChapterArtifact,
+        ChapterSection,
+        CourseOutlineArtifact,
+        ExerciseArtifact,
+        FormulaArtifact,
+        FunctionPlotLabSpec,
+        ModelSelection,
+        WorkedExampleArtifact,
+    )
+    from open_notebook.course.generation_service import CourseGenerationService
+    from open_notebook.course.model_adapters import FakeCourseModelAdapter
+    from open_notebook.course.models import (
+        Chapter,
+        Course,
+        CourseGenerationRun,
+        CourseVersion,
+        Lab,
+    )
+
+    outline = CourseOutlineArtifact(
+        title="Calculus",
+        chapters=[
+            {
+                "key": "limits",
+                "title": "Limits",
+                "purpose": "Learn limits.",
+                "objective_keys": ["limit"],
+                "anchor_ids": ["anchor:one"],
+                "lab_keys": ["limit-plot"],
+            }
+        ],
+        concepts=[
+            {
+                "key": "limit",
+                "label": "Limit",
+                "anchor_ids": ["anchor:one"],
+            }
+        ],
+    )
+    artifact = ChapterArtifact(
+        chapter_key="limits",
+        purpose="Learn limits.",
+        prerequisites=["algebra"],
+        objectives=["Evaluate limits"],
+        sections=[
+            ChapterSection(
+                key="intro",
+                title="Introduction",
+                markdown="Grounded.",
+                anchor_ids=["anchor:one"],
+            )
+        ],
+        definitions=["Limit"],
+        formulas=[
+            FormulaArtifact(
+                key="identity",
+                latex="x",
+                meaning="Identity",
+                anchor_ids=["anchor:one"],
+                oracle_expression="x",
+            )
+        ],
+        worked_examples=[
+            WorkedExampleArtifact(
+                key="example",
+                prompt="Compute 2 + 2.",
+                steps=["Add."],
+                answer="4",
+                anchor_ids=["anchor:one"],
+                oracle_expression="2 + 2",
+                oracle_answer=4,
+            )
+        ],
+        labs=[
+            FunctionPlotLabSpec(
+                key="limit-plot",
+                title="Plot",
+                expressions=["x"],
+            )
+        ],
+        pitfalls=["Check the domain."],
+        exercises=[
+            ExerciseArtifact(
+                key="core",
+                prompt="Evaluate.",
+                difficulty="core",
+                hints=["h1", "h2", "h3", "h4"],
+                answer="2",
+                transfer_task="Try another.",
+                anchor_ids=["anchor:one"],
+            )
+        ],
+        quick_reference=["lim"],
+        citations=["anchor:one"],
+    )
+    outline_payload = outline.model_dump(mode="json")
+    course = Course(
+        id="course:one",
+        title="Calculus",
+        notebook="notebook:one",
+        status="generating",
+        outline_version_id="course_version:one",
+    )
+    version = CourseVersion(
+        id="course_version:one",
+        course="course:one",
+        version_no=1,
+        status="generating",
+        outline_artifact=outline_payload,
+        outline_hash=hashlib.sha256(
+            json.dumps(
+                outline_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        approved_at="2026-08-18T00:00:00Z",
+        confirmation="确认大纲",
+    )
+    previous = Chapter(
+        id="chapter:published",
+        course_version="course_version:one",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=1,
+        title="Limits",
+        status="published",
+        artifact=artifact.model_dump(mode="json"),
+    )
+    selection = ModelSelection(
+        adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
+    )
+    run = CourseGenerationRun(
+        id="course_generation_run:failed-lab",
+        course="course:one",
+        course_version="course_version:one",
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter=selection.adapter,
+        model=selection.model,
+        reasoning_effort=selection.reasoning_effort,
+        status="running",
+        prompt_version="v1",
+        input_hash="a" * 64,
+        command="command:one",
+    )
+    generated: list[Chapter] = []
+    workflow = workflow_module.CourseWorkflowService(
+        generation=CourseGenerationService(adapter=FakeCourseModelAdapter(artifact))
+    )
+
+    async def save_chapter(self):
+        if self.id is None:
+            self.id = "chapter:partial"
+            generated.append(self)
+
+    async def query(statement: str, variables=None):
+        del variables
+        if "FROM chapter WHERE course_version" in statement:
+            return [
+                item.model_dump(mode="json")
+                for item in generated
+                if item.input_hash == workflow_module.artifact_replay_hash(run)
+            ]
+        if statement.lstrip().startswith("UPDATE $run_id SET chapter"):
+            run.chapter = "chapter:partial"
+            return [run.model_dump(mode="json")]
+        if "SELECT * FROM lab WHERE chapter" in statement:
+            return []
+        if statement.lstrip().startswith("SELECT * FROM course_generation_run"):
+            return [run.model_dump(mode="json")]
+        raise AssertionError(statement)
+
+    async def fail_run_reference(**kwargs):
+        run.status = "failed"
+        run.error_message = str(kwargs["message"])
+
+    monkeypatch.setattr(workflow_module, "repo_query", query)
+    monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
+    monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
+    monkeypatch.setattr(
+        CourseVersion,
+        "chapters",
+        AsyncMock(side_effect=lambda _version_id: [previous, *generated]),
+    )
+    monkeypatch.setattr(Chapter, "save", save_chapter)
+    monkeypatch.setattr(Lab, "save", AsyncMock(side_effect=RuntimeError("Lab.save failed")))
+    monkeypatch.setattr(
+        workflow,
+        "grounded_inputs",
+        AsyncMock(return_value=([], {"source:one": "b" * 64}, [])),
+    )
+    monkeypatch.setattr(workflow, "validate_run_request", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workflow, "validate_run_claim", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workflow, "activate_run", AsyncMock(return_value=run))
+    monkeypatch.setattr(workflow, "load_run", AsyncMock(return_value=run))
+    monkeypatch.setattr(workflow, "fail_run_reference", fail_run_reference)
+    monkeypatch.setattr(command_module, "_workflow", workflow)
+    request = command_module.CourseChapterInput.model_validate(
+        {
+            "run_id": str(run.id),
+            "course_id": "course:one",
+            "chapter_key": "limits",
+            "anchor_ids": ["anchor:one"],
+            "prompt_version": "v1",
+            "model": selection.model_dump(mode="json"),
+            "execution_context": {
+                "command_id": "command:one",
+                "execution_started_at": "2026-08-18T00:00:00Z",
+                "app_name": "open_notebook",
+                "command_name": "course_generate_chapter",
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="Lab.save failed"):
+        await command_module.course_generate_chapter_command(request)
+
+    assert len(generated) == 1
+    assert run.status == "failed"
+    assert run.chapter == "chapter:partial"
+    monkeypatch.setattr(
+        service_module,
+        "repo_query",
+        AsyncMock(return_value=[run.model_dump(mode="json")]),
+    )
+
+    current = await CourseCommandService.current_chapter("course:one", "limits")
+
+    assert current.id == "chapter:published"
+
+
 def test_course_command_registry_import_failure_is_fatal() -> None:
     from api.course_command_registry import ensure_course_commands_registered
 
@@ -706,6 +948,163 @@ def test_succeeded_replay_fails_closed_on_output_hash_mismatch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_complete_run_cas_miss_preserves_failed_terminal(monkeypatch) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.models import CourseGenerationRun
+
+    stale = CourseGenerationRun(
+        id="course_generation_run:stale-complete",
+        course="course:one",
+        stage="outline",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        status="running",
+        prompt_version="v1",
+        input_hash="a" * 64,
+        command="command:one",
+    )
+    terminal = stale.model_copy(update={"status": "failed", "error_message": "boom"})
+
+    async def cas(statement: str, variables=None):
+        assert "WHERE status = 'running'" in statement
+        assert variables is not None
+        return []
+
+    save = AsyncMock()
+    monkeypatch.setattr(module, "repo_query", cas)
+    monkeypatch.setattr(
+        module.CourseGenerationRun, "get", AsyncMock(return_value=terminal)
+    )
+    monkeypatch.setattr(module.CourseGenerationRun, "save", save)
+
+    with pytest.raises(ValueError, match="no longer active"):
+        await module.CourseWorkflowService.complete_run(stale, {"title": "result"})
+
+    assert stale.status == "failed"
+    assert stale.output_hash is None
+    assert stale.error_message == "boom"
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fail_run_cas_miss_preserves_succeeded_terminal(monkeypatch) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.models import CourseGenerationRun
+
+    stale = CourseGenerationRun(
+        id="course_generation_run:stale-failure",
+        course="course:one",
+        stage="outline",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        status="running",
+        prompt_version="v1",
+        input_hash="a" * 64,
+        command="command:one",
+    )
+    terminal = stale.model_copy(
+        update={"status": "succeeded", "output_hash": "b" * 64}
+    )
+
+    async def cas(statement: str, variables=None):
+        assert "WHERE status = 'running'" in statement
+        assert variables is not None
+        return []
+
+    save = AsyncMock()
+    monkeypatch.setattr(module, "repo_query", cas)
+    monkeypatch.setattr(
+        module.CourseGenerationRun, "get", AsyncMock(return_value=terminal)
+    )
+    monkeypatch.setattr(module.CourseGenerationRun, "save", save)
+
+    await module.CourseWorkflowService.fail_run(stale, "late failure")
+
+    assert stale.status == "succeeded"
+    assert stale.output_hash == "b" * 64
+    assert stale.error_message is None
+    save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_chapter_completion_and_stable_links_are_one_atomic_promotion(
+    monkeypatch,
+) -> None:
+    import open_notebook.course.workflow_service as module
+    from open_notebook.course.contracts import ChapterArtifact, ChapterSection
+    from open_notebook.course.models import Chapter, CourseGenerationRun
+
+    artifact = ChapterArtifact(
+        chapter_key="limits",
+        purpose="Learn limits.",
+        objectives=["Understand limits"],
+        sections=[
+            ChapterSection(
+                key="intro",
+                title="Introduction",
+                markdown="Grounded.",
+                anchor_ids=["anchor:one"],
+            )
+        ],
+    )
+    chapter = Chapter(
+        id="chapter:partial",
+        course_version="course_version:one",
+        chapter_no=1,
+        chapter_key="limits",
+        version_no=2,
+        title="Limits",
+        status="reviewing",
+        artifact=artifact.model_dump(mode="json"),
+    )
+    stale = CourseGenerationRun(
+        id="course_generation_run:partial",
+        course="course:one",
+        course_version="course_version:one",
+        chapter="chapter:partial",
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        reasoning_effort="max",
+        status="running",
+        prompt_version="v1",
+        input_hash="a" * 64,
+        command="command:one",
+    )
+    terminal = stale.model_copy(update={"status": "failed", "error_message": "race"})
+    statements: list[str] = []
+
+    async def conflict(statement: str, variables=None):
+        assert variables is not None
+        statements.append(" ".join(statement.split()))
+        raise RuntimeError("Course generation run completion conflict")
+
+    monkeypatch.setattr(module, "repo_query", conflict)
+    monkeypatch.setattr(
+        module.CourseGenerationRun, "get", AsyncMock(return_value=terminal)
+    )
+
+    with pytest.raises(ValueError, match="no longer active"):
+        await module.CourseWorkflowService.complete_chapter_run(
+            run=stale,
+            chapter=chapter,
+            artifact=artifact,
+        )
+
+    assert len(statements) == 1
+    assert "BEGIN TRANSACTION" in statements[0]
+    assert statements[0].index("WHERE id = $run_id AND status = 'running'") < statements[
+        0
+    ].index("UPDATE course_note")
+    assert "THROW 'Course generation run completion conflict'" in statements[0]
+    assert "COMMIT TRANSACTION" in statements[0]
+    assert stale.status == "failed"
+
+
+@pytest.mark.asyncio
 async def test_evidence_replay_hash_uses_immutable_canonical_anchor_output(
     monkeypatch,
 ) -> None:
@@ -775,10 +1174,15 @@ async def test_evidence_replay_hash_uses_immutable_canonical_anchor_output(
         persisted_rows.append(row)
 
     async def query(statement, variables=None):
-        del variables
-        assert "FROM course_evidence_anchor" in statement
-        # Deliberately differs from the build order and includes DB envelope data.
-        return list(reversed(persisted_rows))
+        variables = variables or {}
+        if "FROM course_evidence_anchor" in statement:
+            # Deliberately differs from the build order and includes DB envelope data.
+            return list(reversed(persisted_rows))
+        if statement.lstrip().startswith("UPDATE $run_id"):
+            run.status = "succeeded"
+            run.output_hash = str(variables["output_hash"])
+            return [run.model_dump(mode="json")]
+        raise AssertionError(statement)
 
     async def activate(active_run, _command_id):
         return active_run
@@ -958,6 +1362,10 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
             return []
         if "FROM course_validation_finding" in statement:
             return list(reversed(persisted_rows))
+        if statement.lstrip().startswith("UPDATE $run_id"):
+            run.status = "succeeded"
+            run.output_hash = str(variables["output_hash"])
+            return [run.model_dump(mode="json")]
         raise AssertionError(statement)
 
     async def activate(active_run, _command_id):
@@ -1214,12 +1622,17 @@ async def test_worker_atomically_claims_unbound_run_after_full_preflight(
     monkeypatch.setattr(module.CourseGenerationRun, "save", AsyncMock(return_value=None))
 
     async def bind_query(statement, variables=None):
-        if "SET command = $command_id" not in statement:
-            raise AssertionError(statement)
-        assert run.command is None
-        run.command = str(variables["command_id"])
-        run.status = "running"
-        return [run.model_dump(mode="json")]
+        variables = variables or {}
+        if "SET command = $command_id" in statement:
+            assert run.command is None
+            run.command = str(variables["command_id"])
+            run.status = "running"
+            return [run.model_dump(mode="json")]
+        if statement.lstrip().startswith("UPDATE $run_id"):
+            run.status = "succeeded"
+            run.output_hash = str(variables["output_hash"])
+            return [run.model_dump(mode="json")]
+        raise AssertionError(statement)
 
     monkeypatch.setattr(module, "repo_query", bind_query)
 
@@ -1599,6 +2012,16 @@ async def test_force_outline_runs_create_next_versions_and_replay_own_artifact(
                 for item in versions
                 if item.input_hash == variables["hash"]
             ]
+        if statement.lstrip().startswith("UPDATE $run_id"):
+            target = next(
+                item
+                for item in (first_run, second_run)
+                if str(module.ensure_record_id(str(item.id)))
+                == str(variables["run_id"])
+            )
+            target.status = "succeeded"
+            target.output_hash = str(variables["output_hash"])
+            return [target.model_dump(mode="json")]
         raise AssertionError(statement)
 
     async def activate(run, command_id):
@@ -1942,11 +2365,17 @@ async def test_active_outline_replay_of_approved_artifact_is_read_only(
     monkeypatch.setattr(
         module.CourseVersion, "get", AsyncMock(return_value=version)
     )
-    monkeypatch.setattr(
-        module,
-        "repo_query",
-        AsyncMock(return_value=[version.model_dump(mode="json")]),
-    )
+    async def replay_query(statement: str, variables=None):
+        variables = variables or {}
+        if "FROM course_version WHERE" in statement:
+            return [version.model_dump(mode="json")]
+        if statement.lstrip().startswith("UPDATE $run_id"):
+            run.status = "succeeded"
+            run.output_hash = str(variables["output_hash"])
+            return [run.model_dump(mode="json")]
+        raise AssertionError(statement)
+
+    monkeypatch.setattr(module, "repo_query", replay_query)
     monkeypatch.setattr(
         workflow,
         "grounded_inputs",
@@ -1978,7 +2407,7 @@ async def test_active_outline_replay_of_approved_artifact_is_read_only(
 
 
 @pytest.mark.asyncio
-async def test_ready_passed_chapter_re_review_with_high_finding_blocks_it(
+async def test_re_review_ignores_failed_partial_and_blocks_on_high_finding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import open_notebook.course.workflow_service as module
@@ -2058,6 +2487,17 @@ async def test_ready_passed_chapter_re_review_with_high_finding_blocks_it(
         validation_status="passed",
         artifact=artifact.model_dump(mode="json"),
     )
+    failed_partial = Chapter(
+        id="chapter:failed-partial",
+        course_version="course_version:one",
+        chapter_no=1,
+        chapter_key="limits",
+        title="Limits",
+        version_no=2,
+        status="reviewing",
+        artifact=artifact.model_dump(mode="json"),
+        input_hash="failed-partial-hash",
+    )
     selection = ModelSelection(
         adapter="codex_cli", model="gpt-5.6-luna", reasoning_effort="max"
     )
@@ -2074,6 +2514,21 @@ async def test_ready_passed_chapter_re_review_with_high_finding_blocks_it(
         status="running",
         prompt_version="v1",
         input_hash="logical-hash",
+    )
+    failed_content_run = CourseGenerationRun(
+        id="course_generation_run:failed-content",
+        course="course:one",
+        course_version="course_version:one",
+        chapter="chapter:failed-partial",
+        chapter_key="limits",
+        stage="chapter_content",
+        adapter=selection.adapter,
+        model=selection.model,
+        reasoning_effort=selection.reasoning_effort,
+        status="failed",
+        prompt_version="v1",
+        input_hash="failed-content-claim",
+        output_hash=None,
     )
     finding = ValidationFinding(
         kind="review",
@@ -2092,18 +2547,26 @@ async def test_ready_passed_chapter_re_review_with_high_finding_blocks_it(
     )
 
     async def finding_query(statement: str, variables=None):
-        del variables
+        variables = variables or {}
+        if "FROM course_generation_run" in statement:
+            return [failed_content_run.model_dump(mode="json")]
         if "FROM course_validation_finding" in statement:
             return []
         if statement.lstrip().startswith("DELETE course_validation_finding"):
             return []
         if "UPSERT $finding_id" in statement:
             return []
+        if statement.lstrip().startswith("UPDATE $run_id"):
+            run.status = "succeeded"
+            run.output_hash = str(variables["output_hash"])
+            return [run.model_dump(mode="json")]
         raise AssertionError(statement)
 
     monkeypatch.setattr(module.Course, "get", AsyncMock(return_value=course))
     monkeypatch.setattr(
-        module.CourseVersion, "chapters", AsyncMock(return_value=[chapter])
+        module.CourseVersion,
+        "chapters",
+        AsyncMock(return_value=[chapter, failed_partial]),
     )
     monkeypatch.setattr(
         workflow, "approved_version", AsyncMock(return_value=(version, outline))
@@ -2330,6 +2793,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     versions: list[CourseVersion] = []
     chapters: list[Chapter] = []
     labs: list[Lab] = []
+    chapter_runs: dict[str, CourseGenerationRun] = {}
     link_refreshes: list[str] = []
 
     async def save_course(self):
@@ -2405,6 +2869,45 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
                 for item in labs
                 if item.chapter == str(variables["chapter"])
             ]
+        if statement.lstrip().startswith("SELECT * FROM course_generation_run"):
+            return [
+                item.model_dump(mode="json")
+                for item in chapter_runs.values()
+                if item.course == str(variables["course"])
+                and item.course_version == str(variables["version"])
+                and item.chapter_key == variables["chapter_key"]
+                and item.stage == "chapter_content"
+            ]
+        if statement.lstrip().startswith("UPDATE $run_id SET chapter"):
+            stored_run = next(
+                item
+                for run_id, item in chapter_runs.items()
+                if str(module.ensure_record_id(run_id))
+                == str(variables["run_id"])
+            )
+            stored_run.chapter = str(variables["chapter_id"])
+            return [stored_run.model_dump(mode="json")]
+        if statement.lstrip().startswith("UPDATE $run_id") and "'succeeded'" in statement:
+            stored_run = next(
+                item
+                for run_id, item in chapter_runs.items()
+                if str(module.ensure_record_id(run_id))
+                == str(variables["run_id"])
+            )
+            stored_run.status = "succeeded"
+            stored_run.output_hash = str(variables["output_hash"])
+            return [stored_run.model_dump(mode="json")]
+        if statement.lstrip().startswith("BEGIN TRANSACTION"):
+            stored_run = next(
+                item
+                for run_id, item in chapter_runs.items()
+                if str(module.ensure_record_id(run_id))
+                == str(variables["run_id"])
+            )
+            stored_run.status = "succeeded"
+            stored_run.output_hash = str(variables["output_hash"])
+            link_refreshes.append(str(variables["chapter_key"]))
+            return []
         if "course_validation_finding" in statement:
             return []
         if statement.lstrip().startswith("UPDATE course_note"):
@@ -2471,6 +2974,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
             source_hashes={"source:e2e": source_hash},
         ),
     )
+    chapter_runs[str(evidence_run.id)] = evidence_run
     built = await workflow.build_evidence(
         run=evidence_run,
         command_id="command:evidence",
@@ -2515,6 +3019,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
             source_hashes={"source:e2e": source_hash},
         ),
     )
+    chapter_runs[str(outline_run.id)] = outline_run
     version = await workflow.generate_outline(
         run=outline_run,
         command_id="command:outline",
@@ -2569,6 +3074,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
             chapter_key="limits",
         ),
     )
+    chapter_runs[str(chapter_run.id)] = chapter_run
     chapter = await workflow.generate_chapter(
         run=chapter_run,
         command_id="command:chapter",
@@ -2595,6 +3101,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
             "output_hash": None,
         }
     )
+    chapter_runs[str(forced_chapter_run.id)] = forced_chapter_run
     second_chapter = await workflow.generate_chapter(
         run=forced_chapter_run,
         command_id="command:chapter-force",
@@ -2657,6 +3164,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
             chapter_key="limits",
         ),
     )
+    chapter_runs[str(review_run.id)] = review_run
     reviewed, findings = await workflow.review_chapter(
         run=review_run,
         command_id="command:review",

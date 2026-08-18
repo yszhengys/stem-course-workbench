@@ -74,7 +74,12 @@ class CodexCliAdapter(CourseModelAdapter):
             return explicit
         configured = os.getenv("CODEX_CLI_PATH")
         if configured:
-            return configured
+            discovered = shutil.which(configured)
+            if discovered:
+                return discovered
+            raise AdapterError(
+                "Codex CLI was not found. Configure CODEX_CLI_PATH or install Codex."
+            )
         discovered = shutil.which("codex")
         if discovered:
             return discovered
@@ -83,6 +88,16 @@ class CodexCliAdapter(CourseModelAdapter):
         raise AdapterError(
             "Codex CLI was not found. Configure CODEX_CLI_PATH or install Codex."
         )
+
+    @classmethod
+    def is_available(cls) -> bool:
+        """Probe discovery without exposing the resolved local filesystem path."""
+
+        try:
+            cls.discover_binary()
+        except AdapterError:
+            return False
+        return True
 
     @staticmethod
     def _environment() -> dict[str, str]:
