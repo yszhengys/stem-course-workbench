@@ -129,7 +129,8 @@ if args and args[0] == "inspect":
     if "working_dir" in fmt:
         print((state / "docker.root").read_text(encoding="utf-8").strip())
     elif "service" in fmt:
-        print("surrealdb")
+        service_file = state / "docker.service"
+        print(service_file.read_text(encoding="utf-8").strip() if service_file.exists() else "surrealdb")
     elif "State.Running" in fmt:
         print("true" if (state / "docker.running").exists() else "false")
     raise SystemExit(0)
@@ -138,12 +139,15 @@ if args and args[0] == "compose":
     tail = args[args.index(project_dir) + 1:]
     if tail == ["ps", "--all", "-q", "surrealdb"]:
         if (state / "docker.exists").exists() or (state / "docker.running").exists():
-            print("fake-surrealdb")
+            id_file = state / "docker.id"
+            print(id_file.read_text(encoding="utf-8").strip() if id_file.exists() else "fake-surrealdb")
         raise SystemExit(0)
     if tail == ["up", "-d", "surrealdb"]:
         (state / "docker.exists").touch()
         (state / "docker.running").touch()
         (state / "docker.root").write_text(project_dir, encoding="utf-8")
+        (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+        (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
         raise SystemExit(0)
     if tail == ["stop", "surrealdb"]:
         (state / "docker.running").unlink(missing_ok=True)
@@ -170,6 +174,15 @@ if delay:
 failure = os.environ.get("FAKE_FAIL_READY", "")
 status = os.environ.get("FAKE_HTTP_STATUS", "200")
 body = "ok"
+db_race = os.environ.get("FAKE_DB_POST_UP_RACE", "")
+if db_race and url.endswith(":8000/health"):
+    if db_race == "id":
+        (state / "docker.id").write_text("foreign-surrealdb", encoding="utf-8")
+    elif db_race == "root":
+        (state / "docker.root").write_text("/another/checkout", encoding="utf-8")
+    elif db_race == "service":
+        (state / "docker.service").write_text("foreign-service", encoding="utf-8")
+    raise SystemExit(22)
 if failure == "api" and url.endswith(":5055/health"):
     raise SystemExit(22)
 if failure == "frontend-page" and url.endswith("/courses/new"):
@@ -187,6 +200,14 @@ elif url.endswith("/courses/new"):
         body = '<div data-course-workbench-ready="connection-checking">loading</div>'
     else:
         body = '<html>current repository contract is not ready</html>'
+    if os.environ.get("FAKE_WORKER_EXITS_AFTER_READY") == "1":
+        (state / "worker.exit").touch()
+        deadline = time.monotonic() + 2
+        worker_pid_file = state / "worker.pid"
+        if worker_pid_file.exists():
+            worker_pid = worker_pid_file.read_text(encoding="utf-8").strip()
+            while not (state / f"pid.{worker_pid}.dead").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
 if "-o" in args:
     output = args[args.index("-o") + 1]
     if output != "/dev/null":
@@ -316,11 +337,17 @@ while True:
                 time.sleep(0.01)
         print("Application startup complete", flush=True)
     elif "surreal-commands-worker" in args:
+        (state / "worker.pid").write_text(str(pid), encoding="utf-8")
         (state / f"pid.{pid}.command").write_text("uv run surreal-commands-worker", encoding="utf-8")
         (state / f"pid.{pid}.executable").write_text("/fake/uv", encoding="utf-8")
         (state / f"pid.{pid}.start").write_text("Mon Aug 18 01:00:00 2026", encoding="utf-8")
         print("Successfully imported 1/1 modules", flush=True)
         print("Starting LIVE query listener for new commands...", flush=True)
+        if os.environ.get("FAKE_WORKER_EXITS_AFTER_READY") == "1":
+            while not (state / "worker.exit").exists():
+                time.sleep(0.01)
+            (state / f"pid.{pid}.dead").touch()
+            raise SystemExit(0)
     else:
         raise SystemExit(2)
     signal.signal(signal.SIGTERM, lambda *_: raise_exit())
@@ -578,6 +605,76 @@ def test_existing_env_explicit_course_model_opt_out_is_preserved(
     assert _run(repo, env, "stop").returncode == 0
 
 
+@pytest.mark.parametrize(
+    "first_value", ["change-me-to-a-secret-string", "   "]
+)
+def test_leading_whitespace_first_key_is_secured_and_duplicate_is_removed(
+    fake_repo: tuple[Path, dict[str, str], Path], first_value: str
+) -> None:
+    repo, env, _ = fake_repo
+    env = _with_ui_contract(env)
+    env_file = repo / ".env"
+    env_file.write_text(
+        f"  OPEN_NOTEBOOK_ENCRYPTION_KEY={first_value}\n"
+        "OPEN_NOTEBOOK_ENCRYPTION_KEY=valid-but-not-first-0123456789abcdef\n"
+        "  OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=0\n",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assignments = [
+        line
+        for line in env_file.read_text(encoding="utf-8").splitlines()
+        if line.lstrip().startswith("OPEN_NOTEBOOK_ENCRYPTION_KEY=")
+    ]
+    assert len(assignments) == 1
+    replacement = assignments[0].split("=", 1)[1].strip()
+    assert replacement not in {
+        "",
+        "change-me-to-a-secret-string",
+        "valid-but-not-first-0123456789abcdef",
+    }
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    assert "  OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=0" in lines
+    assert not any(
+        line.lstrip() == "OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1"
+        for line in lines
+    )
+    assert replacement not in result.stdout + result.stderr
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_leading_whitespace_valid_key_and_explicit_model_opt_out_are_preserved(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, _ = fake_repo
+    env = _with_ui_contract(env)
+    key = "valid-leading-key-0123456789abcdef"
+    env_file = repo / ".env"
+    env_file.write_text(
+        f"  OPEN_NOTEBOOK_ENCRYPTION_KEY={key}\n"
+        "  OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=0\n",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = env_file.read_text(encoding="utf-8").splitlines()
+    key_assignments = [
+        line
+        for line in lines
+        if line.lstrip().startswith("OPEN_NOTEBOOK_ENCRYPTION_KEY=")
+    ]
+    assert key_assignments == [f"  OPEN_NOTEBOOK_ENCRYPTION_KEY={key}"]
+    assert "  OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=0" in lines
+    assert not any(
+        line.lstrip() == "OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1"
+        for line in lines
+    )
+    assert _run(repo, env, "stop").returncode == 0
+
+
 def test_lockfile_changes_repeat_locked_install(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
@@ -755,6 +852,26 @@ def test_other_checkout_surreal_container_is_rejected(
     assert not any("stop surrealdb" in line for line in _calls(state / "docker.calls"))
 
 
+@pytest.mark.parametrize("race", ["id", "root", "service"])
+def test_post_up_container_ownership_race_is_never_stopped_by_rollback(
+    fake_repo: tuple[Path, dict[str, str], Path], race: str
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "FAKE_DB_POST_UP_RACE": race,
+        "COURSE_WORKBENCH_READY_TIMEOUT": "1",
+    }
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode != 0
+    assert (state / "docker.running").exists()
+    assert not any(
+        call.endswith("stop surrealdb") for call in _calls(state / "docker.calls")
+    )
+
+
 def test_compose_is_explicit_and_checks_stopped_container_ownership(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
@@ -868,6 +985,26 @@ def test_full_readiness_when_task4_contract_exists_opens_new_course_and_uses_def
     assert "http://127.0.0.1:3000/config" in curl_calls
     assert "http://127.0.0.1:3000/courses/new" in curl_calls
     assert _run(repo, env, "stop").returncode == 0
+
+
+def test_worker_that_logs_live_listener_then_exits_cannot_pass_final_readiness(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "FAKE_WORKER_EXITS_AFTER_READY": "1",
+        "COURSE_WORKBENCH_READY_TIMEOUT": "1",
+    }
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode != 0
+    assert "STEM Course Workbench is ready" not in result.stdout
+    worker_pid = (state / "worker.pid").read_text(encoding="utf-8").strip()
+    assert (state / f"pid.{worker_pid}.dead").exists()
+    runtime = repo / ".runtime" / "course-workbench"
+    assert not list(runtime.glob("worker.*"))
 
 
 def test_exact_200_course_route_rejects_non_course_connection_marker(
@@ -1003,13 +1140,14 @@ def test_repository_declares_course_ui_startup_contract() -> None:
         encoding="utf-8"
     )
     guard_source = connection_guard.read_text(encoding="utf-8")
-    assert "pathname === '/courses/new' ? 'new-course' : 'connection-checking'" in (
-        guard_source
-    )
     checking_branch = guard_source.split("if (isChecking)", 1)[1].split(
         "// Render children", 1
     )[0]
     assert "return null" not in checking_branch
+    assert "data-course-workbench-ready" in checking_branch
+    assert "/courses/new" in checking_branch
+    assert "new-course" in checking_branch
+    assert "connection-checking" in checking_branch
     assert "LoadingSpinner" in checking_branch or "loading" in checking_branch.lower()
     config_source = backend_config.read_text(encoding="utf-8")
     assert "VERSION_CHECK_TIMEOUT_SECONDS = 0.5" in config_source

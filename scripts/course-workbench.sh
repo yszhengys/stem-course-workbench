@@ -22,6 +22,7 @@ POLL_INTERVAL=${COURSE_WORKBENCH_POLL_INTERVAL:-1}
 STOP_POLL_INTERVAL=${COURSE_WORKBENCH_STOP_POLL_INTERVAL:-0.1}
 
 STARTED_DB=0
+STARTED_DB_CONTAINER_ID=""
 STARTED_API=0
 STARTED_WORKER=0
 STARTED_FRONTEND=0
@@ -198,7 +199,7 @@ rewrite_env_key() {
         cat "$source_file"
     } | awk '
         NR == 1 { replacement = $0; next }
-        /^OPEN_NOTEBOOK_ENCRYPTION_KEY=/ {
+        /^[[:space:]]*OPEN_NOTEBOOK_ENCRYPTION_KEY=/ {
             if (!replaced) print "OPEN_NOTEBOOK_ENCRYPTION_KEY=" replacement
             replaced = 1
             next
@@ -218,7 +219,7 @@ rewrite_env_key() {
 }
 
 ensure_course_model_permission() {
-    if grep -q '^OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=' "$ENV_FILE"; then
+    if grep -Eq '^[[:space:]]*OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=' "$ENV_FILE"; then
         return 0
     fi
 
@@ -248,11 +249,12 @@ ensure_env() {
             return 1
         }
         existing_key=$(awk '
-            /^OPEN_NOTEBOOK_ENCRYPTION_KEY=/ {
-                sub(/^OPEN_NOTEBOOK_ENCRYPTION_KEY=/, "")
+            /^[[:space:]]*OPEN_NOTEBOOK_ENCRYPTION_KEY=/ && !found {
                 value = $0
+                sub(/^[[:space:]]*OPEN_NOTEBOOK_ENCRYPTION_KEY=/, "", value)
+                print value
+                found = 1
             }
-            END { print value }
         ' "$ENV_FILE")
         normalized_key=$(printf '%s\n' "$existing_key" | awk '
             {
@@ -582,9 +584,11 @@ assert_host_port_available() {
 
 compose_container_state() {
     CONTAINER_REASON=""
+    CONTAINER_ID=""
     container_id=$(docker compose -f "$REPO_ROOT/docker-compose.yml" \
         --project-directory "$REPO_ROOT" ps --all -q surrealdb 2>/dev/null || true)
     [ -z "$container_id" ] && return 1
+    CONTAINER_ID=$container_id
     container_root=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$container_id" 2>/dev/null || true)
     container_service=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$container_id" 2>/dev/null || true)
     container_running=$(docker inspect -f '{{.State.Running}}' "$container_id" 2>/dev/null || true)
@@ -627,6 +631,7 @@ start_database() {
         error "Started SurrealDB but its Compose ownership could not be verified: $CONTAINER_REASON"
         return 1
     fi
+    STARTED_DB_CONTAINER_ID=$CONTAINER_ID
 }
 
 set_started_flag() {
@@ -808,11 +813,13 @@ http_200_to_file() {
 }
 
 surreal_ready() {
-    http_200_to_file http://127.0.0.1:8000/health /dev/null
+    compose_container_state && \
+        http_200_to_file http://127.0.0.1:8000/health /dev/null
 }
 
 api_health_ready() {
-    http_200_to_file http://127.0.0.1:5055/health /dev/null
+    validate_process api && \
+        http_200_to_file http://127.0.0.1:5055/health /dev/null
 }
 
 api_database_ready() {
@@ -833,12 +840,15 @@ course_router_ready() {
 
 worker_ready() {
     worker_log=$(log_path worker)
+    validate_process worker || return 1
     [ -f "$worker_log" ] || return 1
     grep -Eq 'Successfully imported [1-9][0-9]*/[1-9][0-9]* modules' "$worker_log" && \
-        grep -Fq 'Starting LIVE query listener for new commands' "$worker_log"
+        grep -Fq 'Starting LIVE query listener for new commands' "$worker_log" && \
+        validate_process worker
 }
 
 frontend_config_ready() {
+    validate_process frontend || return 1
     response_file="$RUNTIME_DIR/frontend-config-response.$$"
     if ! http_200_to_file http://127.0.0.1:3000/config "$response_file"; then
         rm -f "$response_file"
@@ -851,6 +861,7 @@ frontend_config_ready() {
 }
 
 course_page_ready() {
+    validate_process frontend || return 1
     response_file="$RUNTIME_DIR/course-page-response.$$"
     if ! http_200_to_file "$COURSE_URL" "$response_file"; then
         rm -f "$response_file"
@@ -860,6 +871,16 @@ course_page_ready() {
     result=$?
     rm -f "$response_file"
     return "$result"
+}
+
+all_services_ready() {
+    surreal_ready && \
+        api_health_ready && \
+        api_database_ready && \
+        course_router_ready && \
+        worker_ready && \
+        frontend_config_ready && \
+        course_page_ready
 }
 
 wait_for() {
@@ -912,12 +933,36 @@ stop_owned_database() {
 
 rollback_new_services() {
     error "Startup failed; rolling back only services started by this invocation."
-    [ "$STARTED_FRONTEND" -eq 1 ] && stop_verified_service frontend >/dev/null 2>&1 || true
-    [ "$STARTED_WORKER" -eq 1 ] && stop_verified_service worker >/dev/null 2>&1 || true
-    [ "$STARTED_API" -eq 1 ] && stop_verified_service api >/dev/null 2>&1 || true
+    for service in frontend worker api; do
+        case "$service" in
+            frontend) was_started=$STARTED_FRONTEND ;;
+            worker) was_started=$STARTED_WORKER ;;
+            api) was_started=$STARTED_API ;;
+        esac
+        [ "$was_started" -eq 1 ] || continue
+        if stop_verified_service "$service" >/dev/null 2>&1; then
+            set_started_flag "$service" 0
+            continue
+        fi
+        rollback_pid=$(read_first_line "$(runtime_path "$service" pid)")
+        if ! process_alive "$rollback_pid"; then
+            cleanup_process_metadata "$service"
+            set_started_flag "$service" 0
+        else
+            error "Refusing to roll back live unverified $service process: $PROCESS_REASON"
+        fi
+    done
     if [ "$STARTED_DB" -eq 1 ]; then
-        docker compose -f "$REPO_ROOT/docker-compose.yml" \
-            --project-directory "$REPO_ROOT" stop surrealdb >/dev/null 2>&1 || true
+        compose_container_state
+        rollback_container_state=$?
+        if [ "$rollback_container_state" -eq 0 ] && \
+           [ -n "$STARTED_DB_CONTAINER_ID" ] && \
+           [ "$CONTAINER_ID" = "$STARTED_DB_CONTAINER_ID" ]; then
+            docker compose -f "$REPO_ROOT/docker-compose.yml" \
+                --project-directory "$REPO_ROOT" stop surrealdb >/dev/null 2>&1 || true
+        else
+            error "Refusing to roll back SurrealDB because its container identity or Compose ownership changed."
+        fi
     fi
     error "Logs: $(log_path api), $(log_path worker), $(log_path frontend)"
     for service in api worker frontend; do
@@ -932,6 +977,7 @@ rollback_new_services() {
 start_locked() {
     open_browser=$1
     STARTED_DB=0
+    STARTED_DB_CONTAINER_ID=""
     STARTED_API=0
     STARTED_WORKER=0
     STARTED_FRONTEND=0
@@ -954,6 +1000,7 @@ start_locked() {
         error "The frontend answered, but /courses/new did not expose its route-specific new-course readiness marker. Finish/rebuild the Course UI and retry."
         return 1
     fi
+    wait_for "complete seven-point Course Workbench readiness" all_services_ready || return 1
 
     say "STEM Course Workbench is ready: $COURSE_URL"
     if [ "$open_browser" -eq 1 ]; then
