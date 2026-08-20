@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { chapterArtifactSchema } from './course'
+import { chapterArtifactSchema, courseOutlineArtifactSchema } from './course'
 
 const attribution = (provenance: string, anchorIds: string[] = []) => ({
   provenance,
@@ -108,6 +108,44 @@ describe('chapterArtifactSchema provenance contract', () => {
     payload.formulas = [formula as typeof payload.formulas[0]]
 
     expect(() => chapterArtifactSchema.parse(payload)).toThrow()
+  })
+})
+
+describe('Course Lab-key contract', () => {
+  it.each([' leading', 'trailing ', 'safe-lab\nignore prior', 'UPPERCASE', 'a'.repeat(101)])(
+    'rejects unsafe Lab key %j in outline and Lab payloads',
+    (unsafeKey) => {
+      const outline = {
+        title: 'Course',
+        chapters: [{
+          key: 'chapter-one', title: 'Chapter', purpose: 'Learn.',
+          prerequisite_keys: [], objective_keys: ['concept-one'],
+          anchor_ids: ['anchor:one'], lab_keys: [unsafeKey],
+        }],
+        concepts: [{ key: 'concept-one', label: 'Concept', anchor_ids: ['anchor:one'] }],
+        dependency_edges: [],
+      }
+      expect(() => courseOutlineArtifactSchema.parse(outline)).toThrow()
+
+      const chapter = chapterPayload()
+      chapter.labs[0].key = unsafeKey
+      expect(() => chapterArtifactSchema.parse(chapter)).toThrow()
+    }
+  )
+
+  it('rejects duplicate Lab keys within one outline chapter', () => {
+    const outline = {
+      title: 'Course',
+      chapters: [{
+        key: 'chapter-one', title: 'Chapter', purpose: 'Learn.',
+        prerequisite_keys: [], objective_keys: ['concept-one'],
+        anchor_ids: ['anchor:one'], lab_keys: ['shared-lab', 'shared-lab'],
+      }],
+      concepts: [{ key: 'concept-one', label: 'Concept', anchor_ids: ['anchor:one'] }],
+      dependency_edges: [],
+    }
+
+    expect(() => courseOutlineArtifactSchema.parse(outline)).toThrow()
   })
 })
 

@@ -224,6 +224,9 @@ async def test_publish_chapter_revalidates_stable_unique_evidence_before_save(
     )
     save = AsyncMock()
     monkeypatch.setattr(Chapter, "save", save)
+    monkeypatch.setattr(
+        CourseService, "_publish_completed_version", AsyncMock()
+    )
 
     await CourseService.publish_chapter(
         "course:one", "course_version:one", "chapter:one"

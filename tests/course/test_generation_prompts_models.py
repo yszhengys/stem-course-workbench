@@ -388,7 +388,7 @@ def test_all_generated_chapter_text_rejects_code_and_html(path, unsafe):
         ChapterArtifact.model_validate(payload)
 
 
-def test_outline_rejects_duplicate_proposed_lab_keys():
+def test_outline_allows_the_same_proposed_lab_key_in_different_chapters():
     outline = {
         "title": "Course",
         "chapters": [
@@ -414,10 +414,14 @@ def test_outline_rejects_duplicate_proposed_lab_keys():
         ],
     }
 
-    with pytest.raises(ValueError, match="lab keys must be unique"):
-        CourseGenerationService.validate_outline(
-            outline, {"anchor:one"}, available_lab_keys={"shared-lab"}
-        )
+    validated = CourseGenerationService.validate_outline(
+        outline, {"anchor:one"}, available_lab_keys={"shared-lab"}
+    )
+
+    assert [chapter.lab_keys for chapter in validated.chapters] == [
+        ["shared-lab"],
+        ["shared-lab"],
+    ]
 
 
 def test_escalation_merge_rejects_out_of_scope_item_or_anchor():

@@ -11,7 +11,7 @@ import httpx
 from pydantic import ConfigDict, Field, field_validator
 from surreal_commands import CommandInput, CommandOutput, command
 
-from open_notebook.course.contracts import ModelSelection
+from open_notebook.course.contracts import ModelSelection, SafeLabKey
 from open_notebook.course.model_adapters import (
     AdapterError,
     ensure_course_models_selectable,
@@ -52,7 +52,14 @@ class CourseEvidenceInput(StrictCourseCommandInput):
 
 
 class CourseOutlineInput(AnchoredCourseCommandInput):
-    available_lab_keys: list[str] = Field(max_length=100)
+    available_lab_keys: list[SafeLabKey] = Field(min_length=1, max_length=100)
+
+    @field_validator("available_lab_keys")
+    @classmethod
+    def lab_keys_are_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("lab keys must be unique")
+        return value
 
 
 class CourseChapterInput(AnchoredCourseCommandInput):

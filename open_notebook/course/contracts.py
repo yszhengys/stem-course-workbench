@@ -25,6 +25,8 @@ ProvenanceLabel: TypeAlias = Literal[
     "verbatim", "adapted", "derived", "pedagogical", "补充"
 ]
 GROUNDED_PROVENANCE_LABELS = frozenset({"verbatim", "adapted", "补充"})
+SAFE_LAB_KEY_PATTERN = r"^[a-z0-9][a-z0-9_-]{0,99}$"
+SafeLabKey: TypeAlias = Annotated[str, Field(pattern=SAFE_LAB_KEY_PATTERN)]
 
 _COMMONMARK_FENCE = re.compile(r"(?m)^[ \t]{0,3}(?:`{3,}|~{3,})")
 _ANGLE_TOKEN = re.compile(r"<[^<>\r\n]+>")
@@ -179,9 +181,16 @@ class OutlineChapter(CourseContract):
     prerequisite_keys: list[str] = Field(default_factory=list, max_length=100)
     objective_keys: list[str] = Field(min_length=1, max_length=100)
     anchor_ids: list[str] = Field(min_length=1, max_length=100)
-    lab_keys: list[str] = Field(min_length=1, max_length=20)
+    lab_keys: list[SafeLabKey] = Field(min_length=1, max_length=20)
 
     _safe_text = field_validator("title", "purpose")(_validate_generated_text)
+
+    @field_validator("lab_keys")
+    @classmethod
+    def lab_keys_are_unique(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("Lab keys must be unique within each chapter")
+        return value
 
 
 class CourseOutlineArtifact(CourseContract):
@@ -358,7 +367,7 @@ class LabSpec(ProvenancedArtifact):
     kind: Literal[
         "function_plot", "parametric_curve", "vector_field", "geometry", "kinematics"
     ]
-    key: str = Field(min_length=1, max_length=100)
+    key: SafeLabKey
     title: str = Field(min_length=1, max_length=300)
     expressions: list[str] = Field(default_factory=list, max_length=8)
     domain: dict[str, tuple[float, float]] = Field(default_factory=dict, max_length=8)

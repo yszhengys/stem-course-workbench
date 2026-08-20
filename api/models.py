@@ -2,7 +2,11 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from open_notebook.course.contracts import LabSpecVariant, ModelSelection
+from open_notebook.course.contracts import (
+    LabSpecVariant,
+    ModelSelection,
+    SafeLabKey,
+)
 
 
 # Notebook models
@@ -833,13 +837,11 @@ class CourseEvidenceBuildRequest(StrictCourseRequest):
 
 
 class CourseOutlineGenerateRequest(CourseAnchoredJobRequest):
-    available_lab_keys: List[str] = Field(..., min_length=1, max_length=100)
+    available_lab_keys: List[SafeLabKey] = Field(..., min_length=1, max_length=100)
 
     @field_validator("available_lab_keys")
     @classmethod
     def lab_keys_are_unique(cls, value: List[str]) -> List[str]:
-        if any(not lab_key.strip() for lab_key in value):
-            raise ValueError("lab keys must be non-empty")
         if len(value) != len(set(value)):
             raise ValueError("lab keys must be unique")
         return value

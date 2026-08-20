@@ -11,14 +11,14 @@ PDF/PPTX Source
   -> exact human approval
   -> immutable chapter version + declarative labs
   -> independent review/escalation + deterministic validators
-  -> human publish
+  -> human chapter publish; the final current chapter runs whole-Course promotion
   -> stable-key notes/progress/attempt history
 ```
 
 - Docker 只运行 SurrealDB（`127.0.0.1:8000`）。
 - API（`5055`）、worker 和 Next.js（`3000`）运行在宿主机。
 - Course 重型本地任务使用领域级互斥锁；上游 worker 默认并发保持 5。
-- migration 24 保留旧兼容层，V2 增量结构和约束位于 migration 25；不得替换已经应用的迁移编号。
+- 已落地的 migration 24 保持不可变，V2 增量结构和约束位于 migration 25；不得替换已经应用的迁移编号，也不宣称会自动回填任意非空的旧 migration-24 Course 数据。
 
 ## 代码边界
 
@@ -37,7 +37,7 @@ PDF/PPTX Source
 3. 模型只能读取调用中明确选择且重新验证过的锚点；队列参数、顺序、当前源哈希和持久 run claim 必须一致。
 4. 大纲批准要求当前版本、服务端 artifact hash、合法 DAG 和精确确认短语 `确认大纲`。
 5. 已批准/已发布 artifact 不可变；`force` 或终态重试创建 run-scoped 的下一版本，同一 run 重放不重复创建。
-6. 章节发布必须属于当前完整批准大纲、是最新版本，并且没有未解决的 error/high/manual blocker。
+6. 章节发布必须属于当前完整批准大纲、是最新版本，并且没有未解决的 error/high/manual blocker；最后一个当前章节发布后复用整本证据与原子竞态门自动晋级 Course version。
 7. finding、公式、单位、数值、物理规则、引用和 Lab 都 fail closed；人工处理需要状态和原因。
 8. Lab 只接受五种严格 JSON 联合类型；任何 JavaScript/HTML/可执行内容均拒绝。
 9. 笔记、进度和练习使用稳定 chapter/block/exercise/lab key；历史记录不因重新生成而覆盖。

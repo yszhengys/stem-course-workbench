@@ -85,6 +85,8 @@ export const dependencyEdgeSchema = z.object({
   to_key: z.string().min(1),
 }).strict()
 
+const safeLabKeySchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,99}$/)
+
 export const outlineChapterSchema = z.object({
   key: z.string().min(1),
   title: z.string().min(1),
@@ -92,8 +94,16 @@ export const outlineChapterSchema = z.object({
   prerequisite_keys: z.array(z.string()),
   objective_keys: z.array(z.string()).min(1),
   anchor_ids: z.array(z.string()).min(1),
-  lab_keys: z.array(z.string()).min(1),
-}).strict()
+  lab_keys: z.array(safeLabKeySchema).min(1),
+}).strict().superRefine((chapter, context) => {
+  if (new Set(chapter.lab_keys).size !== chapter.lab_keys.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['lab_keys'],
+      message: 'Lab keys must be unique within each chapter',
+    })
+  }
+})
 
 export const courseOutlineArtifactSchema = z.object({
   title: z.string().min(1),
@@ -205,7 +215,7 @@ const labObjectsSchema = z.array(z.record(z.string(), z.unknown())).max(8).super
 })
 
 const labBase = {
-  key: z.string().min(1).max(100),
+  key: safeLabKeySchema,
   title: z.string().min(1).max(300),
   anchor_ids: z.array(z.string().min(1)).max(100),
   provenance: provenanceSchema,

@@ -1347,6 +1347,8 @@ async def test_publish_chapter_returns_terminal_published_chapter_without_save(
     monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
     save = AsyncMock()
     monkeypatch.setattr(Chapter, "save", save)
+    promote = AsyncMock()
+    monkeypatch.setattr(CourseService, "_publish_completed_version", promote)
 
     published = await CourseService.publish_chapter(
         "course:one", "course_version:1", "chapter:one"
@@ -1355,6 +1357,7 @@ async def test_publish_chapter_returns_terminal_published_chapter_without_save(
     assert published is chapter
     assert published.status == "published"
     save.assert_not_awaited()
+    promote.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1371,6 +1374,8 @@ async def test_publish_chapter_succeeds_after_every_gate_passes(monkeypatch):
     patch_publication_evidence(monkeypatch)
     save = AsyncMock()
     monkeypatch.setattr(Chapter, "save", save)
+    promote = AsyncMock()
+    monkeypatch.setattr(CourseService, "_publish_completed_version", promote)
 
     published = await CourseService.publish_chapter(
         "course:one", "course_version:1", "chapter:one"
@@ -1379,6 +1384,7 @@ async def test_publish_chapter_succeeds_after_every_gate_passes(monkeypatch):
     assert published.status == "published"
     assert published.published_at is not None
     save.assert_awaited_once()
+    promote.assert_awaited_once()
 
 
 @pytest.fixture

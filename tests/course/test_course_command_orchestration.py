@@ -3463,10 +3463,13 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
     assert len(adapter.calls) == 4
     assert reviewed.status == "ready"
 
+    publish_version = AsyncMock(return_value=version)
+    monkeypatch.setattr(CourseService, "publish_version", publish_version)
     published = await CourseService.publish_chapter(
         "course:e2e", str(version.id), str(chapter.id)
     )
     assert published.status == "published"
+    publish_version.assert_awaited_once_with(str(version.id))
     side_effect_counts = (len(adapter.calls), len(labs), len(link_refreshes))
     replayed_published = await workflow.generate_chapter(
         run=forced_chapter_run,

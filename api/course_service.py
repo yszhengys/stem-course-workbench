@@ -791,13 +791,14 @@ class CourseService:
         chapter = await _typed_get(Chapter, chapter_id, "chapter")
         if version.course != course_id or chapter.course_version != version_id:
             raise NotFoundError("Chapter not found in Course")
-        if chapter.status == sm.ChapterStatus.PUBLISHED:
-            return chapter
         try:
             outline = CourseWorkflowService.validate_approved_version(course, version)
             CourseWorkflowService._outline_chapter(outline, chapter.chapter_key)
         except ValueError as exc:
             raise CourseConflictError("Current Course outline is not approved") from exc
+        if chapter.status == sm.ChapterStatus.PUBLISHED:
+            await CourseService._publish_completed_version(version, outline)
+            return chapter
         if chapter.status != sm.ChapterStatus.READY:
             raise CourseConflictError("Chapter is not ready for publication")
         if (
@@ -834,7 +835,34 @@ class CourseService:
         )
         chapter.published_at = datetime.now(timezone.utc)
         await chapter.save()
+        await CourseService._publish_completed_version(version, outline)
         return chapter
+
+    @staticmethod
+    async def _publish_completed_version(
+        version: CourseVersion, outline: CourseOutlineArtifact
+    ) -> None:
+        """Promote only after every approved chapter's current version is published."""
+
+        if version.id is None:
+            raise CourseConflictError("Course version is not persisted")
+        version_id = str(version.id)
+        chapters = await CourseVersion.chapters(version_id)
+        for proposal in outline.chapters:
+            promotion = await CourseWorkflowService.chapter_promotion_snapshot(
+                course_id=version.course,
+                version_id=version_id,
+                chapter_key=proposal.key,
+                chapters=chapters,
+            )
+            if (
+                promotion.current is None
+                or promotion.current.status != sm.ChapterStatus.PUBLISHED
+            ):
+                return
+        # This existing gate repeats full-book findings, current Source hashes,
+        # and the atomic version/Course promotion snapshot before committing.
+        await CourseService.publish_version(version_id)
 
     @staticmethod
     async def publish_current_chapter(course_id: str, chapter_key: str) -> Chapter:

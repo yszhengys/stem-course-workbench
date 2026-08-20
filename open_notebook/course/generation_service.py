@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sympy import N, cos, limit, log, pi, sin, sqrt, sympify
 
 from .contracts import (
+    SAFE_LAB_KEY_PATTERN,
     BoundaryPhysicsCheck,
     ChapterArtifact,
     CourseOutlineArtifact,
@@ -149,6 +150,13 @@ class CourseGenerationService:
     ) -> CourseOutlineArtifact:
         if not available_lab_keys:
             raise ValueError("At least one approved Lab key is required")
+        unsafe_lab_keys = sorted(
+            key
+            for key in available_lab_keys
+            if re.fullmatch(SAFE_LAB_KEY_PATTERN, key) is None
+        )
+        if unsafe_lab_keys:
+            raise ValueError("Approved Lab key is unsafe")
         request = GenerationRequest(
             stage="outline",
             course_id=course_id,
@@ -350,14 +358,11 @@ class CourseGenerationService:
         chapter_positions = {
             chapter.key: position for position, chapter in enumerate(outline.chapters)
         }
-        all_lab_keys = [
-            lab_key for chapter in outline.chapters for lab_key in chapter.lab_keys
-        ]
-        if len(all_lab_keys) != len(set(all_lab_keys)):
-            raise ValueError("Outline lab keys must be unique")
         for chapter in outline.chapters:
             if not chapter.lab_keys:
                 raise ValueError(f"Chapter {chapter.key} must select at least one Lab")
+            if len(chapter.lab_keys) != len(set(chapter.lab_keys)):
+                raise ValueError("Lab keys must be unique within each chapter")
             if not chapter.anchor_ids:
                 raise ValueError(f"Chapter {chapter.key} must be anchored")
             unknown_objectives = set(chapter.objective_keys) - concept_keys

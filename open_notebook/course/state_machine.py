@@ -277,7 +277,9 @@ def normalize_approval(text: str) -> str:
     # Only surrounding whitespace and one trailing newline are tolerated.
     # Internal whitespace/newlines remain exact and therefore meaningful.
     normalized = normalized.strip(" \t")
-    if normalized.endswith("\n"):
+    if normalized.endswith("\r\n"):
+        normalized = normalized[:-2]
+    elif normalized.endswith("\n"):
         normalized = normalized[:-1]
     return normalized.strip(" \t")
 
