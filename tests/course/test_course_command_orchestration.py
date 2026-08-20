@@ -1498,6 +1498,7 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
     generation = SimpleNamespace(
         review=review,
         validate_chapter=CourseGenerationService.validate_chapter,
+        requires_escalation=CourseGenerationService.requires_escalation,
         assert_publishable=lambda _findings: None,
     )
     workflow = module.CourseWorkflowService(
@@ -1506,12 +1507,16 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
     selection = ModelSelection(
         adapter="codex_cli", model="gpt-5.6-luna", reasoning_effort="max"
     )
+    escalation_selection = ModelSelection(
+        adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
+    )
     command_args = {
         "course_id": str(course.id),
         "chapter_key": "motion",
         "anchor_ids": anchor_ids,
         "prompt_version": "v1",
         "model": selection.model_dump(mode="json"),
+        "escalation_model": escalation_selection.model_dump(mode="json"),
     }
     run = CourseGenerationRun(
         id="course_generation_run:canonical-review",
@@ -1542,6 +1547,21 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
 
     async def query(statement, variables=None):
         variables = variables or {}
+        if statement.lstrip().startswith("BEGIN TRANSACTION"):
+            persisted_rows[:] = [
+                {
+                    "id": str(item["id"]),
+                    "generation_run": str(run.id),
+                    "finding": dict(item["content"]["finding"]),
+                    "created": "2026-08-18T00:00:00Z",
+                    "updated": "2026-08-18T00:01:00Z",
+                }
+                for item in variables["findings"]
+            ]
+            if "output_hash" in variables:
+                run.status = "succeeded"
+                run.output_hash = str(variables["output_hash"])
+            return []
         if statement.lstrip().startswith("DELETE course_validation_finding"):
             persisted_rows.clear()
             return []
@@ -1588,6 +1608,7 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
         chapter_key="motion",
         anchor_ids=anchor_ids,
         model=selection,
+        escalation_model=escalation_selection,
         prompt_version="v1",
     )
     for index, row in enumerate(persisted_rows):
@@ -1603,6 +1624,7 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
         chapter_key="motion",
         anchor_ids=anchor_ids,
         model=selection,
+        escalation_model=escalation_selection,
         prompt_version="v1",
     )
 
@@ -2749,6 +2771,7 @@ async def test_re_review_ignores_failed_partial_and_blocks_on_high_finding(
     generation = SimpleNamespace(
         review=AsyncMock(return_value=ReviewArtifact(findings=[finding])),
         validate_chapter=lambda _artifact, _anchors, *, subject=None: [],
+        requires_escalation=CourseGenerationService.requires_escalation,
         assert_publishable=CourseGenerationService.assert_publishable,
     )
     workflow = module.CourseWorkflowService(
@@ -2757,6 +2780,11 @@ async def test_re_review_ignores_failed_partial_and_blocks_on_high_finding(
 
     async def finding_query(statement: str, variables=None):
         variables = variables or {}
+        if statement.lstrip().startswith("BEGIN TRANSACTION"):
+            if "output_hash" in variables:
+                run.status = "succeeded"
+                run.output_hash = str(variables["output_hash"])
+            return []
         if "FROM course_generation_run" in statement:
             return [failed_content_run.model_dump(mode="json")]
         if "FROM course_validation_finding" in statement:
@@ -2799,6 +2827,9 @@ async def test_re_review_ignores_failed_partial_and_blocks_on_high_finding(
         chapter_key="limits",
         anchor_ids=["anchor:one"],
         model=selection,
+        escalation_model=ModelSelection(
+            adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"
+        ),
         prompt_version="v1",
     )
 
@@ -3121,6 +3152,20 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
             stored_run.status = "succeeded"
             stored_run.output_hash = str(variables["output_hash"])
             return [stored_run.model_dump(mode="json")]
+        if (
+            statement.lstrip().startswith("BEGIN TRANSACTION")
+            and "course_validation_finding" in statement
+        ):
+            if "output_hash" in variables:
+                stored_run = next(
+                    item
+                    for run_id, item in chapter_runs.items()
+                    if str(module.ensure_record_id(run_id))
+                    == str(variables["run"])
+                )
+                stored_run.status = "succeeded"
+                stored_run.output_hash = str(variables["output_hash"])
+            return []
         if statement.lstrip().startswith("BEGIN TRANSACTION"):
             stored_run = next(
                 item
@@ -3366,6 +3411,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         "anchor_ids": [anchor.anchor_id],
         "prompt_version": "v1",
         "model": review_selection.model_dump(mode="json"),
+        "escalation_model": selection.model_dump(mode="json"),
     }
     review_run = CourseGenerationRun(
         id="course_generation_run:review",
@@ -3400,6 +3446,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         chapter_key="limits",
         anchor_ids=[anchor.anchor_id],
         model=review_selection,
+        escalation_model=selection,
         prompt_version="v1",
     )
     await workflow.review_chapter(
@@ -3409,6 +3456,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         chapter_key="limits",
         anchor_ids=[anchor.anchor_id],
         model=review_selection,
+        escalation_model=selection,
         prompt_version="v1",
     )
     assert findings == []
@@ -3436,6 +3484,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         chapter_key="limits",
         anchor_ids=[anchor.anchor_id],
         model=review_selection,
+        escalation_model=selection,
         prompt_version="v1",
     )
     assert replayed_published.id == published.id

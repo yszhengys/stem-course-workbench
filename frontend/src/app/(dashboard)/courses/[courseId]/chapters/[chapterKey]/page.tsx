@@ -90,6 +90,7 @@ export default function CourseChapterPage() {
 
   const [contentModel, setContentModel] = useState<ModelSelection | null>(null)
   const [reviewModel, setReviewModel] = useState<ModelSelection | null>(null)
+  const [escalationModel, setEscalationModel] = useState<ModelSelection | null>(null)
   const [selectedAnchorIds, setSelectedAnchorIds] = useState<string[]>([])
   const [generationCommandId, setGenerationCommandId] = useState<string>()
   const [reviewCommandId, setReviewCommandId] = useState<string>()
@@ -121,6 +122,9 @@ export default function CourseChapterPage() {
   const selectedReviewModel = models.data && reviewModel
     ? selectableDefaultModel(models.data.options, reviewModel)
     : null
+  const selectedEscalationModel = models.data && escalationModel
+    ? selectableDefaultModel(models.data.options, escalationModel)
+    : null
   const blockKeys = useMemo(() => artifact ? [
     ...artifact.sections.map((item) => item.key),
     ...artifact.formulas.map((item) => item.key),
@@ -135,6 +139,7 @@ export default function CourseChapterPage() {
       modelSelectionsInitialized.current = true
       setContentModel(selectableDefaultModel(models.data.options, models.data.defaults.chapter_content))
       setReviewModel(selectableDefaultModel(models.data.options, models.data.defaults.review))
+      setEscalationModel(selectableDefaultModel(models.data.options, models.data.defaults.escalation))
       return
     }
     setContentModel((current) => current
@@ -142,6 +147,10 @@ export default function CourseChapterPage() {
       : null
     )
     setReviewModel((current) => current
+      ? selectableDefaultModel(models.data.options, current)
+      : null
+    )
+    setEscalationModel((current) => current
       ? selectableDefaultModel(models.data.options, current)
       : null
     )
@@ -171,11 +180,12 @@ export default function CourseChapterPage() {
   }
 
   const review = async () => {
-    if (!selectedReviewModel || selectedAnchorIds.length === 0) return
+    if (!selectedReviewModel || !selectedEscalationModel || selectedAnchorIds.length === 0) return
     const job = await reviewChapter.mutateAsync({
       anchor_ids: selectedAnchorIds,
       prompt_version: 'v1',
       model: selectedReviewModel,
+      escalation_model: selectedEscalationModel,
       force: false,
     })
     setReviewCommandId(job.command_id)
@@ -246,7 +256,7 @@ export default function CourseChapterPage() {
               <CardDescription>{t('course.chapterGenerationDescription')}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-5">
-              <div className="grid gap-5 lg:grid-cols-2">
+              <div className="grid gap-5 lg:grid-cols-3">
                 {models.isLoading ? (
                   <CourseInlineLoading />
                 ) : models.isError ? (
@@ -255,11 +265,15 @@ export default function CourseChapterPage() {
                   <>
                     <div className="space-y-3">
                       <h3 className="font-medium">{t('course.contentModel')}</h3>
-                      <CourseModelPicker options={models.data?.options ?? []} value={contentModel} onChange={setContentModel} disabled={models.isFetching} />
+                      <CourseModelPicker idPrefix="course-content" accessibleLabel={t('course.contentModel')} options={models.data?.options ?? []} value={contentModel} onChange={setContentModel} disabled={models.isFetching} />
                     </div>
                     <div className="space-y-3">
                       <h3 className="font-medium">{t('course.reviewModel')}</h3>
-                      <CourseModelPicker options={models.data?.options ?? []} value={reviewModel} onChange={setReviewModel} disabled={models.isFetching} />
+                      <CourseModelPicker idPrefix="course-review" accessibleLabel={t('course.reviewModel')} options={models.data?.options ?? []} value={reviewModel} onChange={setReviewModel} disabled={models.isFetching} />
+                    </div>
+                    <div className="space-y-3">
+                      <h3 className="font-medium">{t('course.escalationModel')}</h3>
+                      <CourseModelPicker idPrefix="course-escalation" accessibleLabel={t('course.escalationModel')} options={models.data?.options ?? []} value={escalationModel} onChange={setEscalationModel} disabled={models.isFetching} />
                     </div>
                   </>
                 )}
@@ -291,7 +305,7 @@ export default function CourseChapterPage() {
                 <Button onClick={() => void generate()} disabled={models.isError || models.isFetching || anchors.isError || !selectedContentModel || !selectedAnchorIds.length || generateChapter.isPending || generationStatus.isFetching}>
                   {requiresNewVersion ? t('course.regenerateChapter') : t('course.generateChapter')}
                 </Button>
-                <Button variant="outline" onClick={() => void review()} disabled={models.isError || models.isFetching || anchors.isError || !artifact || !selectedReviewModel || !selectedAnchorIds.length || !reviewAllowed || reviewChapter.isPending || reviewStatus.isFetching}>
+                <Button variant="outline" onClick={() => void review()} disabled={models.isError || models.isFetching || anchors.isError || !artifact || !selectedReviewModel || !selectedEscalationModel || !selectedAnchorIds.length || !reviewAllowed || reviewChapter.isPending || reviewStatus.isFetching}>
                   {t('course.reviewChapter')}
                 </Button>
               </div>

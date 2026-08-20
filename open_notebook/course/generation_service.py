@@ -261,13 +261,42 @@ class CourseGenerationService:
         prompt_version: str = "v1",
     ) -> ReviewArtifact:
         known_anchor_ids = set(evidence_by_anchor)
+        escalated = await self.escalate_raw(
+            course_id=course_id,
+            chapter_key=chapter_key,
+            findings=findings,
+            evidence_by_anchor=evidence_by_anchor,
+            model=model,
+            prompt_version=prompt_version,
+        )
+        if not escalated.findings:
+            return ReviewArtifact(findings=findings)
+        return ReviewArtifact(
+            findings=self.merge_escalation_findings(
+                findings, escalated, known_anchor_ids=known_anchor_ids
+            )
+        )
+
+    async def escalate_raw(
+        self,
+        *,
+        course_id: str,
+        chapter_key: str,
+        findings: list[ValidationFinding],
+        evidence_by_anchor: Mapping[str, str],
+        model: ModelSelection,
+        prompt_version: str = "v1",
+    ) -> ReviewArtifact:
+        """Return only the targeted escalation response for immutable audit."""
+
+        known_anchor_ids = set(evidence_by_anchor)
         selected = [
             finding
             for finding in findings
             if self._eligible_for_escalation(finding, known_anchor_ids)
         ]
         if not selected:
-            return ReviewArtifact(findings=findings)
+            return ReviewArtifact(findings=[])
         anchor_ids = list(
             dict.fromkeys(
                 anchor_id
@@ -291,7 +320,7 @@ class CourseGenerationService:
         selected_json = "\n".join(
             finding.model_dump_json(exclude_none=True) for finding in selected
         )
-        escalated = await adapter.generate(
+        return await adapter.generate(
             request,
             ReviewArtifact,
             prompt=self.prompt_for(
@@ -303,11 +332,6 @@ class CourseGenerationService:
                 "Resolve only these findings:\n" + selected_json,
                 format_instructions=self._format_instructions(ReviewArtifact),
             ),
-        )
-        return ReviewArtifact(
-            findings=self.merge_escalation_findings(
-                findings, escalated, known_anchor_ids=set(evidence_by_anchor)
-            )
         )
 
     @staticmethod
@@ -975,6 +999,20 @@ class CourseGenerationService:
             )
             for finding in findings
         )
+
+    @staticmethod
+    def escalation_candidates(
+        findings: Iterable[ValidationFinding], *, known_anchor_ids: set[str]
+    ) -> list[ValidationFinding]:
+        """Return the exact grounded unresolved subset eligible for escalation."""
+
+        return [
+            finding
+            for finding in findings
+            if CourseGenerationService._eligible_for_escalation(
+                finding, known_anchor_ids
+            )
+        ]
 
     @staticmethod
     def merge_escalation_findings(

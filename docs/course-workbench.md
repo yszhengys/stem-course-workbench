@@ -56,7 +56,7 @@ Course facade 返回 HTTP 202 和 command/run ID。相同 canonical 输入且已
 - `ollama`：仅列出本机实际安装的受支持模型。
 - 适配器错误带明确类型；只对明确的暂时性网络/超时错误做有限重试，最终总会终结 run。
 
-生成结果同时由 Pydantic 与前端 Zod 解析。验证层使用 SymPy、Pint、数值 oracle、物理规则和引用完整性检查。审查 escalation 仅发送合格 finding 与必需证据，不发送无关整章内容。
+生成结果同时由 Pydantic 与前端 Zod 解析。验证层使用 SymPy、Pint、数值 oracle、物理规则和引用完整性检查。审查 escalation 作为父 review 内联执行的独立持久 run，仅发送合格 finding 与必需证据，不发送无关整章内容；其原始结果只用于审计，页面与发布门只读取当前 review 的合并结果。
 
 ## 开发与验证
 

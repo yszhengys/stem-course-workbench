@@ -586,6 +586,10 @@ export interface GenerateChapterRequest {
   force: boolean
 }
 
+export interface ReviewChapterRequest extends GenerateChapterRequest {
+  escalation_model: ModelSelection
+}
+
 export interface CreateCourseAttemptRequest {
   answers: Record<string, unknown>
   exercise_key?: string

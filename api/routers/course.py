@@ -217,6 +217,7 @@ async def review_chapter(
             anchor_ids=request.anchor_ids,
             prompt_version=request.prompt_version,
             model=request.model,
+            escalation_model=request.escalation_model,
             force=request.force,
         )
     )

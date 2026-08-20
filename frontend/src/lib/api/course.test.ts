@@ -84,6 +84,12 @@ describe('courseApi', () => {
         reasoning_effort: null,
         chapter: 'chapter:hidden',
       },
+      escalation_model: {
+        adapter: 'codex_cli',
+        model: 'gpt-5.6-sol',
+        reasoning_effort: 'max',
+        prompt: 'hidden',
+      },
       file_path: '/private/server/path.pdf',
       evidence_text: 'untrusted legacy evidence',
       chapter: 'chapter:hidden',
@@ -123,7 +129,57 @@ describe('courseApi', () => {
         model: 'model:deepseek-v4-pro',
         reasoning_effort: null,
       },
+      escalation_model: {
+        adapter: 'codex_cli',
+        model: 'gpt-5.6-sol',
+        reasoning_effort: 'max',
+      },
     })
+  })
+
+  it('submits independent review and escalation selections exactly', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({
+      data: {
+        command_id: 'command:review',
+        run_id: 'course_generation_run:review',
+        status: 'queued',
+      },
+    })
+
+    await courseApi.reviewChapter('course:one', 'limits', {
+      anchor_ids: ['anchor:one'],
+      prompt_version: 'v1',
+      force: false,
+      model: {
+        adapter: 'codex_cli',
+        model: 'gpt-5.6-luna',
+        reasoning_effort: 'max',
+      },
+      escalation_model: {
+        adapter: 'codex_cli',
+        model: 'gpt-5.6-sol',
+        reasoning_effort: 'max',
+      },
+    })
+
+    expect(apiClient.post).toHaveBeenCalledWith(
+      '/courses/course%3Aone/chapters/limits/review',
+      {
+        anchor_ids: ['anchor:one'],
+        prompt_version: 'v1',
+        force: false,
+        model: {
+          adapter: 'codex_cli',
+          model: 'gpt-5.6-luna',
+          reasoning_effort: 'max',
+        },
+        escalation_model: {
+          adapter: 'codex_cli',
+          model: 'gpt-5.6-sol',
+          reasoning_effort: 'max',
+        },
+      }
+    )
   })
 
   it('rebuilds every other Course write payload from runtime allowlists', async () => {

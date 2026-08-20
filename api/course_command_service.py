@@ -16,6 +16,10 @@ from open_notebook.course.generation_service import (
     CourseGenerationService,
     PublicationBlocked,
 )
+from open_notebook.course.model_adapters import (
+    AdapterError,
+    ensure_course_models_selectable,
+)
 from open_notebook.course.models import (
     Chapter,
     Course,
@@ -30,7 +34,7 @@ from open_notebook.course.workflow_service import (
 )
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Notebook, Source
-from open_notebook.exceptions import NotFoundError
+from open_notebook.exceptions import InvalidInputError, NotFoundError
 
 ACTIVE_RUN_STATUSES = {"queued", "running"}
 FRAMEWORK_TO_RUN_STATUS = {
@@ -472,8 +476,13 @@ class CourseCommandService:
         anchor_ids: list[str],
         prompt_version: str,
         model: ModelSelection,
+        escalation_model: ModelSelection,
         force: bool = False,
     ) -> CourseJobSubmission:
+        try:
+            await ensure_course_models_selectable([model, escalation_model])
+        except AdapterError as exc:
+            raise InvalidInputError(str(exc)) from exc
         course, source_hashes, _ = await self._grounded(course_id, anchor_ids)
         version, outline = await CourseWorkflowService.approved_version(course)
         CourseWorkflowService._outline_chapter(outline, chapter_key)
@@ -490,6 +499,7 @@ class CourseCommandService:
             "anchor_ids": anchor_ids,
             "prompt_version": prompt_version,
             "model": model.model_dump(mode="json"),
+            "escalation_model": escalation_model.model_dump(mode="json"),
         }
         return await self.submit_stage(
             course_id=course_id,
@@ -550,16 +560,35 @@ class CourseCommandService:
     async def list_findings(
         course_id: str, chapter_key: str | None = None
     ) -> list[CourseValidationFinding]:
-        await Course.get(course_id)
-        rows = await repo_query(
-            """
-            SELECT * FROM course_validation_finding
-            WHERE course = $course AND ($chapter_key = NONE OR chapter_key = $chapter_key)
-            ORDER BY created;
-            """,
-            {"course": ensure_record_id(course_id), "chapter_key": chapter_key},
+        course = await Course.get(course_id)
+        version, outline = await CourseWorkflowService.approved_version(course)
+        chapter_keys = (
+            [chapter_key]
+            if chapter_key is not None
+            else [proposal.key for proposal in outline.chapters]
         )
-        return [CourseValidationFinding(**row) for row in rows]
+        findings: list[CourseValidationFinding] = []
+        chapters = await CourseVersion.chapters(str(version.id))
+        for key in chapter_keys:
+            CourseWorkflowService._outline_chapter(outline, key)
+            try:
+                chapter = await CourseWorkflowService.resolve_current_chapter(
+                    course_id=course_id,
+                    version_id=str(version.id),
+                    chapter_key=key,
+                    chapters=chapters,
+                )
+            except NotFoundError:
+                if chapter_key is not None:
+                    raise
+                continue
+            _, current = await CourseWorkflowService.authoritative_review_findings(
+                course_id=course_id,
+                version_id=str(version.id),
+                chapter=chapter,
+            )
+            findings.extend(current)
+        return sorted(findings, key=lambda item: (item.chapter_key or "", str(item.id)))
 
     @staticmethod
     async def update_finding(
@@ -572,6 +601,19 @@ class CourseCommandService:
         finding = await CourseValidationFinding.get(finding_id)
         if finding.course != course_id:
             raise NotFoundError("Validation finding not found")
+        if not finding.chapter_key:
+            raise NotFoundError("Validation finding not found")
+        chapter = await CourseCommandService.current_chapter(
+            course_id, finding.chapter_key
+        )
+        version_id = chapter.course_version
+        _, authoritative = await CourseWorkflowService.authoritative_review_findings(
+            course_id=course_id,
+            version_id=version_id,
+            chapter=chapter,
+        )
+        if str(finding.id) not in {str(item.id) for item in authoritative}:
+            raise NotFoundError("Validation finding not found")
         artifact = ValidationFinding.model_validate(finding.finding).model_copy(
             update={"status": status, "resolution_reason": resolution_reason}
         )
@@ -582,19 +624,17 @@ class CourseCommandService:
         finding.resolution_reason = artifact.resolution_reason
         await finding.save()
         if finding.chapter:
-            rows = await repo_query(
-                "SELECT * FROM course_validation_finding WHERE chapter = $chapter;",
-                {"chapter": ensure_record_id(finding.chapter)},
-            )
             artifacts = [
-                ValidationFinding.model_validate(row["finding"]) for row in rows
+                ValidationFinding.model_validate(
+                    finding.finding if str(row.id) == str(finding.id) else row.finding
+                )
+                for row in authoritative
             ]
             try:
                 CourseGenerationService.assert_publishable(artifacts)
             except PublicationBlocked:
                 pass
             else:
-                chapter = await Chapter.get(finding.chapter)
                 if chapter.review_status == sm.ChapterReviewStatus.ESCALATED:
                     await chapter.transition_review(sm.ChapterReviewStatus.PASSED)
                 if chapter.validation_status == sm.ChapterValidationStatus.PENDING:

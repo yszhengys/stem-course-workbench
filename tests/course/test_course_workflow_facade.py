@@ -17,6 +17,7 @@ from open_notebook.course.models import (
     Course,
     CourseGenerationRun,
     CourseNote,
+    CourseValidationFinding,
     CourseVersion,
     Lab,
     Progress,
@@ -311,6 +312,10 @@ async def test_review_submission_targets_last_successfully_promoted_chapter(monk
         )
 
     monkeypatch.setattr(service, "submit_stage", submit_stage)
+    monkeypatch.setattr(
+        "api.course_command_service.ensure_course_models_selectable",
+        AsyncMock(),
+    )
 
     submission = await service.submit_review(
         course_id="course:one",
@@ -320,6 +325,11 @@ async def test_review_submission_targets_last_successfully_promoted_chapter(monk
         model=ModelSelection(
             adapter="codex_cli",
             model="gpt-5.6-luna",
+            reasoning_effort="max",
+        ),
+        escalation_model=ModelSelection(
+            adapter="codex_cli",
+            model="gpt-5.6-sol",
             reasoning_effort="max",
         ),
     )
@@ -705,6 +715,28 @@ async def test_publish_rechecks_unresolved_findings_as_final_defense(
                 }
             ]
         ),
+    )
+    blocker = CourseValidationFinding(
+        id="course_validation_finding:blocker",
+        course="course:one",
+        course_version="course_version:current",
+        chapter="chapter:latest",
+        generation_run="course_generation_run:review",
+        chapter_key="limits",
+        finding={
+            "kind": "review",
+            "severity": "high",
+            "item_key": "definition",
+            "anchor_ids": ["anchor:one"],
+            "status": "open",
+            "message": "The definition is unsafe to publish.",
+        },
+        severity="high",
+        status="open",
+    )
+    monkeypatch.setattr(
+        "api.course_service.CourseWorkflowService.authoritative_review_findings",
+        AsyncMock(return_value=(None, [blocker])),
     )
     save = AsyncMock()
     monkeypatch.setattr(Chapter, "save", save)

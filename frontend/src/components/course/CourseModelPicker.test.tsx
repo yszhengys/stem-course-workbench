@@ -70,4 +70,19 @@ describe('CourseModelPicker', () => {
 
     expect(screen.getByText('course.noSelectableModels')).toBeVisible()
   })
+
+  it('uses independent ids for multiple staged model pickers', () => {
+    const { container } = render(
+      <>
+        <CourseModelPicker idPrefix="review" accessibleLabel="Independent review" options={options} value={null} onChange={vi.fn()} />
+        <CourseModelPicker idPrefix="escalation" accessibleLabel="High-risk escalation" options={options} value={null} onChange={vi.fn()} />
+      </>
+    )
+
+    expect(container.querySelector('#review-model')).toBeVisible()
+    expect(container.querySelector('#escalation-model')).toBeVisible()
+    expect(container.querySelectorAll('#course-model')).toHaveLength(0)
+    expect(screen.getByLabelText('Independent review — course.modelLabel')).toBeVisible()
+    expect(screen.getByLabelText('High-risk escalation — course.modelLabel')).toBeVisible()
+  })
 })

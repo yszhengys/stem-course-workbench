@@ -7,7 +7,33 @@ import pytest
 
 from api.course_service import CourseConflictError, CourseService
 from open_notebook.course.evidence_service import EvidenceInputError
-from open_notebook.course.models import Chapter, Course, CourseVersion
+from open_notebook.course.models import (
+    Chapter,
+    Course,
+    CourseValidationFinding,
+    CourseVersion,
+)
+
+
+def _patch_authoritative_findings(monkeypatch, findings=()):
+    records = [
+        CourseValidationFinding(
+            id=f"course_validation_finding:{index}",
+            course="course:one",
+            course_version="course_version:one",
+            chapter="chapter:one",
+            generation_run="course_generation_run:review",
+            chapter_key="limits",
+            finding=finding,
+            severity=str(finding["severity"]),
+            status=str(finding["status"]),
+        )
+        for index, finding in enumerate(findings)
+    ]
+    monkeypatch.setattr(
+        "api.course_service.CourseWorkflowService.authoritative_review_findings",
+        AsyncMock(return_value=(None, records)),
+    )
 
 
 def _artifact_hash(artifact: dict) -> str:
@@ -191,6 +217,7 @@ async def test_publish_chapter_revalidates_stable_unique_evidence_before_save(
         "api.course_service.repo_query",
         AsyncMock(return_value=[{"finding": finding}]),
     )
+    _patch_authoritative_findings(monkeypatch, [finding])
     grounded = AsyncMock(return_value=([], {}, []))
     monkeypatch.setattr(
         "api.course_service.CourseWorkflowService.grounded_inputs", grounded
@@ -227,6 +254,7 @@ async def test_publish_chapter_source_change_blocks_without_state_mutation(monke
     course, version, chapter = _records()
     _patch_records(monkeypatch, course, version, chapter)
     monkeypatch.setattr("api.course_service.repo_query", AsyncMock(return_value=[]))
+    _patch_authoritative_findings(monkeypatch)
     monkeypatch.setattr(
         "api.course_service.CourseWorkflowService.grounded_inputs",
         AsyncMock(side_effect=EvidenceInputError("Source hash changed")),
@@ -258,6 +286,7 @@ async def test_publish_chapter_fails_closed_for_manual_or_invalid_artifact(
     _patch_records(monkeypatch, course, version, chapter)
     query = AsyncMock(return_value=[])
     monkeypatch.setattr("api.course_service.repo_query", query)
+    _patch_authoritative_findings(monkeypatch)
     grounded = AsyncMock(return_value=([], {}, []))
     monkeypatch.setattr(
         "api.course_service.CourseWorkflowService.grounded_inputs", grounded
@@ -307,6 +336,7 @@ async def test_publish_version_revalidates_all_anchors_and_blocks_changed_source
         raise AssertionError("publication transaction must not start")
 
     monkeypatch.setattr("api.course_service.repo_query", query)
+    _patch_authoritative_findings(monkeypatch, [finding])
     grounded = AsyncMock(side_effect=EvidenceInputError("Source hash changed"))
     monkeypatch.setattr(
         "api.course_service.CourseWorkflowService.grounded_inputs", grounded

@@ -10,6 +10,7 @@ import type {
   CreateCourseAttemptRequest,
   GenerateChapterRequest,
   GenerateOutlineRequest,
+  ReviewChapterRequest,
 } from '@/lib/types/course'
 
 function useMutationFeedback() {
@@ -208,7 +209,7 @@ export function useGenerateCourseChapter(courseId: string, chapterKey: string) {
 export function useReviewCourseChapter(courseId: string, chapterKey: string) {
   const feedback = useMutationFeedback()
   return useMutation({
-    mutationFn: (request: GenerateChapterRequest) =>
+    mutationFn: (request: ReviewChapterRequest) =>
       courseApi.reviewChapter(courseId, chapterKey, request),
     onSuccess: feedback.success,
     onError: feedback.error,

@@ -15,6 +15,8 @@ interface CourseModelPickerProps {
   value: ModelSelection | null
   onChange: (selection: ModelSelection | null) => void
   disabled?: boolean
+  idPrefix?: string
+  accessibleLabel?: string
 }
 
 function optionKey(option: CourseModelOption) {
@@ -25,8 +27,23 @@ function optionName(option: CourseModelOption) {
   return option.name ?? option.display_name ?? option.model ?? '—'
 }
 
-export function CourseModelPicker({ options, value, onChange, disabled = false }: CourseModelPickerProps) {
+export function CourseModelPicker({
+  options,
+  value,
+  onChange,
+  disabled = false,
+  idPrefix = 'course',
+  accessibleLabel,
+}: CourseModelPickerProps) {
   const { t } = useTranslation()
+  const modelId = `${idPrefix}-model`
+  const reasoningId = `${idPrefix}-reasoning`
+  const modelLabel = accessibleLabel
+    ? `${accessibleLabel} — ${t('course.modelLabel')}`
+    : t('course.modelLabel')
+  const reasoningLabel = accessibleLabel
+    ? `${accessibleLabel} — ${t('course.reasoningEffort')}`
+    : t('course.reasoningEffort')
   const current = value ? `${value.adapter}|${value.model}` : ''
   const hasSelectableModel = options.some(isSelectableModel)
 
@@ -48,10 +65,10 @@ export function CourseModelPicker({ options, value, onChange, disabled = false }
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       <div className="space-y-2">
-        <Label htmlFor="course-model">{t('course.modelLabel')}</Label>
+        <Label htmlFor={modelId}>{modelLabel}</Label>
         <select
-          id="course-model"
-          aria-label={t('course.modelLabel')}
+          id={modelId}
+          aria-label={modelLabel}
           value={current}
           onChange={(event) => handleModelChange(event.target.value)}
           disabled={disabled}
@@ -75,9 +92,9 @@ export function CourseModelPicker({ options, value, onChange, disabled = false }
 
       {value?.adapter === 'codex_cli' && (
         <div className="space-y-2">
-          <Label htmlFor="course-reasoning">{t('course.reasoningEffort')}</Label>
+          <Label htmlFor={reasoningId}>{reasoningLabel}</Label>
           <select
-            id="course-reasoning"
+            id={reasoningId}
             value={value.reasoning_effort ?? 'max'}
             onChange={(event) => onChange({
               ...value,

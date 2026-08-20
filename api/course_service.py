@@ -805,17 +805,16 @@ class CourseService:
             or chapter.validation_status != sm.ChapterValidationStatus.PASSED
         ):
             raise CourseConflictError("Chapter review and validation must pass")
-        rows = await repo_query(
-            "SELECT * FROM course_validation_finding "
-            "WHERE course = $course AND course_version = $version "
-            "AND chapter = $chapter;",
-            {
-                "course": ensure_record_id(course_id),
-                "version": ensure_record_id(version_id),
-                "chapter": ensure_record_id(chapter_id),
-            },
+        _, finding_records = (
+            await CourseWorkflowService.authoritative_review_findings(
+                course_id=course_id,
+                version_id=version_id,
+                chapter=chapter,
+            )
         )
-        findings = _publishable_findings(rows)
+        findings = _publishable_findings(
+            [record.model_dump(mode="json") for record in finding_records]
+        )
         artifact = _generated_chapter_artifact(chapter)
         anchor_ids = _publication_anchor_ids(
             outline=outline,
@@ -886,17 +885,18 @@ class CourseService:
         findings: list[ValidationFinding] = []
         for chapter in latest:
             artifacts.append(_generated_chapter_artifact(chapter))
-            rows = await repo_query(
-                "SELECT * FROM course_validation_finding "
-                "WHERE course = $course AND course_version = $version "
-                "AND chapter = $chapter;",
-                {
-                    "course": ensure_record_id(version.course),
-                    "version": ensure_record_id(version_id),
-                    "chapter": ensure_record_id(str(chapter.id)),
-                },
+            _, finding_records = (
+                await CourseWorkflowService.authoritative_review_findings(
+                    course_id=version.course,
+                    version_id=version_id,
+                    chapter=chapter,
+                )
             )
-            findings.extend(_publishable_findings(rows))
+            findings.extend(
+                _publishable_findings(
+                    [record.model_dump(mode="json") for record in finding_records]
+                )
+            )
 
         known_succeeded_run_ids = sorted(
             {

@@ -12,7 +12,10 @@ from pydantic import ConfigDict, Field, field_validator
 from surreal_commands import CommandInput, CommandOutput, command
 
 from open_notebook.course.contracts import ModelSelection
-from open_notebook.course.model_adapters import AdapterError
+from open_notebook.course.model_adapters import (
+    AdapterError,
+    ensure_course_models_selectable,
+)
 from open_notebook.course.workflow_service import CourseWorkflowService
 from open_notebook.exceptions import (
     ConfigurationError,
@@ -54,6 +57,10 @@ class CourseOutlineInput(AnchoredCourseCommandInput):
 
 class CourseChapterInput(AnchoredCourseCommandInput):
     chapter_key: str = Field(min_length=1, max_length=100)
+
+
+class CourseReviewInput(CourseChapterInput):
+    escalation_model: ModelSelection
 
 
 class CourseCommandOutput(CommandOutput):
@@ -268,9 +275,17 @@ async def course_generate_chapter_command(
 
 @command("course_review_chapter", app="open_notebook", retry=COURSE_RETRY)
 async def course_review_chapter_command(
-    input_data: CourseChapterInput,
+    input_data: CourseReviewInput,
 ) -> CourseCommandOutput:
     command_id = _command_id(input_data)
+
+    try:
+        await ensure_course_models_selectable(
+            [input_data.model, input_data.escalation_model]
+        )
+    except (AdapterError, ValueError) as exc:
+        await _permanent_failure(input_data, exc)
+        raise ValueError(str(exc)) from exc
 
     async def operation():
         run = await _workflow.load_run(
@@ -286,6 +301,7 @@ async def course_review_chapter_command(
             chapter_key=input_data.chapter_key,
             anchor_ids=input_data.anchor_ids,
             model=input_data.model,
+            escalation_model=input_data.escalation_model,
             prompt_version=input_data.prompt_version,
         )
 

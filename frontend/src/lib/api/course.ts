@@ -19,6 +19,7 @@ import {
   evidenceAnchorSchema,
   GenerateChapterRequest,
   GenerateOutlineRequest,
+  ReviewChapterRequest,
   chapterSchema,
   ModelSelection,
   progressSchema,
@@ -131,10 +132,14 @@ export const courseApi = {
     return courseJobSchema.parse(response.data)
   },
 
-  async reviewChapter(courseId: string, chapterKey: string, request: GenerateChapterRequest) {
+  async reviewChapter(courseId: string, chapterKey: string, request: ReviewChapterRequest) {
+    const payload = anchoredJobPayload(request)
     const response = await apiClient.post(
       `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/review`,
-      anchoredJobPayload(request)
+      {
+        ...payload,
+        escalation_model: modelPayload(request.escalation_model),
+      }
     )
     return courseJobSchema.parse(response.data)
   },

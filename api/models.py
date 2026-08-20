@@ -850,7 +850,7 @@ class CourseChapterGenerateRequest(CourseAnchoredJobRequest):
 
 
 class CourseChapterReviewRequest(CourseAnchoredJobRequest):
-    pass
+    escalation_model: ModelSelection
 
 
 class CourseRetrievalRequest(StrictCourseRequest):

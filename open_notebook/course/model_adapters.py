@@ -12,8 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+import httpx
 from pydantic import BaseModel
 
+from open_notebook.ai.models import Model
 from open_notebook.ai.provision import provision_langchain_model
 
 from .contracts import GenerationRequest, ModelSelection
@@ -55,6 +57,53 @@ class CourseModelAdapter:
         prompt: str,
     ) -> OutputT:
         raise NotImplementedError
+
+
+async def ensure_course_models_selectable(
+    selections: list[ModelSelection],
+) -> None:
+    """Fail closed unless every exact selection is currently selectable."""
+
+    if os.getenv("OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS") != "1":
+        raise AdapterError("Real Course model adapters are disabled.")
+    required: set[tuple[str, str]] = {
+        (selection.adapter, selection.model) for selection in selections
+    }
+    selectable: set[tuple[str, str]] = set()
+    if any(adapter == "codex_cli" for adapter, _ in required):
+        if CodexCliAdapter.is_available():
+            selectable.update(
+                ("codex_cli", model)
+                for model in ("gpt-5.6-sol", "gpt-5.6-luna")
+            )
+    if any(adapter == "open_notebook" for adapter, _ in required):
+        configured = await Model.get_models_by_type("language")
+        selectable.update(
+            ("open_notebook", str(model.id))
+            for model in configured
+            if model.id is not None
+        )
+    if any(adapter == "ollama" for adapter, _ in required):
+        host = os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434"
+        try:
+            async with httpx.AsyncClient(timeout=1.0) as client:
+                response = await client.get(f"{host.rstrip('/')}/api/tags")
+                response.raise_for_status()
+                payload = response.json()
+        except (httpx.HTTPError, TypeError, ValueError):
+            payload = {}
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        selectable.update(
+            ("ollama", name)
+            for item in models
+            if isinstance(item, dict)
+            for name in (item.get("name") or item.get("model"),)
+            if isinstance(name, str)
+        )
+    unavailable = sorted(required - selectable)
+    if unavailable:
+        rendered = ", ".join(f"{adapter}/{model}" for adapter, model in unavailable)
+        raise AdapterError(f"Selected Course model is unavailable: {rendered}.")
 
 
 class CodexCliAdapter(CourseModelAdapter):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from .contracts import (
     ChapterArtifact,
     CourseOutlineArtifact,
     ModelSelection,
+    ReviewArtifact,
     ValidationFinding,
 )
 from .evidence_service import EvidenceInputError, EvidenceService
@@ -27,9 +29,18 @@ from .models import (
     Course,
     CourseEvidenceAnchor,
     CourseGenerationRun,
+    CourseValidationFinding,
     CourseVersion,
     Lab,
 )
+
+_escalation_locks: dict[str, asyncio.Lock] = {}
+_escalation_locks_guard = asyncio.Lock()
+
+
+async def _escalation_lock_for(parent_run_id: str) -> asyncio.Lock:
+    async with _escalation_locks_guard:
+        return _escalation_locks.setdefault(parent_run_id, asyncio.Lock())
 
 
 def _artifact_hash(artifact: dict[str, Any]) -> str:
@@ -131,6 +142,20 @@ def _canonical_review_output(
             mode="json",
             exclude={"status", "resolution_reason", "reviewer_run_id"},
         )
+        payload["reviewer_run_id"] = str(run.id)
+        payloads.append(payload)
+    return sorted(payloads, key=_canonical_json)
+
+
+def _canonical_escalation_output(
+    run: CourseGenerationRun,
+    findings: list[ValidationFinding],
+) -> list[dict[str, Any]]:
+    """Keep the immutable raw Sol decision, including status and rationale."""
+
+    payloads: list[dict[str, Any]] = []
+    for finding in findings:
+        payload = finding.model_dump(mode="json", exclude={"reviewer_run_id"})
         payload["reviewer_run_id"] = str(run.id)
         payloads.append(payload)
     return sorted(payloads, key=_canonical_json)
@@ -742,6 +767,62 @@ class CourseWorkflowService:
             raise NotFoundError("Chapter not found")
         return snapshot.current
 
+    @staticmethod
+    async def authoritative_review_findings(
+        *,
+        course_id: str,
+        version_id: str,
+        chapter: Chapter,
+    ) -> tuple[CourseGenerationRun | None, list[CourseValidationFinding]]:
+        """Return only the newest successful parent-review finding set."""
+
+        if chapter.id is None:
+            raise ValueError("Chapter is not persisted")
+        rows = await repo_query(
+            "SELECT * FROM course_generation_run "
+            "WHERE course = $course AND course_version = $version "
+            "AND chapter = $chapter AND chapter_key = $chapter_key "
+            "AND stage = 'review' "
+            "ORDER BY created DESC, id DESC;",
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(version_id),
+                "chapter": ensure_record_id(str(chapter.id)),
+                "chapter_key": chapter.chapter_key,
+            },
+        )
+        candidates = _rows(CourseGenerationRun, rows)
+        for run in candidates:
+            if (
+                run.course != course_id
+                or run.course_version != version_id
+                or run.chapter != str(chapter.id)
+                or run.chapter_key != chapter.chapter_key
+                or run.stage != "review"
+            ):
+                continue
+            # Any newer review attempt supersedes history immediately. A
+            # failed or in-flight attempt must never reactivate older rows.
+            if run.status != sm.RunStatus.SUCCEEDED:
+                return None, []
+            finding_rows = _rows(
+                CourseValidationFinding,
+                await repo_query(
+                    "SELECT * FROM course_validation_finding "
+                    "WHERE generation_run = $run ORDER BY id;",
+                    {"run": ensure_record_id(str(run.id))},
+                ),
+            )
+            artifacts = [
+                ValidationFinding.model_validate(row.finding)
+                for row in finding_rows
+            ]
+            CourseWorkflowService.verify_completed_output(
+                run, _canonical_review_output(run, artifacts)
+            )
+            return run, finding_rows
+        return None, []
+
     async def build_evidence(
         self,
         *,
@@ -1087,7 +1168,11 @@ class CourseWorkflowService:
         version_id: str,
         chapter: Chapter,
         findings: list[ValidationFinding],
+        completion_output: list[dict[str, Any]] | None = None,
     ) -> None:
+        """Atomically replace a run's findings and optionally terminalize it."""
+
+        records: list[dict[str, Any]] = []
         for finding in findings:
             payload = finding.model_copy(
                 update={"reviewer_run_id": str(run.id)}
@@ -1100,35 +1185,317 @@ class CourseWorkflowService:
                     separators=(",", ":"),
                 ).encode("utf-8")
             ).hexdigest()[:48]
-            await repo_query(
-                """
-                UPSERT $finding_id CONTENT {
-                    course: $course,
-                    course_version: $version,
-                    chapter: $chapter,
-                    generation_run: $run,
-                    chapter_key: $chapter_key,
-                    finding: $finding,
-                    severity: $severity,
-                    status: $status,
-                    resolution_reason: $resolution_reason
-                };
-                """,
+            records.append(
                 {
-                    "finding_id": ensure_record_id(
+                    "id": ensure_record_id(
                         f"course_validation_finding:{identity}"
                     ),
-                    "course": ensure_record_id(course_id),
-                    "version": ensure_record_id(version_id),
-                    "chapter": ensure_record_id(str(chapter.id)),
-                    "run": ensure_record_id(str(run.id)),
-                    "chapter_key": chapter.chapter_key,
-                    "finding": payload,
-                    "severity": finding.severity,
-                    "status": finding.status,
-                    "resolution_reason": finding.resolution_reason,
-                },
+                    "content": {
+                        "course": ensure_record_id(course_id),
+                        "course_version": ensure_record_id(version_id),
+                        "chapter": ensure_record_id(str(chapter.id)),
+                        "generation_run": ensure_record_id(str(run.id)),
+                        "chapter_key": chapter.chapter_key,
+                        "finding": payload,
+                        "severity": finding.severity,
+                        "status": finding.status,
+                        "resolution_reason": finding.resolution_reason,
+                    },
+                }
             )
+
+        completion = ""
+        variables: dict[str, Any] = {
+            "run": ensure_record_id(str(run.id)),
+            "findings": records,
+        }
+        output_hash: str | None = None
+        if completion_output is not None:
+            output_hash = _artifact_hash({"output": completion_output})
+            variables["output_hash"] = output_hash
+            completion = """
+                LET $completed = (
+                    UPDATE $run
+                    SET status = 'succeeded',
+                        output_hash = $output_hash,
+                        error_message = NONE
+                    WHERE status = 'running'
+                    RETURN AFTER
+                );
+                IF array::len($completed) != 1 {
+                    THROW 'Course generation run completion conflict'
+                };
+            """
+
+        try:
+            await repo_query(
+                f"""
+                BEGIN TRANSACTION;
+                DELETE course_validation_finding WHERE generation_run = $run;
+                FOR $finding IN $findings {{
+                    UPSERT $finding.id CONTENT $finding.content;
+                }};
+                {completion}
+                COMMIT TRANSACTION;
+                """,
+                variables,
+            )
+        except RuntimeError:
+            if completion_output is None:
+                raise
+            current = await CourseGenerationRun.get(str(run.id))
+            run.status = current.status
+            run.output_hash = current.output_hash
+            run.error_message = current.error_message
+            if current.status == sm.RunStatus.SUCCEEDED:
+                CourseWorkflowService.verify_completed_output(
+                    run, completion_output
+                )
+                return
+            raise ValueError(
+                "Course generation run is no longer active"
+            ) from None
+
+        if completion_output is not None:
+            run.status = sm.RunStatus.SUCCEEDED
+            run.output_hash = output_hash
+            run.error_message = None
+
+    @staticmethod
+    async def _finding_rows(run: CourseGenerationRun) -> list[ValidationFinding]:
+        rows = await repo_query(
+            "SELECT * FROM course_validation_finding "
+            "WHERE generation_run = $run ORDER BY id;",
+            {"run": ensure_record_id(str(run.id))},
+        )
+        return [
+            ValidationFinding.model_validate(row["finding"])
+            for row in rows
+        ]
+
+    async def _inline_escalation(
+        self,
+        *,
+        parent_run: CourseGenerationRun,
+        course_id: str,
+        version_id: str,
+        chapter: Chapter,
+        findings: list[ValidationFinding],
+        selected_anchors: list[CourseEvidenceAnchor],
+        source_hashes: dict[str, str],
+        model: ModelSelection,
+        prompt_version: str,
+    ) -> list[ValidationFinding]:
+        """Run one replay-safe escalation child inline with no nested queue."""
+
+        lock = await _escalation_lock_for(str(parent_run.id))
+        async with lock:
+            return await self._inline_escalation_unlocked(
+                parent_run=parent_run,
+                course_id=course_id,
+                version_id=version_id,
+                chapter=chapter,
+                findings=findings,
+                selected_anchors=selected_anchors,
+                source_hashes=source_hashes,
+                model=model,
+                prompt_version=prompt_version,
+            )
+
+    async def _inline_escalation_unlocked(
+        self,
+        *,
+        parent_run: CourseGenerationRun,
+        course_id: str,
+        version_id: str,
+        chapter: Chapter,
+        findings: list[ValidationFinding],
+        selected_anchors: list[CourseEvidenceAnchor],
+        source_hashes: dict[str, str],
+        model: ModelSelection,
+        prompt_version: str,
+    ) -> list[ValidationFinding]:
+        """Execute one inline child while holding the parent-run lock."""
+
+        known_anchor_ids = {anchor.anchor_id for anchor in selected_anchors}
+        eligible = self.generation.escalation_candidates(
+            findings, known_anchor_ids=known_anchor_ids
+        )
+        if not eligible:
+            return findings
+        required_anchor_ids = list(
+            dict.fromkeys(
+                anchor_id
+                for finding in eligible
+                for anchor_id in finding.anchor_ids
+            )
+        )
+        by_anchor = {anchor.anchor_id: anchor for anchor in selected_anchors}
+        evidence_by_anchor = {
+            anchor_id: by_anchor[anchor_id].locator.quote
+            for anchor_id in required_anchor_ids
+        }
+        required_source_ids = {
+            by_anchor[anchor_id].source for anchor_id in required_anchor_ids
+        }
+        required_source_hashes = {
+            source_id: source_hashes[source_id]
+            for source_id in sorted(required_source_ids)
+        }
+        eligible_payload = sorted(
+            (
+                finding.model_dump(mode="json", exclude={"reviewer_run_id"})
+                for finding in eligible
+            ),
+            key=_canonical_json,
+        )
+        child_args = {
+            "parent_run_id": str(parent_run.id),
+            "course_id": course_id,
+            "chapter_key": chapter.chapter_key,
+            "prompt_version": prompt_version,
+            "model": model.model_dump(mode="json"),
+            "findings": eligible_payload,
+            "anchor_ids": required_anchor_ids,
+        }
+        input_hash = generation_input_hash(
+            course_id=course_id,
+            stage="escalation",
+            command_args=child_args,
+            model=model,
+            prompt_version=prompt_version,
+            anchor_ids=required_anchor_ids,
+            source_hashes=required_source_hashes,
+            course_version_id=version_id,
+            chapter_id=str(chapter.id),
+            chapter_key=chapter.chapter_key,
+        )
+        rows = await repo_query(
+            "SELECT * FROM course_generation_run WHERE input_hash = $input_hash "
+            "ORDER BY created DESC;",
+            {"input_hash": input_hash},
+        )
+        children = _rows(CourseGenerationRun, rows)
+        child = children[0] if children else None
+        if child is None:
+            child_id = f"course_generation_run:{input_hash[:48]}_1"
+            payload = {
+                "course": ensure_record_id(course_id),
+                "course_version": ensure_record_id(version_id),
+                "chapter": ensure_record_id(str(chapter.id)),
+                "chapter_key": chapter.chapter_key,
+                "stage": "escalation",
+                "adapter": model.adapter,
+                "model": model.model,
+                "reasoning_effort": model.reasoning_effort,
+                "status": sm.RunStatus.QUEUED,
+                "prompt_version": prompt_version,
+                "input_hash": input_hash,
+                "output_hash": None,
+                "command": None,
+                "error_message": None,
+            }
+            try:
+                created = await repo_query(
+                    "CREATE ONLY $run_id CONTENT $payload RETURN AFTER;",
+                    {
+                        "run_id": ensure_record_id(child_id),
+                        "payload": payload,
+                    },
+                )
+                child = _rows(CourseGenerationRun, created)[0]
+            except (RuntimeError, IndexError):
+                child = await CourseGenerationRun.get(child_id)
+        if not isinstance(child, CourseGenerationRun):
+            raise ValueError("Course escalation run could not be created")
+        if (
+            child.course != course_id
+            or child.course_version != version_id
+            or child.chapter != str(chapter.id)
+            or child.chapter_key != chapter.chapter_key
+            or child.stage != "escalation"
+            or child.adapter != model.adapter
+            or child.model != model.model
+            or child.reasoning_effort != model.reasoning_effort
+            or child.prompt_version != prompt_version
+            or child.input_hash != input_hash
+            or child.command is not None
+        ):
+            raise ValueError("Course escalation run ownership mismatch")
+
+        if child.status == sm.RunStatus.SUCCEEDED:
+            raw_findings = await self._finding_rows(child)
+            self.verify_completed_output(
+                child, _canonical_escalation_output(child, raw_findings)
+            )
+            return self.generation.merge_escalation_findings(
+                findings,
+                ReviewArtifact(findings=raw_findings),
+                known_anchor_ids=known_anchor_ids,
+            )
+        if child.status in {sm.RunStatus.FAILED, sm.RunStatus.CANCELLED}:
+            raise ValueError("Course escalation run is terminal")
+        if child.status == sm.RunStatus.QUEUED:
+            claimed = _rows(
+                CourseGenerationRun,
+                await repo_query(
+                    "UPDATE $run_id SET status = 'running' "
+                    "WHERE status = 'queued' AND command = NONE RETURN AFTER;",
+                    {"run_id": ensure_record_id(str(child.id))},
+                ),
+            )
+            if claimed:
+                child = claimed[0]
+            else:
+                child = await CourseGenerationRun.get(str(child.id))
+        if child.status != sm.RunStatus.RUNNING:
+            raise ValueError("Course escalation run is no longer active")
+
+        try:
+            checkpointed = await self._finding_rows(child)
+            if checkpointed:
+                merged = self.generation.merge_escalation_findings(
+                    findings,
+                    ReviewArtifact(findings=checkpointed),
+                    known_anchor_ids=known_anchor_ids,
+                )
+                await self._persist_findings(
+                    run=child,
+                    course_id=course_id,
+                    version_id=version_id,
+                    chapter=chapter,
+                    findings=checkpointed,
+                    completion_output=_canonical_escalation_output(
+                        child, checkpointed
+                    ),
+                )
+                return merged
+            async with course_job_lock():
+                raw = await self.generation.escalate_raw(
+                    course_id=course_id,
+                    chapter_key=chapter.chapter_key,
+                    findings=findings,
+                    evidence_by_anchor=evidence_by_anchor,
+                    model=model,
+                    prompt_version=prompt_version,
+                )
+            merged = self.generation.merge_escalation_findings(
+                findings, raw, known_anchor_ids=known_anchor_ids
+            )
+            await self._persist_findings(
+                run=child,
+                course_id=course_id,
+                version_id=version_id,
+                chapter=chapter,
+                findings=raw.findings,
+                completion_output=_canonical_escalation_output(
+                    child, raw.findings
+                ),
+            )
+            return merged
+        except Exception as exc:
+            await self.fail_run(child, str(exc))
+            raise
 
     async def review_chapter(
         self,
@@ -1139,6 +1506,7 @@ class CourseWorkflowService:
         chapter_key: str,
         anchor_ids: list[str],
         model: ModelSelection,
+        escalation_model: ModelSelection,
         prompt_version: str,
     ) -> tuple[Chapter, list[ValidationFinding]]:
         course = await Course.get(course_id)
@@ -1154,7 +1522,7 @@ class CourseWorkflowService:
         _, proposal = self._outline_chapter(outline, chapter_key)
         if set(anchor_ids) != set(proposal.anchor_ids):
             raise ValueError("Review evidence must match the approved outline")
-        _, source_hashes, _ = await self.grounded_inputs(
+        selected_anchors, source_hashes, _ = await self.grounded_inputs(
             course=course, anchor_ids=anchor_ids
         )
         self.validate_run_claim(
@@ -1165,6 +1533,7 @@ class CourseWorkflowService:
                 "anchor_ids": anchor_ids,
                 "prompt_version": prompt_version,
                 "model": model.model_dump(mode="json"),
+                "escalation_model": escalation_model.model_dump(mode="json"),
             },
             model=model,
             prompt_version=prompt_version,
@@ -1181,15 +1550,7 @@ class CourseWorkflowService:
                 or chapter.chapter_key != chapter_key
             ):
                 raise ValueError("Course chapter review run is stale")
-            existing_rows = await repo_query(
-                "SELECT * FROM course_validation_finding "
-                "WHERE generation_run = $run ORDER BY id;",
-                {"run": ensure_record_id(str(run.id))},
-            )
-            findings = [
-                ValidationFinding.model_validate(row["finding"])
-                for row in existing_rows
-            ]
+            findings = await self._finding_rows(run)
             output = _canonical_review_output(run, findings)
             self.verify_completed_output(run, output)
             return chapter, findings
@@ -1220,16 +1581,13 @@ class CourseWorkflowService:
         if chapter.validation_status != sm.ChapterValidationStatus.PENDING:
             await chapter.transition_validation(sm.ChapterValidationStatus.PENDING)
 
-        existing_rows = await repo_query(
-            "SELECT * FROM course_validation_finding "
-            "WHERE generation_run = $run ORDER BY id;",
-            {"run": ensure_record_id(str(run.id))},
-        )
+        existing_rows = await self._finding_rows(run)
         if run.output_hash is not None:
-            findings = [
-                ValidationFinding.model_validate(row["finding"])
-                for row in existing_rows
-            ]
+            findings = existing_rows
+        elif existing_rows:
+            # Base Luna/validator findings are the parent checkpoint. A child
+            # replay must never call Luna or Sol again after it has succeeded.
+            findings = existing_rows
         else:
             async with course_job_lock():
                 reviewed = await self.generation.review(
@@ -1253,12 +1611,6 @@ class CourseWorkflowService:
                 )
                 unique.setdefault(identity, finding)
             findings = [unique[key] for key in sorted(unique)]
-            # A worker crash can leave a prefix of the finding set persisted.
-            # Clear that incomplete prefix before deterministic upserts replay it.
-            await repo_query(
-                "DELETE course_validation_finding WHERE generation_run = $run;",
-                {"run": ensure_record_id(str(run.id))},
-            )
             await self._persist_findings(
                 run=run,
                 course_id=course_id,
@@ -1266,6 +1618,35 @@ class CourseWorkflowService:
                 chapter=chapter,
                 findings=findings,
             )
+
+        if self.generation.requires_escalation(
+            findings,
+            known_anchor_ids={anchor.anchor_id for anchor in selected_anchors},
+        ):
+            if chapter.review_status == sm.ChapterReviewStatus.PENDING:
+                await chapter.transition_review(sm.ChapterReviewStatus.ESCALATED)
+            try:
+                findings = await self._inline_escalation(
+                    parent_run=run,
+                    course_id=course_id,
+                    version_id=str(version.id),
+                    chapter=chapter,
+                    findings=findings,
+                    selected_anchors=selected_anchors,
+                    source_hashes=source_hashes,
+                    model=escalation_model,
+                    prompt_version=prompt_version,
+                )
+            except Exception:
+                if chapter.review_status == sm.ChapterReviewStatus.ESCALATED:
+                    await chapter.transition_review(sm.ChapterReviewStatus.FAILED)
+                if chapter.validation_status == sm.ChapterValidationStatus.PENDING:
+                    await chapter.transition_validation(
+                        sm.ChapterValidationStatus.FAILED
+                    )
+                if chapter.status == sm.ChapterStatus.REVIEWING:
+                    await chapter.transition_to(sm.ChapterStatus.BLOCKED)
+                raise
 
         try:
             self.generation.assert_publishable(findings)
@@ -1275,13 +1656,23 @@ class CourseWorkflowService:
             if chapter.status == sm.ChapterStatus.REVIEWING:
                 await chapter.transition_to(sm.ChapterStatus.BLOCKED)
         else:
-            if chapter.review_status == sm.ChapterReviewStatus.PENDING:
+            if chapter.review_status in {
+                sm.ChapterReviewStatus.PENDING,
+                sm.ChapterReviewStatus.ESCALATED,
+            }:
                 await chapter.transition_review(sm.ChapterReviewStatus.PASSED)
             if chapter.validation_status == sm.ChapterValidationStatus.PENDING:
                 await chapter.transition_validation(sm.ChapterValidationStatus.PASSED)
             if chapter.status == sm.ChapterStatus.REVIEWING:
                 await chapter.transition_to(sm.ChapterStatus.READY)
-        await self.complete_run(run, _canonical_review_output(run, findings))
+        await self._persist_findings(
+            run=run,
+            course_id=course_id,
+            version_id=str(version.id),
+            chapter=chapter,
+            findings=findings,
+            completion_output=_canonical_review_output(run, findings),
+        )
         return chapter, findings
 
 
