@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from surreal_commands import get_command_status, submit_command
 
+from open_notebook.database.repository import ensure_record_id, repo_query
+
 
 class CommandService:
     """Generic service layer for command operations"""
@@ -19,7 +21,7 @@ class CommandService:
             # Ensure command modules are imported before submitting
             # This is needed because submit_command validates against local registry
             try:
-                import commands.podcast_commands  # noqa: F401
+                import commands  # noqa: F401
             except ImportError as import_err:
                 logger.error(f"Failed to import command modules: {import_err}")
                 raise ValueError("Command modules not available")
@@ -48,9 +50,39 @@ class CommandService:
         """Get status of any command job"""
         try:
             status = await get_command_status(job_id)
+            framework_status = status.status if status else "unknown"
+            run_status = {
+                "running": "running",
+                "completed": "succeeded",
+                "failed": "failed",
+                "canceled": "cancelled",
+                "cancelled": "cancelled",
+            }.get(framework_status)
+            if run_status is not None:
+                await repo_query(
+                    """
+                    UPDATE course_generation_run
+                    SET status = $run_status, error_message = $error_message
+                    WHERE command = $command
+                      AND (
+                        (status = 'queued' AND $run_status IN
+                          ['running', 'succeeded', 'failed', 'cancelled'])
+                        OR
+                        (status = 'running' AND $run_status IN
+                          ['succeeded', 'failed', 'cancelled'])
+                      );
+                    """,
+                    {
+                        "run_status": run_status,
+                        "error_message": (
+                            getattr(status, "error_message", None) if status else None
+                        ),
+                        "command": ensure_record_id(job_id),
+                    },
+                )
             return {
                 "job_id": job_id,
-                "status": status.status if status else "unknown",
+                "status": framework_status,
                 "result": status.result if status else None,
                 "error_message": getattr(status, "error_message", None)
                 if status

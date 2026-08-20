@@ -161,3 +161,7 @@ docker-compose.override.yml
 # Local QA/debug artifacts
 screenshot-*.png
 history.txt
+frontend/test-results/
+
+# One-command launcher state (logs, PIDs, lock and dependency fingerprints)
+.runtime/

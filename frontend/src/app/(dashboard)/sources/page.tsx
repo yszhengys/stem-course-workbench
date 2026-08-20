@@ -2,29 +2,29 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
+import { useQueryClient } from '@tanstack/react-query'
 import { sourcesApi, type SourceSortField } from '@/lib/api/sources'
+import { useAllSourcesPage } from '@/lib/hooks/use-sources'
 import { SourceListResponse } from '@/lib/types/api'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { EmptyState } from '@/components/common/EmptyState'
 import { AppShell } from '@/components/layout/AppShell'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
-import { FileText, Link as LinkIcon, Upload, AlignLeft, Trash2, ArrowDown, ArrowUp, ArrowUpDown } from 'lucide-react'
+import { FileText, Trash2, ArrowDown, ArrowUp, ArrowUpDown, Plus } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { getDateLocale } from '@/lib/utils/date-locale'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import { getApiErrorKey } from '@/lib/utils/error-handler'
+import { AddSourceDialog } from '@/components/sources/AddSourceDialog'
 
 export default function SourcesPage() {
   const { t, language } = useTranslation()
+  const [sourceDialogOpen, setSourceDialogOpen] = useState(false)
   const failedToLoadMessage = t('sources.failedToLoad')
-  const [sources, setSources] = useState<SourceListResponse[]>([])
-  const [loading, setLoading] = useState(true)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const queryClient = useQueryClient()
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [sortBy, setSortBy] = useState<SourceSortField>('updated')
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
@@ -35,61 +35,28 @@ export default function SourcesPage() {
   const router = useRouter()
   const tableRef = useRef<HTMLTableElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const offsetRef = useRef(0)
-  const loadingMoreRef = useRef(false)
-  const hasMoreRef = useRef(true)
-  const PAGE_SIZE = 30
 
-  const fetchSources = useCallback(async (reset = false) => {
-    try {
-      // Check flags before proceeding
-      if (!reset && (loadingMoreRef.current || !hasMoreRef.current)) {
-        return
-      }
+  // List data via React Query (replaces the manual fetchSources). Same
+  // semantics as before: fresh on mount and on sort change, single attempt
+  // (no retry), scroll-triggered infinite loading, and automatic refresh when
+  // mutations invalidate the ['sources'] prefix.
+  const {
+    sources,
+    isLoading,
+    isFetchingNextPage,
+    hasNextPage,
+    fetchNextPage,
+    error: sourcesError,
+  } = useAllSourcesPage(sortBy, sortOrder)
+  const error = sourcesError ? failedToLoadMessage : null
 
-      if (reset) {
-        setLoading(true)
-        offsetRef.current = 0
-        setSources([])
-        hasMoreRef.current = true
-      } else {
-        loadingMoreRef.current = true
-        setLoadingMore(true)
-      }
-
-      const data = await sourcesApi.list({
-        limit: PAGE_SIZE,
-        offset: offsetRef.current,
-        sort_by: sortBy,
-        sort_order: sortOrder,
-      })
-
-      if (reset) {
-        setSources(data)
-      } else {
-        setSources(prev => [...prev, ...data])
-      }
-
-      // Check if we have more data
-      const hasMoreData = data.length === PAGE_SIZE
-      hasMoreRef.current = hasMoreData
-      offsetRef.current += data.length
-    } catch (err) {
-      console.error('Failed to fetch sources:', err)
-      setError(failedToLoadMessage)
-      toast.error(failedToLoadMessage)
-    } finally {
-      setLoading(false)
-      setLoadingMore(false)
-      loadingMoreRef.current = false
-    }
-  }, [sortBy, sortOrder, failedToLoadMessage])
-
-  // Initial load and when sort changes
+  // Surface fetch failures exactly as the manual implementation did.
   useEffect(() => {
-    fetchSources(true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortBy, sortOrder])
+    if (sourcesError) {
+      console.error('Failed to fetch sources:', sourcesError)
+      toast.error(failedToLoadMessage)
+    }
+  }, [sourcesError, failedToLoadMessage])
 
   useEffect(() => {
     // Focus the table when component mounts or sources change
@@ -186,8 +153,8 @@ export default function SourcesPage() {
         const distanceFromBottom = scrollHeight - scrollTop - clientHeight
 
         // Load more when within 200px of the bottom
-        if (distanceFromBottom < 200 && !loadingMoreRef.current && hasMoreRef.current) {
-          fetchSources(false)
+        if (distanceFromBottom < 200 && !isFetchingNextPage && hasNextPage) {
+          void fetchNextPage()
         }
       }, 100)
     }
@@ -201,7 +168,7 @@ export default function SourcesPage() {
         clearTimeout(scrollTimeout)
       }
     }
-  }, [fetchSources, sources.length])
+  }, [fetchNextPage, isFetchingNextPage, hasNextPage, sources.length])
 
   const toggleSort = (field: SourceSortField) => {
     setSelectedIndex(0)
@@ -242,10 +209,11 @@ export default function SourcesPage() {
     )
   }
 
-  const getSourceIcon = (source: SourceListResponse) => {
-    if (source.asset?.url) return <LinkIcon className="h-4 w-4" />
-    if (source.asset?.file_path) return <Upload className="h-4 w-4" />
-    return <AlignLeft className="h-4 w-4" />
+  // Content-type pebble — type hues live in dots, never washes
+  const getSourceTypeDotClass = (source: SourceListResponse) => {
+    if (source.asset?.url) return 'bg-type-web'
+    if (source.asset?.file_path) return 'bg-type-pdf'
+    return 'bg-type-note'
   }
 
   const getSourceType = (source: SourceListResponse) => {
@@ -270,8 +238,9 @@ export default function SourcesPage() {
     try {
       await sourcesApi.delete(deleteDialog.source.id)
       toast.success(t('sources.deleteSuccess'))
-      // Remove the deleted source from the list
-      setSources(prev => prev.filter(s => s.id !== deleteDialog.source?.id))
+      // Invalidate the page query — the deleted row disappears on refetch
+      // (previously the list was patched locally and could drift).
+      await queryClient.invalidateQueries({ queryKey: ['sources', 'page'] })
       setDeleteDialog({ open: false, source: null })
     } catch (err: unknown) {
       const error = err as { response?: { data?: { detail?: string } }, message?: string };
@@ -280,43 +249,43 @@ export default function SourcesPage() {
     }
   }
 
-  if (loading) {
-    return (
-      <AppShell>
+  const renderContent = () => {
+    if (isLoading) {
+      return (
         <div className="flex h-full items-center justify-center">
           <LoadingSpinner />
         </div>
-      </AppShell>
-    )
-  }
+      )
+    }
 
-  if (error) {
-    return (
-      <AppShell>
+    if (error) {
+      return (
         <div className="flex h-full items-center justify-center">
-          <p className="text-red-500">{error}</p>
+          <p className="text-destructive">{error}</p>
         </div>
-      </AppShell>
-    )
-  }
+      )
+    }
 
-  if (sources.length === 0) {
-    return (
-      <AppShell>
+    if (sources.length === 0) {
+      return (
         <EmptyState
           icon={FileText}
           title={t('sources.noSourcesYet')}
           description={t('sources.allSourcesDescShort')}
+          action={
+            <Button onClick={() => setSourceDialogOpen(true)} variant="outline" className="mt-4">
+              <Plus className="h-4 w-4 mr-2" />
+              {t('sources.newSource')}
+            </Button>
+          }
         />
-      </AppShell>
-    )
-  }
+      )
+    }
 
-  return (
-    <AppShell>
+    return (<>
       <div className="flex flex-col h-full w-full max-w-none px-6 py-6">
         <div className="mb-6 flex-shrink-0">
-          <h1 className="text-3xl font-bold">{t('sources.allSources')}</h1>
+          <h1 className="font-display text-2xl font-bold tracking-tight">{t('sources.allSources')}</h1>
           <p className="mt-2 text-muted-foreground">
             {t('sources.allSourcesDesc')}
           </p>
@@ -338,7 +307,7 @@ export default function SourcesPage() {
               <col className="w-[100px]" />
             </colgroup>
             <thead className="sticky top-0 bg-background z-10">
-              <tr className="border-b bg-muted/50">
+              <tr className="border-b">
                 <th className="h-12 px-4 text-left align-middle font-medium text-muted-foreground">
                   {renderSortableHeader('type', t('common.type'))}
                 </th>
@@ -372,15 +341,18 @@ export default function SourcesPage() {
                     "border-b transition-colors cursor-pointer",
                     selectedIndex === index
                       ? "bg-accent"
-                      : "hover:bg-muted/50"
+                      : "hover:bg-[var(--surface-raised)]"
                   )}
                 >
                   <td className="h-12 px-4">
                     <div className="flex items-center gap-2">
-                      {getSourceIcon(source)}
-                      <Badge variant="secondary" className="text-xs">
+                      <span
+                        aria-hidden
+                        className={cn('h-2 w-2 shrink-0 rounded-full', getSourceTypeDotClass(source))}
+                      />
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                         {getSourceType(source)}
-                      </Badge>
+                      </span>
                     </div>
                   </td>
                   <td className="h-12 px-4">
@@ -411,9 +383,16 @@ export default function SourcesPage() {
                     <span className="text-sm font-medium">{source.insights_count || 0}</span>
                   </td>
                   <td className="h-12 px-4 text-center hidden lg:table-cell">
-                    <Badge variant={source.embedded ? "default" : "secondary"} className="text-xs">
+                    <span
+                      className={cn(
+                        "inline-flex items-center rounded-sm px-2 py-0.5 text-xs font-medium",
+                        source.embedded
+                          ? "bg-fern-tint text-fern-deep dark:text-fern"
+                          : "bg-muted text-muted-foreground"
+                      )}
+                    >
                       {source.embedded ? t('sources.yes') : t('sources.no')}
-                    </Badge>
+                    </span>
                   </td>
                   <td className="h-12 px-4 text-right">
                     <Button
@@ -427,7 +406,7 @@ export default function SourcesPage() {
                   </td>
                 </tr>
               ))}
-              {loadingMore && (
+              {isFetchingNextPage && (
                 <tr>
                   <td colSpan={7} className="h-16 text-center">
                     <div className="flex items-center justify-center">
@@ -450,6 +429,19 @@ export default function SourcesPage() {
         confirmText={t('common.delete')}
         confirmVariant="destructive"
         onConfirm={handleDeleteConfirm}
+      />
+    </>)
+  }
+
+  return (
+    <AppShell>
+      {renderContent()}
+      <AddSourceDialog
+        open={sourceDialogOpen}
+        onOpenChange={(open) => {
+          setSourceDialogOpen(open)
+          if (!open) queryClient.invalidateQueries({ queryKey: ['sources', 'page'] })
+        }}
       />
     </AppShell>
   )

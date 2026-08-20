@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseZhTW } from '../course';
 
 export const zhTW = {
   common: {
@@ -217,6 +218,7 @@ export const zhTW = {
     manage: "管理",
     sources: "來源",
     notebooks: "筆記本",
+    courses: "課程",
     askAndSearch: "詢問與搜尋",
     podcasts: "播客",
     models: "模型",
@@ -277,6 +279,7 @@ export const zhTW = {
     lastViewed: "檢視於{{time}}",
   },
   sources: {
+    newSource: "新增來源",
     bulkContext: "上下文",
     includeAllInContext: "全部加入上下文",
     includeAllInsights: "全部加入（僅見解）",
@@ -967,6 +970,7 @@ export const zhTW = {
     decryptionError: "解密錯誤",
     decryptionErrorDescription: "此憑證的 API 金鑰無法解密。加密金鑰可能已變更。請刪除此憑證並使用正確的金鑰重新建立。",
   },
+  course: courseZhTW,
   setupBanner: {
     encryptionRequired: "未設定加密金鑰",
     encryptionRequiredDescription: "請設定 OPEN_NOTEBOOK_ENCRYPTION_KEY 環境變數以啟用安全憑據儲存。",

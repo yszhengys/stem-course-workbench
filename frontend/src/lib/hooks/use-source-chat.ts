@@ -4,6 +4,7 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { getApiErrorMessage } from '@/lib/utils/error-handler'
+import { QUERY_KEYS } from '@/lib/api/query-client'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { sourceChatApi } from '@/lib/api/source-chat'
 import {
@@ -25,14 +26,14 @@ export function useSourceChat(sourceId: string) {
 
   // Fetch sessions
   const { data: sessions = [], isLoading: loadingSessions, refetch: refetchSessions } = useQuery<SourceChatSession[]>({
-    queryKey: ['sourceChatSessions', sourceId],
+    queryKey: QUERY_KEYS.sourceChatSessions(sourceId),
     queryFn: () => sourceChatApi.listSessions(sourceId),
     enabled: !!sourceId
   })
 
   // Fetch current session with messages
   const { data: currentSession, refetch: refetchCurrentSession } = useQuery({
-    queryKey: ['sourceChatSession', sourceId, currentSessionId],
+    queryKey: QUERY_KEYS.sourceChatSession(sourceId, currentSessionId!),
     queryFn: () => sourceChatApi.getSession(sourceId, currentSessionId!),
     enabled: !!sourceId && !!currentSessionId
   })
@@ -58,7 +59,7 @@ export function useSourceChat(sourceId: string) {
     mutationFn: (data: Omit<CreateSourceChatSessionRequest, 'source_id'>) => 
       sourceChatApi.createSession(sourceId, data),
     onSuccess: (newSession) => {
-      queryClient.invalidateQueries({ queryKey: ['sourceChatSessions', sourceId] })
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.sourceChatSessions(sourceId) })
       setCurrentSessionId(newSession.id)
       toast.success(t('chat.sessionCreated'))
     },
@@ -73,8 +74,8 @@ export function useSourceChat(sourceId: string) {
     mutationFn: ({ sessionId, data }: { sessionId: string, data: UpdateSourceChatSessionRequest }) =>
       sourceChatApi.updateSession(sourceId, sessionId, data),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['sourceChatSessions', sourceId] })
-      queryClient.invalidateQueries({ queryKey: ['sourceChatSession', sourceId, currentSessionId] })
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.sourceChatSessions(sourceId) })
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.sourceChatSession(sourceId, currentSessionId!) })
       toast.success(t('chat.sessionUpdated'))
     },
     onError: (err: unknown) => {
@@ -88,7 +89,7 @@ export function useSourceChat(sourceId: string) {
     mutationFn: (sessionId: string) => 
       sourceChatApi.deleteSession(sourceId, sessionId),
     onSuccess: (_, deletedId) => {
-      queryClient.invalidateQueries({ queryKey: ['sourceChatSessions', sourceId] })
+      queryClient.invalidateQueries({ queryKey: QUERY_KEYS.sourceChatSessions(sourceId) })
       if (currentSessionId === deletedId) {
         setCurrentSessionId(null)
         setMessages([])
@@ -112,7 +113,7 @@ export function useSourceChat(sourceId: string) {
         const newSession = await sourceChatApi.createSession(sourceId, { title: defaultTitle })
         sessionId = newSession.id
         setCurrentSessionId(sessionId)
-        queryClient.invalidateQueries({ queryKey: ['sourceChatSessions', sourceId] })
+        queryClient.invalidateQueries({ queryKey: QUERY_KEYS.sourceChatSessions(sourceId) })
       } catch (err: unknown) {
         const error = err as { response?: { data?: { detail?: string } }, message?: string };
         console.error('Failed to create chat session:', error)
@@ -131,11 +132,15 @@ export function useSourceChat(sourceId: string) {
     setMessages(prev => [...prev, userMessage])
     setIsStreaming(true)
 
+    // Wire a real AbortController so cancelStreaming can stop the fetch.
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
     try {
       const response = await sourceChatApi.sendMessage(sourceId, sessionId, {
         message,
         model_override: modelOverride
-      })
+      }, controller.signal)
 
       if (!response) {
         throw new Error('No response body')
@@ -144,13 +149,19 @@ export function useSourceChat(sourceId: string) {
       const reader = response.getReader()
       const decoder = new TextDecoder()
       let aiMessage: SourceChatMessage | null = null
+      let buffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
 
-        const text = decoder.decode(value)
-        const lines = text.split('\n')
+        // Keep the last incomplete line in the buffer between reads: SSE
+        // events routinely split across chunks, and decoding without
+        // { stream: true } corrupts multi-byte UTF-8 characters. Mirrors
+        // the canonical pattern in use-ask.ts.
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {
@@ -192,13 +203,19 @@ export function useSourceChat(sourceId: string) {
         }
       }
     } catch (err: unknown) {
-      const error = err as { response?: { data?: { detail?: string } }, message?: string };
+      // Cancellation is not an error: keep the optimistic user message and
+      // skip the error toast (the finally block still stops the spinner).
+      const error = err as { response?: { data?: { detail?: string } }, message?: string, name?: string };
+      if (error.name === 'AbortError') {
+        return
+      }
       console.error('Error sending message:', error)
       toast.error(getApiErrorMessage(error.response?.data?.detail || error.message, (key) => t(key), 'apiErrors.failedToSendMessage'))
       // Remove optimistic messages on error
       setMessages(prev => prev.filter(msg => !msg.id.startsWith('temp-')))
     } finally {
       setIsStreaming(false)
+      abortControllerRef.current = null
       // Refetch session to get persisted messages
       refetchCurrentSession()
     }

@@ -83,8 +83,8 @@ class TestTransformationGraphPropagatesFailure:
 
         with (
             patch(
-                "open_notebook.graphs.transformation.DefaultPrompts",
-                return_value=MagicMock(transformation_instructions=None),
+                "open_notebook.graphs.transformation.DefaultPrompts.get_instance",
+                new=AsyncMock(return_value=MagicMock(transformation_instructions=None)),
             ),
             patch(
                 "open_notebook.graphs.transformation.Prompter"
@@ -127,8 +127,8 @@ class TestTransformationGraphPropagatesFailure:
 
         with (
             patch(
-                "open_notebook.graphs.transformation.DefaultPrompts",
-                return_value=MagicMock(transformation_instructions=None),
+                "open_notebook.graphs.transformation.DefaultPrompts.get_instance",
+                new=AsyncMock(return_value=MagicMock(transformation_instructions=None)),
             ),
             patch(
                 "open_notebook.graphs.transformation.Prompter"
@@ -148,6 +148,64 @@ class TestTransformationGraphPropagatesFailure:
 
         mock_add_insight.assert_awaited_once()
         assert result == {"output": "the transformation output"}
+
+
+class TestTransformationGraphUsesDefaultPrompts:
+    """The persisted default instructions must be prepended (the feature was
+    previously dead: a fresh DefaultPrompts(...) instance was constructed
+    instead of loading the singleton from the DB)."""
+
+    @pytest.mark.asyncio
+    async def test_default_instructions_are_prepended_when_set(self):
+        from open_notebook.graphs.transformation import run_transformation
+
+        source = make_source()
+        transformation = MagicMock(title="Summary", prompt="user prompt")
+
+        fake_response = MagicMock()
+        fake_response.content = "output"
+        fake_chain = AsyncMock()
+        fake_chain.ainvoke = AsyncMock(return_value=fake_response)
+
+        state = {
+            "source": source,
+            "input_text": "text to transform",
+            "transformation": transformation,
+        }
+
+        captured_render_data: dict = {}
+
+        def render(**kwargs):
+            captured_render_data.update(kwargs.get("data") or {})
+            return "rendered prompt"
+
+        mock_prompter = MagicMock()
+        mock_prompter.render = MagicMock(side_effect=render)
+        mock_prompter_cls = MagicMock(return_value=mock_prompter)
+
+        with (
+            patch(
+                "open_notebook.graphs.transformation.DefaultPrompts.get_instance",
+                new=AsyncMock(
+                    return_value=MagicMock(
+                        transformation_instructions="DEFAULT RULES"
+                    )
+                ),
+            ),
+            patch(
+                "open_notebook.graphs.transformation.Prompter", mock_prompter_cls
+            ),
+            patch(
+                "open_notebook.graphs.transformation.provision_langchain_model",
+                new=AsyncMock(return_value=fake_chain),
+            ),
+            patch.object(
+                Source, "add_insight", new=AsyncMock(return_value="command:ok")
+            ),
+        ):
+            await run_transformation(state, config={"configurable": {}})
+
+        assert captured_render_data.get("instructions") == "DEFAULT RULES\n\nuser prompt"
 
 
 class TestSourceGraphTransformContentPropagatesFailure:

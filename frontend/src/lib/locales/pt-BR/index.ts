@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { coursePtBR } from '../course';
 
 export const ptBR = {
   common: {
@@ -217,6 +218,7 @@ export const ptBR = {
     manage: "Gerenciar",
     sources: "Fontes",
     notebooks: "Cadernos",
+    courses: "Cursos",
     askAndSearch: "Perguntar e Buscar",
     podcasts: "Podcasts",
     models: "Modelos",
@@ -277,6 +279,7 @@ export const ptBR = {
     lastViewed: "Visto {{time}}",
   },
   sources: {
+    newSource: "Nova Fonte",
     bulkContext: "Contexto",
     includeAllInContext: "Incluir todas no contexto",
     includeAllInsights: "Incluir todas (apenas insights)",
@@ -967,6 +970,7 @@ export const ptBR = {
     decryptionError: "Erro de Descriptografia",
     decryptionErrorDescription: "A chave de API desta credencial não pôde ser descriptografada. A chave de criptografia pode ter sido alterada. Exclua esta credencial e recrie-a com a chave correta.",
   },
+  course: coursePtBR,
   setupBanner: {
     encryptionRequired: "Chave de criptografia não configurada",
     encryptionRequiredDescription: "Configure a variável de ambiente OPEN_NOTEBOOK_ENCRYPTION_KEY para habilitar o armazenamento seguro de credenciais.",

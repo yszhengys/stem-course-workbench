@@ -1,0 +1,62 @@
+-- Roll back only objects introduced by migration 25.  Migration-24 tables and
+-- all rows that pre-date this migration remain intact.
+
+-- Restore migration 24's original cascade before removing migration-25 tables.
+DEFINE EVENT OVERWRITE course_delete ON TABLE course WHEN ($after == NONE) THEN {
+    delete course_version where course == $before.id;
+    delete evidence where course == $before.id;
+    delete progress where course == $before.id;
+    delete course_note where course == $before.id;
+};
+
+REMOVE INDEX IF EXISTS progress_stable_identity_unique ON TABLE progress;
+REMOVE INDEX IF EXISTS evidence_source_identity_unique ON TABLE evidence;
+REMOVE INDEX IF EXISTS chapter_version_identity_unique ON TABLE chapter;
+REMOVE INDEX IF EXISTS course_version_identity_unique ON TABLE course_version;
+REMOVE INDEX IF EXISTS course_anchor_identity_unique ON TABLE course_evidence_anchor;
+
+REMOVE FIELD IF EXISTS orphan_status ON TABLE attempt;
+REMOVE FIELD IF EXISTS transfer_completed ON TABLE attempt;
+REMOVE FIELD IF EXISTS answer_revealed ON TABLE attempt;
+REMOVE FIELD IF EXISTS hints_used ON TABLE attempt;
+REMOVE FIELD IF EXISTS answer ON TABLE attempt;
+REMOVE FIELD IF EXISTS exercise_key ON TABLE attempt;
+REMOVE FIELD IF EXISTS chapter_key ON TABLE attempt;
+REMOVE FIELD IF EXISTS chapter ON TABLE attempt;
+REMOVE FIELD IF EXISTS course_version ON TABLE attempt;
+REMOVE FIELD IF EXISTS course ON TABLE attempt;
+
+REMOVE FIELD IF EXISTS orphan_status ON TABLE course_note;
+REMOVE FIELD IF EXISTS block_key ON TABLE course_note;
+REMOVE FIELD IF EXISTS chapter_key ON TABLE course_note;
+REMOVE FIELD IF EXISTS orphan_status ON TABLE progress;
+REMOVE FIELD IF EXISTS block_key ON TABLE progress;
+REMOVE FIELD IF EXISTS chapter_key ON TABLE progress;
+
+REMOVE FIELD IF EXISTS preview_path ON TABLE evidence;
+REMOVE FIELD IF EXISTS source_hash ON TABLE evidence;
+REMOVE FIELD IF EXISTS source_role ON TABLE evidence;
+
+REMOVE FIELD IF EXISTS published_at ON TABLE chapter;
+REMOVE FIELD IF EXISTS status ON TABLE chapter;
+REMOVE FIELD IF EXISTS input_hash ON TABLE chapter;
+REMOVE FIELD IF EXISTS artifact ON TABLE chapter;
+REMOVE FIELD IF EXISTS version_no ON TABLE chapter;
+REMOVE FIELD IF EXISTS chapter_key ON TABLE chapter;
+
+REMOVE FIELD IF EXISTS confirmation ON TABLE course_version;
+REMOVE FIELD IF EXISTS approved_at ON TABLE course_version;
+REMOVE FIELD IF EXISTS input_hash ON TABLE course_version;
+REMOVE FIELD IF EXISTS outline_artifact ON TABLE course_version;
+
+REMOVE FIELD IF EXISTS error_message ON TABLE course;
+REMOVE FIELD IF EXISTS outline_version_id ON TABLE course;
+REMOVE FIELD IF EXISTS supplement_source_ids ON TABLE course;
+REMOVE FIELD IF EXISTS primary_source_ids ON TABLE course;
+REMOVE FIELD IF EXISTS source_ids ON TABLE course;
+REMOVE FIELD IF EXISTS language ON TABLE course;
+REMOVE FIELD IF EXISTS notebook ON TABLE course;
+
+REMOVE TABLE IF EXISTS course_validation_finding;
+REMOVE TABLE IF EXISTS course_generation_run;
+REMOVE TABLE IF EXISTS course_evidence_anchor;

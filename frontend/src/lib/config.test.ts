@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { getApiUrl, resetConfig } from './config'
+import { CONFIG_FETCH_TIMEOUT_MS, getApiUrl, resetConfig } from './config'
 
 describe('Config Priority', () => {
   const originalEnv = process.env
@@ -96,5 +96,25 @@ describe('Config Priority', () => {
 
     const url = await getApiUrl()
     expect(url).toBe('')
+  })
+
+  it('bounds a stalled runtime configuration request', async () => {
+    vi.useFakeTimers()
+    delete process.env.NEXT_PUBLIC_API_URL
+    fetchMock.mockImplementationOnce((_url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+      })
+    )
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ version: '1.0.0' }),
+    } as Response)
+
+    const urlPromise = getApiUrl()
+    await vi.advanceTimersByTimeAsync(CONFIG_FETCH_TIMEOUT_MS)
+
+    await expect(urlPromise).resolves.toBe('')
+    vi.useRealTimers()
   })
 })

@@ -52,6 +52,16 @@
   <a href="https://zdoc.app/zh/lfnovo/open-notebook">中文</a>
 </div>
 
+## STEM Course Workbench（本分支）
+
+本仓库在 Open Notebook 之上增加了本地优先、证据可追溯的数学/物理课程工作流。Apple Silicon Mac 上可用一条命令启动，并直接进入新建课程页面：
+
+```bash
+./scripts/course-workbench.sh
+```
+
+开始使用：[STEM Course Workbench 中文使用说明](docs/0-START-HERE/course-workbench-user-guide.zh-CN.md) · [架构与维护说明](docs/course-workbench.md) · [上游 Open Notebook 文档](docs/index.md)
+
 ## A private, multi-model, 100% local, full-featured alternative to Notebook LM
 
 ![New Notebook](docs/assets/asset_list.png)
@@ -97,6 +107,8 @@ Learn more about our project at [https://www.open-notebook.ai](https://www.open-
 [![Python][Python]][Python-url] [![Next.js][Next.js]][Next-url] [![React][React]][React-url] [![SurrealDB][SurrealDB]][SurrealDB-url] [![LangChain][LangChain]][LangChain-url]
 
 ## 🚀 Quick Start (2 Minutes)
+
+> **上游 Open Notebook 部署路径：** 以下 Docker quick-start 用于通用 Open Notebook 部署，**不会**启动本分支的 Course Workbench 宿主机工作流。Course 用户请返回上方并运行 `./scripts/course-workbench.sh`。
 
 ### Prerequisites
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed
@@ -319,7 +331,7 @@ Thanks to the [Esperanto](https://github.com/lfnovo/esperanto) library, we suppo
 - **Enhanced Citations**: Improved layout and finer control for source citations
 - **Multiple Chat Sessions**: Manage different conversations within notebooks
 
-See the [open issues](https://github.com/lfnovo/open-notebook/issues) for a full list of proposed features and known issues.
+Explore [GitHub Discussions](https://github.com/lfnovo/open-notebook/discussions/categories/ideas) for proposed features and product ideas, and [open Issues](https://github.com/lfnovo/open-notebook/issues) for known bugs and approved work.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -335,7 +347,8 @@ See the [open issues](https://github.com/lfnovo/open-notebook/issues) for a full
 ### Join the Community
 - 💬 **[Discord Server](https://discord.gg/37XJPXfz2w)** - Get help, share ideas, and connect with other users
 - 𝕏 **[Follow @lfnovo on X](https://x.com/lfnovo)** - Project updates and news from the maintainer
-- 🐛 **[GitHub Issues](https://github.com/lfnovo/open-notebook/issues)** - Report bugs and request features
+- 💡 **[GitHub Discussions](https://github.com/lfnovo/open-notebook/discussions)** - Ask questions and shape features, product direction, design, and architecture
+- 🐛 **[GitHub Issues](https://github.com/lfnovo/open-notebook/issues)** - Report reproducible bugs and find approved work
 - ⭐ **Star this repo** - Show your support and help others discover Open Notebook
 
 ### Contributing
@@ -361,7 +374,8 @@ Open Notebook is MIT licensed. See the [LICENSE](LICENSE) file for details.
 **Community Support**:
 - 💬 [Discord Server](https://discord.gg/37XJPXfz2w) - Get help, share ideas, and connect with users
 - 𝕏 [Follow @lfnovo on X](https://x.com/lfnovo) - Project updates and news from the maintainer
-- 🐛 [GitHub Issues](https://github.com/lfnovo/open-notebook/issues) - Report bugs and request features
+- 💡 [GitHub Discussions](https://github.com/lfnovo/open-notebook/discussions) - Ask questions and shape ideas
+- 🐛 [GitHub Issues](https://github.com/lfnovo/open-notebook/issues) - Report reproducible bugs and find approved work
 - 🌐 [Website](https://www.open-notebook.ai) - Learn more about the project
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

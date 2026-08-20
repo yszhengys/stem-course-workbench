@@ -2,6 +2,12 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from open_notebook.course.contracts import (
+    LabSpecVariant,
+    ModelSelection,
+    SafeLabKey,
+)
+
 
 # Notebook models
 class NotebookCreate(BaseModel):
@@ -794,3 +800,227 @@ class NotebookDeleteResponse(BaseModel):
     deleted_chat_sessions: int = Field(
         ..., description="Number of chat sessions deleted"
     )
+
+
+# Course module models (PDR-003)
+
+
+class StrictCourseRequest(BaseModel):
+    """Reject unknown Course fields at the HTTP trust boundary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class CourseJobRequest(StrictCourseRequest):
+    prompt_version: str = Field("v1", min_length=1, max_length=100)
+    force: bool = False
+
+
+class CourseAnchoredJobRequest(CourseJobRequest):
+    anchor_ids: List[str] = Field(..., min_length=1, max_length=500)
+    model: ModelSelection
+
+    @field_validator("anchor_ids")
+    @classmethod
+    def anchors_are_unique(cls, value: List[str]) -> List[str]:
+        if any(not anchor_id.strip() for anchor_id in value):
+            raise ValueError("anchor IDs must be non-empty")
+        if len(value) != len(set(value)):
+            raise ValueError("anchor IDs must be unique")
+        return value
+
+
+class CourseEvidenceBuildRequest(StrictCourseRequest):
+    source_id: str = Field(..., min_length=1)
+    role: Literal["PRIMARY", "SUPPLEMENT"]
+    force: bool = False
+
+
+class CourseOutlineGenerateRequest(CourseAnchoredJobRequest):
+    available_lab_keys: List[SafeLabKey] = Field(..., min_length=1, max_length=100)
+
+    @field_validator("available_lab_keys")
+    @classmethod
+    def lab_keys_are_unique(cls, value: List[str]) -> List[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("lab keys must be unique")
+        return value
+
+
+class CourseChapterGenerateRequest(CourseAnchoredJobRequest):
+    pass
+
+
+class CourseChapterReviewRequest(CourseAnchoredJobRequest):
+    escalation_model: ModelSelection
+
+
+class CourseRetrievalRequest(StrictCourseRequest):
+    anchor_ids: List[str] = Field(..., min_length=1, max_length=500)
+
+    @field_validator("anchor_ids")
+    @classmethod
+    def anchors_are_unique(cls, value: List[str]) -> List[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("anchor IDs must be unique")
+        return value
+
+
+class CourseFindingUpdate(StrictCourseRequest):
+    status: Literal["resolved", "acknowledged"]
+    resolution_reason: str = Field(..., min_length=1, max_length=2000)
+
+
+class CourseJobResponse(BaseModel):
+    command_id: str
+    run_id: str
+    status: str
+
+class CourseCreate(BaseModel):
+    title: str = Field(..., min_length=1, description="Course title")
+    subject: Optional[str] = Field(None, description="Subject area")
+    description: Optional[str] = Field(None, description="Course description")
+    language: str = Field("zh-CN", min_length=2, max_length=20)
+    notebook_id: Optional[str] = Field(
+        None, description="Validated existing notebook; omitted creates one"
+    )
+    config: Optional[Dict[str, Any]] = Field(
+        None, description="Generation config (models, locale, validation)"
+    )
+
+
+class CourseUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, description="Course title")
+    subject: Optional[str] = Field(None, description="Subject area")
+    description: Optional[str] = Field(None, description="Course description")
+    language: Optional[str] = Field(None, min_length=2, max_length=20)
+    config: Optional[Dict[str, Any]] = Field(
+        None, description="Generation config"
+    )
+
+
+class CourseOutlineUpdate(BaseModel):
+    outline: Dict[str, Any] = Field(
+        ..., description="Approved outline: chapters list + optional dependency_graph"
+    )
+
+
+class CourseOutlineApproval(BaseModel):
+    version_id: str = Field(..., min_length=1)
+    confirmation: str
+
+
+class CourseSourceAssociation(BaseModel):
+    source_id: str = Field(..., min_length=1)
+    role: Literal["PRIMARY", "SUPPLEMENT"]
+
+
+class CourseStatusUpdate(BaseModel):
+    status: str = Field(..., description="Target course status")
+
+
+class CourseVersionCreate(BaseModel):
+    outline_hash: Optional[str] = Field(
+        None, description="Hash of the approved outline this version is based on"
+    )
+    outline_artifact: Optional[Dict[str, Any]] = None
+    input_hash: Optional[str] = None
+
+
+class CourseVersionStatusUpdate(BaseModel):
+    status: str = Field(..., description="Target version status")
+
+
+class ChapterCreate(BaseModel):
+    chapter_no: int = Field(..., ge=1, description="Chapter number (1-based)")
+    title: str = Field(..., min_length=1, description="Chapter title")
+    chapter_key: Optional[str] = Field(None, min_length=1, max_length=100)
+    artifact: Optional[Dict[str, Any]] = None
+    input_hash: Optional[str] = None
+
+
+class ChapterUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, description="Chapter title")
+    content: Optional[str] = Field(None, description="Chapter content")
+    citations: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Citation anchors into evidence"
+    )
+    review_status: Optional[str] = Field(None, description="Target review status")
+    validation_status: Optional[str] = Field(
+        None, description="Target validation status"
+    )
+    status: Optional[str] = Field(None, description="Target chapter lifecycle status")
+    artifact: Optional[Dict[str, Any]] = None
+    input_hash: Optional[str] = None
+
+
+class LabCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lab_type: Literal[
+        "function_plot", "parametric_curve", "vector_field", "geometry", "kinematics"
+    ]
+    chapter: Optional[str] = Field(None, description="Optional chapter record id")
+    prompt: Optional[str] = Field(None, max_length=4000, description="Exercise prompt")
+    payload: LabSpecVariant = Field(..., description="Bounded declarative lab payload")
+    answer: Optional[Dict[str, Any]] = Field(
+        None, description="Expected answer / check specification"
+    )
+
+    @model_validator(mode="after")
+    def payload_kind_matches_lab_type(self):
+        if self.payload.kind != self.lab_type:
+            raise ValueError("lab_type must match payload.kind")
+        return self
+
+
+class AttemptCreate(BaseModel):
+    answers: Dict[str, Any] = Field(..., description="Student answers payload")
+    chapter_key: Optional[str] = None
+    exercise_key: Optional[str] = None
+
+
+class CourseChapterAttemptCreate(StrictCourseRequest):
+    answers: Dict[str, Any] = Field(..., description="Student answers payload")
+    exercise_key: Optional[str] = Field(None, min_length=1, max_length=100)
+    answer: Optional[str] = Field(None, max_length=10000)
+    hints_used: Optional[int] = Field(None, ge=0, le=5)
+    answer_revealed: Optional[bool] = None
+    transfer_completed: Optional[bool] = None
+
+
+class AttemptStatusUpdate(BaseModel):
+    status: str = Field(..., description="Target attempt status")
+
+
+class ProgressUpdate(StrictCourseRequest):
+    chapter_key: Optional[str] = Field(None, min_length=1, max_length=100)
+    block_key: Optional[str] = Field(None, min_length=1, max_length=200)
+    status: str = Field(..., description="Target progress status")
+
+    @model_validator(mode="after")
+    def block_requires_chapter(self) -> "ProgressUpdate":
+        if self.block_key is not None and self.chapter_key is None:
+            raise ValueError("block_key requires chapter_key")
+        return self
+
+
+class CourseNoteCreate(StrictCourseRequest):
+    chapter_key: Optional[str] = Field(None, min_length=1, max_length=100)
+    block_key: Optional[str] = Field(None, min_length=1, max_length=200)
+    content: str = Field(..., min_length=1, description="Note content")
+
+    @model_validator(mode="after")
+    def block_requires_chapter(self) -> "CourseNoteCreate":
+        if self.block_key is not None and self.chapter_key is None:
+            raise ValueError("block_key requires chapter_key")
+        return self
+
+
+class CourseNoteReattach(StrictCourseRequest):
+    chapter_key: str = Field(..., min_length=1, max_length=100)
+    block_key: str = Field(..., min_length=1, max_length=200)
+
+
+class ChapterPublish(BaseModel):
+    course_id: str = Field(..., min_length=1)

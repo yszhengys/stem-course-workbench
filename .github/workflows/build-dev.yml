@@ -27,8 +27,8 @@ permissions:
   packages: write
 
 env:
-  GHCR_IMAGE: ghcr.io/lfnovo/open-notebook
-  DOCKERHUB_IMAGE: lfnovo/open_notebook
+  GHCR_IMAGE: ghcr.io/yszhengys/stem-course-workbench
+  DOCKERHUB_IMAGE: yszhengys/stem-course-workbench
 
 jobs:
   extract-version:
@@ -80,6 +80,7 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: read
     outputs:
       image: ${{ steps.filter.outputs.image }}
@@ -118,7 +119,7 @@ jobs:
         run: echo "No image-affecting paths changed — skipping the Docker build. Reporting success."
 
       - name: Free up disk space
-        if: needs.extract-version.outputs.is_push_to_main == 'true'
+        if: needs.extract-version.outputs.is_push_to_main == 'true' || needs.changes.outputs.image == 'true'
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
@@ -145,15 +146,6 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-
-      - name: Cache Docker layers
-        if: needs.extract-version.outputs.is_push_to_main == 'true' || needs.changes.outputs.image == 'true'
-        uses: actions/cache@v5
-        with:
-          path: /tmp/.buildx-cache-dev
-          key: ${{ runner.os }}-buildx-dev-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-dev-
 
       - name: Prepare Docker tags
         id: tags
@@ -185,14 +177,6 @@ jobs:
           platforms: ${{ steps.tags.outputs.platforms }}
           push: ${{ steps.tags.outputs.push }}
           tags: ${{ steps.tags.outputs.tags }}
-          cache-from: type=local,src=/tmp/.buildx-cache-dev
-          cache-to: type=local,dest=/tmp/.buildx-cache-dev-new,mode=max
-
-      - name: Move cache
-        if: needs.extract-version.outputs.is_push_to_main == 'true' || needs.changes.outputs.image == 'true'
-        run: |
-          rm -rf /tmp/.buildx-cache-dev
-          mv /tmp/.buildx-cache-dev-new /tmp/.buildx-cache-dev
 
   build-single:
     needs: extract-version

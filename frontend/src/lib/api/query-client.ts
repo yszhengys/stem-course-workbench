@@ -11,9 +11,9 @@ export const queryClient = new QueryClient({
       retry: (failureCount, error) => !isNotFoundError(error) && failureCount < 2,
       refetchOnWindowFocus: false,
     },
-    mutations: {
-      retry: 1,
-    },
+    // Mutations must never auto-retry (project rule: no automatic request
+    // retry) — a retried POST/DELETE duplicates side effects (sources,
+    // podcast jobs). TanStack Query's default is 0; nothing to configure.
   },
 })
 
@@ -35,4 +35,16 @@ export const QUERY_KEYS = {
   episodeProfiles: ['podcasts', 'episode-profiles'] as const,
   speakerProfiles: ['podcasts', 'speaker-profiles'] as const,
   languages: ['languages'] as const,
+  courses: ['courses'] as const,
+  course: (id: string) => ['courses', id] as const,
+  courseSources: (id: string) => ['courses', id, 'sources', 'eligible'] as const,
+  courseAnchors: (id: string) => ['courses', id, 'evidence', 'anchors'] as const,
+  courseModels: ['courses', 'model-options'] as const,
+  courseOutline: (id: string) => ['courses', id, 'outline'] as const,
+  courseChapter: (id: string, chapterKey: string) => ['courses', id, 'chapters', chapterKey] as const,
+  courseFindings: (id: string, chapterKey?: string) => ['courses', id, 'findings', chapterKey] as const,
+  courseProgress: (id: string) => ['courses', id, 'progress'] as const,
+  courseNotes: (id: string) => ['courses', id, 'notes'] as const,
+  courseLabs: (id: string, chapterKey: string) => ['courses', id, 'chapters', chapterKey, 'labs'] as const,
+  courseAttempts: (id: string, chapterKey: string) => ['courses', id, 'chapters', chapterKey, 'attempts'] as const,
 }

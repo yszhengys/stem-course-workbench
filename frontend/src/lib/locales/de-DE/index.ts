@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseDeDE } from '../course';
 
 // German locale.
 // Translate values only; do not change keys, placeholders or structure.
@@ -220,6 +221,7 @@ export const deDE = {
     manage: "Verwalten",
     sources: "Quellen",
     notebooks: "Notebooks",
+    courses: "Kurse",
     askAndSearch: "Fragen und Suchen",
     podcasts: "Podcasts",
     models: "Modelle",
@@ -280,6 +282,7 @@ export const deDE = {
     lastViewed: "Angesehen {{time}}",
   },
   sources: {
+    newSource: "Neue Quelle",
     bulkContext: "Kontext",
     includeAllInContext: "Alle in den Kontext aufnehmen",
     includeAllInsights: "Alle aufnehmen (nur Erkenntnisse)",
@@ -970,6 +973,7 @@ export const deDE = {
     decryptionError: "Entschlüsselungsfehler",
     decryptionErrorDescription: "Der API-Schlüssel dieser Zugangsdaten konnte nicht entschlüsselt werden. Möglicherweise hat sich der Verschlüsselungsschlüssel geändert. Lösche diese Zugangsdaten und erstelle sie mit dem richtigen Schlüssel neu.",
   },
+  course: courseDeDE,
   setupBanner: {
     encryptionRequired: "Verschlüsselungsschlüssel nicht konfiguriert",
     encryptionRequiredDescription: "Setze die Umgebungsvariable OPEN_NOTEBOOK_ENCRYPTION_KEY, um Zugangsdaten sicher zu speichern.",

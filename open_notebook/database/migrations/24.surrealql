@@ -1,0 +1,130 @@
+-- Migration 24: Course module core schema (stem-course-workbench, PDR-003)
+-- The course domain is isolated from upstream tables: the only upstream touch
+-- is evidence.source pointing at the shared `source` table so evidence
+-- ingestion can reuse the existing content pipeline (citations, hashing).
+
+DEFINE TABLE IF NOT EXISTS course SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS title ON TABLE course TYPE string;
+DEFINE FIELD IF NOT EXISTS subject ON TABLE course TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS description ON TABLE course TYPE option<string>;
+-- draft | outline_approved | generating | reviewing | published | failed
+DEFINE FIELD IF NOT EXISTS status ON TABLE course TYPE string DEFAULT 'draft';
+-- Approved outline object: chapter list + concept dependency graph. Frozen at
+-- approval time (the exact-match 确认大纲 gate); never edited afterwards.
+DEFINE FIELD IF NOT EXISTS outline ON TABLE course FLEXIBLE TYPE option<object>;
+-- Generation config (model routing, locale, validation strictness).
+DEFINE FIELD IF NOT EXISTS config ON TABLE course FLEXIBLE TYPE option<object>;
+
+DEFINE FIELD IF NOT EXISTS created ON course DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS course_version SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_version TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS version_no ON TABLE course_version TYPE int;
+-- draft | generating | published | failed
+DEFINE FIELD IF NOT EXISTS status ON TABLE course_version TYPE string DEFAULT 'draft';
+-- Hash of the approved outline this version was generated from; citation
+-- integrity checks compare against it.
+DEFINE FIELD IF NOT EXISTS outline_hash ON TABLE course_version TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS published_at ON TABLE course_version TYPE option<datetime>;
+
+DEFINE FIELD IF NOT EXISTS created ON course_version DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course_version DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS chapter SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE chapter TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS chapter_no ON TABLE chapter TYPE int;
+DEFINE FIELD IF NOT EXISTS title ON TABLE chapter TYPE string;
+DEFINE FIELD IF NOT EXISTS content ON TABLE chapter TYPE option<string>;
+-- pending | passed | escalated | failed
+DEFINE FIELD IF NOT EXISTS review_status ON TABLE chapter TYPE string DEFAULT 'pending';
+-- pending | passed | failed (deterministic math/unit checks)
+DEFINE FIELD IF NOT EXISTS validation_status ON TABLE chapter TYPE string DEFAULT 'pending';
+-- Citation anchors into evidence (page/paragraph references).
+DEFINE FIELD IF NOT EXISTS citations ON TABLE chapter FLEXIBLE TYPE option<array<object>>;
+
+DEFINE FIELD IF NOT EXISTS created ON chapter DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON chapter DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS evidence SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS course ON TABLE evidence TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS source ON TABLE evidence TYPE option<record<source>>;
+DEFINE FIELD IF NOT EXISTS title ON TABLE evidence TYPE option<string>;
+-- pdf | pptx | other
+DEFINE FIELD IF NOT EXISTS kind ON TABLE evidence TYPE string DEFAULT 'pdf';
+DEFINE FIELD IF NOT EXISTS file_hash ON TABLE evidence TYPE option<string>;
+-- Extraction anchors (page/paragraph mapping produced by Docling).
+DEFINE FIELD IF NOT EXISTS anchors ON TABLE evidence FLEXIBLE TYPE option<object>;
+-- pending | processing | ready | failed
+DEFINE FIELD IF NOT EXISTS status ON TABLE evidence TYPE string DEFAULT 'pending';
+
+DEFINE FIELD IF NOT EXISTS created ON evidence DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON evidence DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS lab SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE lab TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE lab TYPE option<record<chapter>>;
+-- canvas_plot | geometry | algebra_check | data_fit | mechanics_sim
+DEFINE FIELD IF NOT EXISTS lab_type ON TABLE lab TYPE string;
+DEFINE FIELD IF NOT EXISTS prompt ON TABLE lab TYPE option<string>;
+-- Bounded JSON rendered by vetted Canvas/SVG components; shape depends on
+-- lab_type. Never executed — only rendered (PDR-003).
+DEFINE FIELD IF NOT EXISTS payload ON TABLE lab FLEXIBLE TYPE object;
+-- Expected answer / check specification used by the deterministic checker.
+DEFINE FIELD IF NOT EXISTS answer ON TABLE lab FLEXIBLE TYPE option<object>;
+
+DEFINE FIELD IF NOT EXISTS created ON lab DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON lab DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS attempt SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS lab ON TABLE attempt TYPE record<lab>;
+DEFINE FIELD IF NOT EXISTS answers ON TABLE attempt FLEXIBLE TYPE object;
+-- submitted | checked | passed | failed
+DEFINE FIELD IF NOT EXISTS status ON TABLE attempt TYPE string DEFAULT 'submitted';
+DEFINE FIELD IF NOT EXISTS result ON TABLE attempt FLEXIBLE TYPE option<object>;
+
+DEFINE FIELD IF NOT EXISTS created ON attempt DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON attempt DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS progress SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS course ON TABLE progress TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE progress TYPE option<record<chapter>>;
+-- not_started | in_progress | completed
+DEFINE FIELD IF NOT EXISTS status ON TABLE progress TYPE string DEFAULT 'not_started';
+
+DEFINE FIELD IF NOT EXISTS created ON progress DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON progress DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS course_note SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_note TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE course_note TYPE option<record<chapter>>;
+DEFINE FIELD IF NOT EXISTS content ON TABLE course_note TYPE string;
+
+DEFINE FIELD IF NOT EXISTS created ON course_note DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course_note DEFAULT time::now() VALUE time::now();
+
+-- Cascade cleanup on delete (mirrors upstream source_delete event).
+
+DEFINE EVENT IF NOT EXISTS course_delete ON TABLE course WHEN ($after == NONE) THEN {
+    delete course_version where course == $before.id;
+    delete evidence where course == $before.id;
+    delete progress where course == $before.id;
+    delete course_note where course == $before.id;
+};
+
+DEFINE EVENT IF NOT EXISTS course_version_delete ON TABLE course_version WHEN ($after == NONE) THEN {
+    delete chapter where course_version == $before.id;
+    delete lab where course_version == $before.id;
+};
+
+DEFINE INDEX IF NOT EXISTS chapter_version_idx ON TABLE chapter FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS lab_version_idx ON TABLE lab FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS evidence_course_idx ON TABLE evidence FIELDS course;

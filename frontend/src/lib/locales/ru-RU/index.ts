@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseRuRU } from '../course';
 
 export const ruRU = {
   common: {
@@ -217,6 +218,7 @@ export const ruRU = {
     manage: "Управление",
     sources: "Источники",
     notebooks: "Блокноты",
+    courses: "Курсы",
     askAndSearch: "Запрос и поиск",
     podcasts: "Подкасты",
     models: "Модели",
@@ -277,6 +279,7 @@ export const ruRU = {
     lastViewed: "Просмотрено {{time}}",
   },
   sources: {
+    newSource: "Новый источник",
     bulkContext: "Контекст",
     includeAllInContext: "Включить все в контекст",
     includeAllInsights: "Включить все (только выводы)",
@@ -967,6 +970,7 @@ export const ruRU = {
     decryptionError: "Ошибка расшифровки",
     decryptionErrorDescription: "API-ключ этих учётных данных не удалось расшифровать. Возможно, ключ шифрования был изменён. Удалите эти учётные данные и создайте заново с правильным ключом.",
   },
+  course: courseRuRU,
   setupBanner: {
     encryptionRequired: "Ключ шифрования не настроен",
     encryptionRequiredDescription: "Установите переменную окружения OPEN_NOTEBOOK_ENCRYPTION_KEY для безопасного хранения учётных данных.",

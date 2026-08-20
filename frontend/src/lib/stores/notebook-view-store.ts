@@ -1,5 +1,4 @@
 import { create } from 'zustand'
-import { persist } from 'zustand/middleware'
 
 export type NotebookViewMode = 'tile' | 'list'
 
@@ -8,14 +7,8 @@ interface NotebookViewState {
   setViewMode: (mode: NotebookViewMode) => void
 }
 
-export const useNotebookViewStore = create<NotebookViewState>()(
-  persist(
-    (set) => ({
-      viewMode: 'tile',
-      setViewMode: (mode) => set({ viewMode: mode }),
-    }),
-    {
-      name: 'notebook-view-storage',
-    }
-  )
-)
+// Persistence moved to the on-prefs cookie (see lib/stores/prefs-sync.ts).
+export const useNotebookViewStore = create<NotebookViewState>()((set) => ({
+  viewMode: 'tile',
+  setViewMode: (mode) => set({ viewMode: mode }),
+}))

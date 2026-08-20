@@ -8,6 +8,12 @@ from open_notebook.utils.proxy import ensure_internal_no_proxy
 
 ensure_internal_no_proxy()
 
+from .course_commands import (
+    course_build_evidence_command,
+    course_generate_chapter_command,
+    course_generate_outline_command,
+    course_review_chapter_command,
+)
 from .embedding_commands import (
     embed_insight_command,
     embed_note_command,
@@ -18,6 +24,11 @@ from .podcast_commands import generate_podcast_command
 from .source_commands import process_source_command
 
 __all__ = [
+    # Course commands
+    "course_build_evidence_command",
+    "course_generate_chapter_command",
+    "course_generate_outline_command",
+    "course_review_chapter_command",
     # Embedding commands
     "embed_note_command",
     "embed_insight_command",

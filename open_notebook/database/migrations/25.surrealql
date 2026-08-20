@@ -1,0 +1,114 @@
+-- Migration 25: additive Course workflow hardening.
+-- Migration 24 is already deployed.  This migration deliberately extends its
+-- record-based aggregate and never recreates or removes any migration-24 table.
+
+DEFINE FIELD IF NOT EXISTS notebook ON TABLE course TYPE record<notebook>;
+DEFINE FIELD IF NOT EXISTS language ON TABLE course TYPE string DEFAULT 'zh-CN';
+DEFINE FIELD IF NOT EXISTS source_ids ON TABLE course TYPE array<record<source>> DEFAULT []
+    ASSERT array::len($value) = array::len($this.primary_source_ids) + array::len($this.supplement_source_ids)
+        AND array::len(array::intersect($value, $this.primary_source_ids)) = array::len($this.primary_source_ids)
+        AND array::len(array::intersect($value, $this.supplement_source_ids)) = array::len($this.supplement_source_ids);
+DEFINE FIELD IF NOT EXISTS primary_source_ids ON TABLE course TYPE array<record<source>> DEFAULT []
+    ASSERT array::len(array::intersect($value, $this.supplement_source_ids)) = 0;
+DEFINE FIELD IF NOT EXISTS supplement_source_ids ON TABLE course TYPE array<record<source>> DEFAULT []
+    ASSERT array::len(array::intersect($value, $this.primary_source_ids)) = 0;
+DEFINE FIELD IF NOT EXISTS outline_version_id ON TABLE course TYPE option<record<course_version>>;
+DEFINE FIELD IF NOT EXISTS error_message ON TABLE course TYPE option<string>;
+
+DEFINE FIELD IF NOT EXISTS outline_artifact ON TABLE course_version FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS input_hash ON TABLE course_version TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS approved_at ON TABLE course_version TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS confirmation ON TABLE course_version TYPE option<string>;
+
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE chapter TYPE string;
+DEFINE FIELD IF NOT EXISTS version_no ON TABLE chapter TYPE int DEFAULT 1;
+DEFINE FIELD IF NOT EXISTS artifact ON TABLE chapter FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS input_hash ON TABLE chapter TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE chapter TYPE string DEFAULT 'draft';
+DEFINE FIELD IF NOT EXISTS published_at ON TABLE chapter TYPE option<datetime>;
+
+DEFINE FIELD IF NOT EXISTS source_role ON TABLE evidence TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS source_hash ON TABLE evidence TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS preview_path ON TABLE evidence TYPE option<string>;
+
+DEFINE TABLE IF NOT EXISTS course_evidence_anchor SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_evidence_anchor TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS source ON TABLE course_evidence_anchor TYPE record<source>;
+DEFINE FIELD IF NOT EXISTS evidence ON TABLE course_evidence_anchor TYPE option<record<evidence>>;
+DEFINE FIELD IF NOT EXISTS anchor_id ON TABLE course_evidence_anchor TYPE string;
+DEFINE FIELD IF NOT EXISTS locator ON TABLE course_evidence_anchor FLEXIBLE TYPE object;
+DEFINE FIELD IF NOT EXISTS quote_sha256 ON TABLE course_evidence_anchor TYPE string;
+DEFINE FIELD IF NOT EXISTS source_role ON TABLE course_evidence_anchor TYPE string DEFAULT 'PRIMARY';
+DEFINE FIELD IF NOT EXISTS preview_path ON TABLE course_evidence_anchor TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS is_current ON TABLE course_evidence_anchor TYPE bool DEFAULT true;
+DEFINE FIELD IF NOT EXISTS created ON course_evidence_anchor DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course_evidence_anchor DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS course_generation_run SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_generation_run TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_generation_run TYPE option<record<course_version>>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE course_generation_run TYPE option<record<chapter>>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_generation_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS stage ON TABLE course_generation_run TYPE string;
+DEFINE FIELD IF NOT EXISTS adapter ON TABLE course_generation_run TYPE string;
+DEFINE FIELD IF NOT EXISTS model ON TABLE course_generation_run TYPE string;
+DEFINE FIELD IF NOT EXISTS reasoning_effort ON TABLE course_generation_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE course_generation_run TYPE string DEFAULT 'queued';
+DEFINE FIELD IF NOT EXISTS prompt_version ON TABLE course_generation_run TYPE string;
+DEFINE FIELD IF NOT EXISTS input_hash ON TABLE course_generation_run TYPE string;
+DEFINE FIELD IF NOT EXISTS output_hash ON TABLE course_generation_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS command ON TABLE course_generation_run TYPE option<record>;
+DEFINE FIELD IF NOT EXISTS error_message ON TABLE course_generation_run TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created ON course_generation_run DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course_generation_run DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS course_validation_finding SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_validation_finding TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_validation_finding TYPE option<record<course_version>>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE course_validation_finding TYPE option<record<chapter>>;
+DEFINE FIELD IF NOT EXISTS generation_run ON TABLE course_validation_finding TYPE option<record<course_generation_run>>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_validation_finding TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS finding ON TABLE course_validation_finding FLEXIBLE TYPE object;
+DEFINE FIELD IF NOT EXISTS severity ON TABLE course_validation_finding TYPE string;
+DEFINE FIELD IF NOT EXISTS status ON TABLE course_validation_finding TYPE string DEFAULT 'open';
+DEFINE FIELD IF NOT EXISTS resolution_reason ON TABLE course_validation_finding TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created ON course_validation_finding DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course_validation_finding DEFAULT time::now() VALUE time::now();
+
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE progress TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS block_key ON TABLE progress TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS orphan_status ON TABLE progress TYPE string DEFAULT 'active';
+
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_note TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS block_key ON TABLE course_note TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS orphan_status ON TABLE course_note TYPE string DEFAULT 'active';
+
+-- The migration-24 Attempt row is intentionally preserved.  All new exercise
+-- fields are optional so an existing lab-backed attempt remains valid.
+DEFINE FIELD IF NOT EXISTS course ON TABLE attempt TYPE option<record<course>>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE attempt TYPE option<record<course_version>>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE attempt TYPE option<record<chapter>>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE attempt TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS exercise_key ON TABLE attempt TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS answer ON TABLE attempt TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS hints_used ON TABLE attempt TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS answer_revealed ON TABLE attempt TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS transfer_completed ON TABLE attempt TYPE option<bool>;
+DEFINE FIELD IF NOT EXISTS orphan_status ON TABLE attempt TYPE option<string>;
+
+DEFINE INDEX IF NOT EXISTS course_version_identity_unique ON TABLE course_version FIELDS course, version_no UNIQUE;
+DEFINE INDEX IF NOT EXISTS chapter_version_identity_unique ON TABLE chapter FIELDS course_version, chapter_key, version_no UNIQUE;
+DEFINE INDEX IF NOT EXISTS evidence_source_identity_unique ON TABLE evidence FIELDS course, source UNIQUE;
+DEFINE INDEX IF NOT EXISTS course_anchor_identity_unique ON TABLE course_evidence_anchor FIELDS course, anchor_id UNIQUE;
+DEFINE INDEX IF NOT EXISTS progress_stable_identity_unique ON TABLE progress FIELDS course, chapter_key UNIQUE;
+
+-- Extend migration 24's Course cascade without replacing the aggregate.
+DEFINE EVENT OVERWRITE course_delete ON TABLE course WHEN ($after == NONE) THEN {
+    delete course_version where course == $before.id;
+    delete evidence where course == $before.id;
+    delete progress where course == $before.id;
+    delete course_note where course == $before.id;
+    delete course_evidence_anchor where course == $before.id;
+    delete course_generation_run where course == $before.id;
+    delete course_validation_finding where course == $before.id;
+};

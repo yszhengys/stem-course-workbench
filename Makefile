@@ -1,4 +1,4 @@
-.PHONY: run frontend check ruff database lint api start-all stop-all status clean-cache worker worker-start worker-stop worker-restart
+.PHONY: run frontend check ruff database lint api start-all stop-all status clean-cache worker worker-start
 .PHONY: docker-buildx-prepare docker-buildx-clean docker-buildx-reset
 .PHONY: docker-push docker-push-latest docker-release docker-build-local tag export-docs
 .PHONY: release-test release-stack release-stack-down
@@ -6,15 +6,15 @@
 # Get version from pyproject.toml
 VERSION := $(shell grep -m1 version pyproject.toml | cut -d'"' -f2)
 
-# Image names for both registries
-DOCKERHUB_IMAGE := lfnovo/open_notebook
-GHCR_IMAGE := ghcr.io/lfnovo/open-notebook
+# Image names for both registries (fork namespace — do not push to upstream lfnovo images)
+DOCKERHUB_IMAGE := yszhengys/stem-course-workbench
+GHCR_IMAGE := ghcr.io/yszhengys/stem-course-workbench
 
 # Build platforms
 PLATFORMS := linux/amd64,linux/arm64
 
 database:
-	docker compose up -d surrealdb
+	docker compose -f "$(CURDIR)/docker-compose.yml" --project-directory "$(CURDIR)" up -d surrealdb
 
 run:
 	@echo "⚠️  Warning: Starting frontend only. For full functionality, use 'make start-all'"
@@ -73,7 +73,7 @@ docker-build-local:
 		-t $(DOCKERHUB_IMAGE):local \
 		.
 	@echo "✅ Built $(DOCKERHUB_IMAGE):$(VERSION) and $(DOCKERHUB_IMAGE):local"
-	@echo "Run with: docker run -p 5055:5055 -p 3000:3000 $(DOCKERHUB_IMAGE):local"
+	@echo "Run with: docker run -p 5055:5055 -p 8502:8502 $(DOCKERHUB_IMAGE):local"
 
 # Build and push version tags ONLY (no latest) for both regular and single images
 docker-push: docker-buildx-prepare
@@ -154,62 +154,25 @@ full:
 
 
 api:
-	uv run --env-file .env run_api.py
+	API_RELOAD=false ./.tools/bin/uv run --env-file .env python run_api.py
 
-.PHONY: worker worker-start worker-stop worker-restart
+.PHONY: worker worker-start
 
 worker: worker-start
 
 worker-start:
 	@echo "Starting surreal-commands worker..."
-	uv run --env-file .env surreal-commands-worker --import-modules commands --max-tasks "$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}"
-
-worker-stop:
-	@echo "Stopping surreal-commands worker..."
-	pkill -f "surreal-commands-worker" || true
-
-worker-restart: worker-stop
-	@sleep 2
-	@$(MAKE) worker-start
+	./.tools/bin/uv run --env-file .env surreal-commands-worker --import-modules commands --max-tasks "$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}"
 
 # === Service Management ===
 start-all:
-	@echo "🚀 Starting Open Notebook (Database + API + Worker + Frontend)..."
-	@echo "📊 Starting SurrealDB..."
-	@docker compose -f docker-compose.dev.yml up -d surrealdb
-	@sleep 3
-	@echo "🔧 Starting API backend..."
-	@uv run run_api.py &
-	@sleep 3
-	@echo "⚙️ Starting background worker..."
-	@uv run --env-file .env surreal-commands-worker --import-modules commands --max-tasks "$${OPEN_NOTEBOOK_WORKER_MAX_TASKS:-5}" &
-	@sleep 2
-	@echo "🌐 Starting Next.js frontend..."
-	@echo "✅ All services started!"
-	@echo "📱 Frontend: http://localhost:3000"
-	@echo "🔗 API: http://localhost:5055"
-	@echo "📚 API Docs: http://localhost:5055/docs"
-	cd frontend && npm run dev
+	./scripts/course-workbench.sh start
 
 stop-all:
-	@echo "🛑 Stopping all Open Notebook services..."
-	@pkill -f "next dev" || true
-	@pkill -f "surreal-commands-worker" || true
-	@pkill -f "run_api.py" || true
-	@pkill -f "uvicorn api.main:app" || true
-	@docker compose down
-	@echo "✅ All services stopped!"
+	./scripts/course-workbench.sh stop
 
 status:
-	@echo "📊 Open Notebook Service Status:"
-	@echo "Database (SurrealDB):"
-	@docker compose ps surrealdb 2>/dev/null || echo "  ❌ Not running"
-	@echo "API Backend:"
-	@pgrep -f "run_api.py\|uvicorn api.main:app" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
-	@echo "Background Worker:"
-	@pgrep -f "surreal-commands-worker" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
-	@echo "Next.js Frontend:"
-	@pgrep -f "next dev" >/dev/null && echo "  ✅ Running" || echo "  ❌ Not running"
+	./scripts/course-workbench.sh status
 
 # === Documentation Export ===
 export-docs:

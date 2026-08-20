@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { courseJaJP } from '../course';
 
 export const jaJP = {
   common: {
@@ -217,6 +218,7 @@ export const jaJP = {
     manage: "管理",
     sources: "ソース",
     notebooks: "ノートブック",
+    courses: "コース",
     askAndSearch: "質問と検索",
     podcasts: "ポッドキャスト",
     models: "モデル",
@@ -277,6 +279,7 @@ export const jaJP = {
     lastViewed: "{{time}}に表示",
   },
   sources: {
+    newSource: "新規ソース",
     bulkContext: "コンテキスト",
     includeAllInContext: "すべてをコンテキストに含める",
     includeAllInsights: "すべて含める（インサイトのみ）",
@@ -967,6 +970,7 @@ export const jaJP = {
     decryptionError: "復号エラー",
     decryptionErrorDescription: "この認証情報のAPIキーを復号できませんでした。暗号化キーが変更された可能性があります。この認証情報を削除し、正しいキーで再作成してください。",
   },
+  course: courseJaJP,
   setupBanner: {
     encryptionRequired: "暗号化キーが設定されていません",
     encryptionRequiredDescription: "OPEN_NOTEBOOK_ENCRYPTION_KEY 環境変数を設定して、安全な認証情報の保存を有効にしてください。",

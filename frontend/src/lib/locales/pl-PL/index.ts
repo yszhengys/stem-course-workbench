@@ -1,4 +1,5 @@
 import type { TranslationShape } from '../en-US';
+import { coursePlPL } from '../course';
 
 export const plPL = {
   common: {
@@ -217,6 +218,7 @@ export const plPL = {
     manage: "Zarządzaj",
     sources: "Źródła",
     notebooks: "Notatniki",
+    courses: "Kursy",
     askAndSearch: "Pytaj i szukaj",
     podcasts: "Podcasty",
     models: "Modele",
@@ -277,6 +279,7 @@ export const plPL = {
     lastViewed: "Wyświetlono {{time}}",
   },
   sources: {
+    newSource: "Nowe źródło",
     bulkContext: "Kontekst",
     includeAllInContext: "Uwzględnij wszystkie w kontekście",
     includeAllInsights: "Uwzględnij wszystkie (tylko wnioski)",
@@ -967,6 +970,7 @@ export const plPL = {
     decryptionError: "Błąd odszyfrowywania",
     decryptionErrorDescription: "Nie udało się odszyfrować klucza API tego poświadczenia. Klucz szyfrowania mógł ulec zmianie. Usuń to poświadczenie i utwórz je ponownie z prawidłowym kluczem.",
   },
+  course: coursePlPL,
   setupBanner: {
     encryptionRequired: "Klucz szyfrowania nie został skonfigurowany",
     encryptionRequiredDescription: "Ustaw zmienną środowiskową OPEN_NOTEBOOK_ENCRYPTION_KEY, aby umożliwić bezpieczne przechowywanie poświadczeń.",

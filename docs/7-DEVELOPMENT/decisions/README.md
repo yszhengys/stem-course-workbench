@@ -51,3 +51,4 @@ What this makes easier, what it makes harder, what to watch. (bullets)
 | [ADR-007](ADR-007-optin-runtimes.md) | Heavy extraction runtimes (Docling, Crawl4AI local) are opt-in, installed at startup | Accepted |
 | [PDR-001](PDR-001-single-user-first.md) | Single-user first; don't preclude multi-user | Accepted |
 | [PDR-002](PDR-002-provider-agnostic-core.md) | Provider-agnostic core by default | Accepted |
+| [PDR-003](PDR-003-course-module.md) | The Course module is an isolated, version-immutable, V1-bounded surface | Accepted |

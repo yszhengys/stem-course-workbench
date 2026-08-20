@@ -64,6 +64,134 @@ describe('Locale Parity', () => {
       expect(extra, `Extra keys in ${code}: ${extra.join(', ')}`).toEqual([])
     },
   )
+
+  it.each(locales.map(([code, resource]) => [code, resource] as const))(
+    '%s should expose an independent, visibly localized Course workflow',
+    (code, resource) => {
+      const course = resource.translation.course
+      expect(course).not.toBe(enUS.course)
+      for (const key of [
+        'listTitle',
+        'newTitle',
+        'sourceAndEvidence',
+        'generateOutline',
+        'chapterGeneration',
+        'reviewAndPublish',
+        'notes',
+        'learningRecord',
+      ] as const) {
+        expect(course[key], `${code} did not localize course.${key}`).not.toBe(enUS.course[key])
+      }
+    },
+  )
+})
+
+describe('Course localization integrity', () => {
+  const nonEnglishCourses = Object.entries(resources)
+    .filter(([code]) => code !== 'en-US')
+    .map(([code, resource]) => [code, resource.translation.course] as const)
+  const languageNeutralKeys = new Set(['subjectUnknown'])
+
+  it.each(nonEnglishCourses)(
+    '%s should not copy English Course messages',
+    (code, course) => {
+      const copied = Object.entries(course)
+        .filter(([key, value]) => {
+          const englishValue = enUS.course[key as keyof typeof enUS.course]
+          return value === englishValue && !languageNeutralKeys.has(key)
+        })
+        .map(([key]) => key)
+
+      expect(
+        copied,
+        `${code} copied English Course messages: ${copied.join(', ')}`,
+      ).toEqual([])
+    },
+  )
+
+  it('zh-TW Course messages should not contain common simplified-only characters', () => {
+    const simplifiedOnly =
+      /[课证据纲发学习进记录确认显页关联状误选择载获创删块项题练验结节图标签开闭复审达线级败为过仅这应术单击变换从将与后数围体无还让现务时动场见]/
+    const offenders = Object.entries(resources['zh-TW'].translation.course)
+      .filter(([, value]) => simplifiedOnly.test(value))
+      .map(([key, value]) => `${key}: ${value}`)
+
+    expect(
+      offenders,
+      `zh-TW contains simplified Chinese:\n${offenders.join('\n')}`,
+    ).toEqual([])
+  })
+
+  it('every locale should expose the complete Course status and finding vocabulary', () => {
+    const requiredKeys = [
+      'sectionLoadFailed',
+      'validationLoading',
+      'sourceNotEligibleTitle',
+      'sourceNotEligible',
+      'statusNew',
+      'statusQueued',
+      'statusRunning',
+      'statusCompleted',
+      'statusSucceeded',
+      'statusFailed',
+      'statusCancelled',
+      'statusDraft',
+      'statusIndexing',
+      'statusOutlineReady',
+      'statusOutlineApproved',
+      'statusGenerating',
+      'statusReviewing',
+      'statusBlocked',
+      'statusReady',
+      'statusPublished',
+      'statusPending',
+      'statusProcessing',
+      'statusNotStarted',
+      'statusInProgress',
+      'statusSubmitted',
+      'statusChecked',
+      'statusPassed',
+      'statusAttached',
+      'statusOrphaned',
+      'statusUnknown',
+      'findingCitation',
+      'findingFormula',
+      'findingUnit',
+      'findingNumeric',
+      'findingPhysics',
+      'findingLab',
+      'findingReview',
+      'severityInfo',
+      'severityWarning',
+      'severityHigh',
+      'severityError',
+      'findingStatusOpen',
+      'findingStatusUncertain',
+      'findingStatusResolved',
+      'findingStatusManualCheck',
+      'findingStatusAcknowledged',
+      'locatorPdfPage',
+      'locatorPptxSlide',
+      'provenanceVerbatim',
+      'provenanceAdapted',
+      'provenanceDerived',
+      'provenancePedagogical',
+      'provenanceSupplement',
+      'effortLow',
+      'effortMedium',
+      'effortHigh',
+      'effortXhigh',
+      'effortMax',
+      'difficultyCore',
+      'difficultyChallenge',
+    ]
+
+    for (const [code, resource] of Object.entries(resources)) {
+      const course = resource.translation.course as Record<string, string>
+      const missing = requiredKeys.filter(key => !course[key]?.trim())
+      expect(missing, `${code} is missing: ${missing.join(', ')}`).toEqual([])
+    }
+  })
 })
 
 describe('Placeholder Parity', () => {

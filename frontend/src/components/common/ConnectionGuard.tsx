@@ -1,15 +1,22 @@
 'use client'
 
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { usePathname } from 'next/navigation'
 import { ConnectionError } from '@/lib/types/config'
 import { ConnectionErrorOverlay } from '@/components/errors/ConnectionErrorOverlay'
 import { getConfig, resetConfig } from '@/lib/config'
+import { LoadingSpinner } from '@/components/common/LoadingSpinner'
+import { useTranslation } from '@/lib/hooks/use-translation'
 
 interface ConnectionGuardProps {
   children: React.ReactNode
+  initialPathname?: string
 }
 
-export function ConnectionGuard({ children }: ConnectionGuardProps) {
+export function ConnectionGuard({ children, initialPathname }: ConnectionGuardProps) {
+  const { t } = useTranslation()
+  const pathname = usePathname()
+  const activePathname = pathname ?? initialPathname
   const [error, setError] = useState<ConnectionError | null>(null)
   const [isChecking, setIsChecking] = useState(true)
   // Use a ref to track checking status to avoid dependency cycles
@@ -98,9 +105,19 @@ export function ConnectionGuard({ children }: ConnectionGuardProps) {
     return <ConnectionErrorOverlay error={error} onRetry={checkConnection} />
   }
 
-  // Show nothing while checking (prevents flash of content)
+  // Keep first paint visible even when runtime configuration is slow.
   if (isChecking) {
-    return null
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        data-course-workbench-ready={activePathname === '/courses/new' ? 'new-course' : 'connection-checking'}
+        className="flex min-h-screen items-center justify-center gap-3 bg-background text-muted-foreground"
+      >
+        <LoadingSpinner />
+        <span>{t('common.loading')}</span>
+      </div>
+    )
   }
 
   // Render children if connection is good

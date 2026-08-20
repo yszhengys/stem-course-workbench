@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useDebounce } from 'use-debounce'
 import { Search, Link2, LoaderIcon, FileText, Link as LinkIcon, Upload } from 'lucide-react'
 import {
@@ -26,7 +27,8 @@ interface AddExistingSourceDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   notebookId: string
-  onSuccess?: () => void
+  onSuccess?: (sourceIds: string[]) => void
+  allowedFileExtensions?: readonly string[]
 }
 
 export function AddExistingSourceDialog({
@@ -34,14 +36,53 @@ export function AddExistingSourceDialog({
   onOpenChange,
   notebookId,
   onSuccess,
+  allowedFileExtensions,
 }: AddExistingSourceDialogProps) {
   const { t } = useTranslation()
   const [searchQuery, setSearchQuery] = useState('')
   const [debouncedSearchQuery] = useDebounce(searchQuery, 300)
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([])
-  const [allSources, setAllSources] = useState<SourceListResponse[]>([])
   const [filteredSources, setFilteredSources] = useState<SourceListResponse[]>([])
   const [isSearching, setIsSearching] = useState(false)
+
+  // All-sources list via React Query (replaces the manual loadAllSources):
+  // lives under the ['sources'] prefix so create/delete invalidations refresh
+  // it, and refetches each time the dialog opens (staleTime 0).
+  const allSourcesQuery = useQuery({
+    queryKey: ['sources', 'all'],
+    queryFn: () =>
+      sourcesApi.list({
+        limit: 100,
+        offset: 0,
+        sort_by: 'created',
+        sort_order: 'desc',
+      }),
+    enabled: open,
+    staleTime: 0,
+    retry: false,
+  })
+  const allSources = useMemo(
+    () => allSourcesQuery.data ?? [],
+    [allSourcesQuery.data]
+  )
+  const normalizedExtensions = useMemo(
+    () => allowedFileExtensions?.map((extension) => extension.toLowerCase()) ?? [],
+    [allowedFileExtensions]
+  )
+  const isAllowedSource = useCallback((source: SourceListResponse) => {
+    if (normalizedExtensions.length === 0) return true
+    const filePath = source.asset?.file_path?.toLowerCase()
+    return Boolean(filePath && normalizedExtensions.some((extension) => filePath.endsWith(extension)))
+  }, [normalizedExtensions])
+  const allowedSources = useMemo(
+    () => allSources.filter(isAllowedSource),
+    [allSources, isAllowedSource]
+  )
+  const allSourcesById = useMemo(
+    () => new Map(allSources.map((source) => [source.id, source])),
+    [allSources]
+  )
+  const isLoadingAll = allSourcesQuery.isPending
 
   // Get sources already in this notebook
   const { data: currentNotebookSources } = useSources(notebookId)
@@ -52,30 +93,10 @@ export function AddExistingSourceDialog({
 
   const addSources = useAddSourcesToNotebook()
 
-  const loadAllSources = useCallback(async () => {
-    try {
-      setIsSearching(true)
-      // Use sources API directly to get all sources (max 100 per API limit)
-      const sources = await sourcesApi.list({
-        limit: 100,
-        offset: 0,
-        sort_by: 'created',
-        sort_order: 'desc',
-      })
-
-      setAllSources(sources)
-      setFilteredSources(sources)
-    } catch (error) {
-      console.error('Error loading sources:', error)
-    } finally {
-      setIsSearching(false)
-    }
-  }, [])
-
   const performSearch = useCallback(async () => {
     if (!debouncedSearchQuery.trim()) {
       // Empty query - show all sources
-      setFilteredSources(allSources)
+      setFilteredSources(allowedSources)
       setIsSearching(false)
       return
     }
@@ -93,45 +114,40 @@ export function AddExistingSourceDialog({
 
       // Since we set search_sources=true and search_notes=false,
       // the API only returns sources, no need to filter
-      const sources = response.results.map(r => ({
-        id: r.parent_id,
-        title: r.title || 'Untitled',
-        topics: [],
-        asset: null,
-        embedded: false,
-        embedded_chunks: 0,
-        insights_count: 0,
-        created: r.created,
-        updated: r.updated,
-      })) as SourceListResponse[]
+      const sources = response.results
+        .map((result): SourceListResponse => allSourcesById.get(result.parent_id) ?? ({
+          id: result.parent_id,
+          title: result.title || 'Untitled',
+          topics: [],
+          asset: null,
+          embedded: false,
+          embedded_chunks: 0,
+          insights_count: 0,
+          created: result.created,
+          updated: result.updated,
+        }))
+        .filter(isAllowedSource)
 
       setFilteredSources(sources)
     } catch (error) {
       console.error('Error searching sources:', error)
       // On error, fall back to showing all sources
-      setFilteredSources(allSources)
+      setFilteredSources(allowedSources)
     } finally {
       setIsSearching(false)
     }
-  }, [debouncedSearchQuery, allSources])
-
-  // Load all sources initially
-  useEffect(() => {
-    if (open) {
-      loadAllSources()
-    }
-  }, [open, loadAllSources])
+  }, [debouncedSearchQuery, allowedSources, allSourcesById, isAllowedSource])
 
   // Filter sources when search query changes
   useEffect(() => {
     if (!debouncedSearchQuery) {
-      setFilteredSources(allSources)
+      setFilteredSources(allowedSources)
       setIsSearching(false)
       return
     }
 
     performSearch()
-  }, [debouncedSearchQuery, allSources, performSearch])
+  }, [debouncedSearchQuery, allowedSources, performSearch])
 
   const handleToggleSource = (sourceId: string) => {
     setSelectedSourceIds(prev =>
@@ -145,16 +161,18 @@ export function AddExistingSourceDialog({
     if (selectedSourceIds.length === 0) return
 
     try {
-      await addSources.mutateAsync({
+      const linkedSourceIds = [...selectedSourceIds]
+      const result = await addSources.mutateAsync({
         notebookId,
-        sourceIds: selectedSourceIds,
+        sourceIds: linkedSourceIds,
       })
+      if (result.failures > 0) return
 
       // Reset state
       setSelectedSourceIds([])
       setSearchQuery('')
       onOpenChange(false)
-      onSuccess?.()
+      onSuccess?.(linkedSourceIds)
     } catch (error) {
       // Error handled by the hook's onError
       console.error('Error adding sources:', error)
@@ -203,14 +221,14 @@ export function AddExistingSourceDialog({
               onChange={(e) => setSearchQuery(e.target.value)}
               className="pl-10"
             />
-            {isSearching && (
+            {(isSearching || isLoadingAll) && (
               <LoaderIcon className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
             )}
           </div>
 
           {/* Source List */}
           <ScrollArea className="h-[400px] border rounded-md">
-            {isSearching && filteredSources.length === 0 ? (
+            {(isSearching || isLoadingAll) && filteredSources.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-[200px] text-muted-foreground">
                 <LoaderIcon className="h-12 w-12 mb-2 animate-spin" />
                 <p>{t('common.loading')}</p>
@@ -229,8 +247,8 @@ export function AddExistingSourceDialog({
                   return (
                     <div
                       key={source.id}
-                      className={`flex items-start gap-3 p-3 rounded-lg border transition-colors min-w-0 ${
-                        isSelected ? 'bg-accent border-accent-foreground/20' : 'hover:bg-accent/50'
+                      className={`flex items-start gap-3 p-3 rounded-md transition-colors min-w-0 ${
+                        isSelected ? 'bg-accent' : 'hover:bg-accent/50'
                       }`}
                     >
                       <Checkbox
@@ -265,10 +283,10 @@ export function AddExistingSourceDialog({
           </ScrollArea>
 
           {/* Truncation Warning */}
-          {allSources.length >= 100 && !debouncedSearchQuery && (
-            <div className="text-xs text-muted-foreground bg-muted/50 p-2 rounded-md">
+          {allowedSources.length >= 100 && !debouncedSearchQuery && (
+            <p className="text-xs text-muted-foreground">
               {t('sources.showingFirst100')}
-            </div>
+            </p>
           )}
 
           {/* Selection Summary */}

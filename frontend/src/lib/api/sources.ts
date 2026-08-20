@@ -89,11 +89,9 @@ export const sourcesApi = {
     formData.append('type', 'upload')
     formData.append('async_processing', 'true')
     
-    const response = await apiClient.post<SourceResponse>('/sources', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    })
+    // No explicit Content-Type: the apiClient interceptor strips it so the
+    // browser sets the multipart boundary itself.
+    const response = await apiClient.post<SourceResponse>('/sources', formData)
     return response.data
   },
 

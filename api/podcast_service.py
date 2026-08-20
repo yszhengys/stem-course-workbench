@@ -105,6 +105,11 @@ class PodcastService:
             )
             return job_id_str
 
+        except ValueError as e:
+            # User-input problems (unknown profile, missing content) are 400s,
+            # not server faults — mirrors _handle_value_error in credentials.py.
+            logger.warning(f"Invalid podcast generation request: {e}")
+            raise HTTPException(status_code=400, detail=str(e)[:200])
         except Exception as e:
             logger.error(f"Failed to submit podcast generation job: {e}")
             raise HTTPException(

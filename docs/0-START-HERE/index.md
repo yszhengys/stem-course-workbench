@@ -2,6 +2,10 @@
 
 **Open Notebook** is a privacy-focused AI research assistant. Upload documents, chat with AI, generate notes, and create podcasts—all with complete control over your data.
 
+## STEM Course Workbench
+
+本仓库还提供证据可追溯的数学/物理课程工作台。Apple Silicon Mac 用户可从[中文使用说明](course-workbench-user-guide.zh-CN.md)开始，一条命令启动并直接进入第一次创建课程。
+
 ## Choose Your Path
 
 ### 🚀 I want to use OpenAI (Fastest)

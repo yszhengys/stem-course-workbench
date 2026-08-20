@@ -8,8 +8,24 @@ import { AppConfig, BackendConfigResponse } from '@/lib/types/config'
 // Build timestamp for debugging - set at build time
 const BUILD_TIME = new Date().toISOString()
 
+export const CONFIG_FETCH_TIMEOUT_MS = 5000
+
 let config: AppConfig | null = null
 let configPromise: Promise<AppConfig> | null = null
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {}
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), CONFIG_FETCH_TIMEOUT_MS)
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
 
 /**
  * Get the API URL to use for requests.
@@ -70,7 +86,7 @@ async function fetchConfig(): Promise<AppConfig> {
   let runtimeApiUrl: string | null = null
   try {
     if (isDev) console.log('🔧 [Config] Attempting to fetch runtime config from /config endpoint...')
-    const runtimeResponse = await fetch('/config', {
+    const runtimeResponse = await fetchWithTimeout('/config', {
       cache: 'no-store',
     })
     if (runtimeResponse.ok) {
@@ -113,7 +129,7 @@ async function fetchConfig(): Promise<AppConfig> {
   try {
     if (isDev) console.log('🔧 [Config] Fetching backend config from:', `${baseUrl}/api/config`)
     // Try to fetch runtime config from backend API
-    const response = await fetch(`${baseUrl}/api/config`, {
+    const response = await fetchWithTimeout(`${baseUrl}/api/config`, {
       cache: 'no-store',
     })
 

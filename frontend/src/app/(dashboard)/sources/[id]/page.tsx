@@ -35,7 +35,9 @@ export default function SourceDetailPage() {
           className="mb-4"
         >
           <ArrowLeft className="mr-2 h-4 w-4" />
-          {navigation.getReturnLabel()}
+          {/* Until the per-tab sessionStorage value hydrates, render the same
+              fallback the server rendered (avoids a hydration mismatch). */}
+          {navigation.hasHydrated ? navigation.getReturnLabel() : 'Back to Sources'}
         </Button>
       </div>
 

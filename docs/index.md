@@ -2,6 +2,8 @@
 
 Welcome to Open Notebook - a privacy-focused AI research assistant. This documentation is organized for different needs.
 
+> 使用本仓库新增的数学/物理课程工作台？从 **[STEM Course Workbench 中文使用说明](0-START-HERE/course-workbench-user-guide.zh-CN.md)** 开始；开发者可查看[架构与维护说明](course-workbench.md)。上游 Open Notebook 文档继续保留在下方。
+
 ---
 
 ## 🎯 Choose Your Path
