@@ -115,6 +115,15 @@ Docling 在本机解析材料并建立证据锚点：
 
 `.env` 中 `OPEN_NOTEBOOK_COURSE_ALLOW_REAL_MODELS=1` 只允许你点击生成按钮后调用所选模型。启动、浏览课程或构建普通页面不会调用模型。请求一旦提交，后台不会悄悄换模型；登录、配额、离线或输出格式问题都会明确失败。
 
+如需在首次安装或模型更新后主动复核四个模型，可运行下面的显式冒烟测试。它会实际调用两个 Ollama 模型和 Codex Sol/Luna，各自只生成一个极小的结构化结果，因此应在确认本地内存与 Codex 配额可用后执行：
+
+```bash
+OPEN_NOTEBOOK_RUN_REAL_MODEL_SMOKE=1 ./.tools/bin/uv run --env-file .env \
+  pytest tests/course/test_real_model_adapters_smoke.py -v
+```
+
+普通测试默认跳过这四个真实调用，不会意外消耗模型资源。
+
 ## 安全交互实验
 
 V1 只支持五种声明式实验：
