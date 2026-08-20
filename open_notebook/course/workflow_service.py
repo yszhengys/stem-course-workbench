@@ -384,7 +384,8 @@ class CourseWorkflowService:
                     WHERE id = $version_id
                       AND course = $course_id
                       AND status = 'generating'
-                      AND updated = $expected_version_updated
+                      AND time::micros(updated) =
+                          time::micros($expected_version_updated)
                     RETURN VALUE id
                 );
                 IF array::len($mutable_version) != 1 {
@@ -1112,6 +1113,7 @@ class CourseWorkflowService:
                     chapter_key=chapter_key,
                     anchor_ids=anchor_ids,
                     evidence=context,
+                    approved_lab_keys=set(proposal.lab_keys),
                     model=model,
                     prompt_version=prompt_version,
                 )
@@ -1135,7 +1137,7 @@ class CourseWorkflowService:
                         default=0,
                     )
                     + 1,
-                    artifact=artifact.model_dump(mode="json"),
+                    artifact=artifact.model_dump(mode="json", by_alias=True),
                     input_hash=replay_hash,
                     citations=[{"anchor_id": item} for item in artifact.citations],
                 )

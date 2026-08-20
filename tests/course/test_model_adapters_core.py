@@ -23,6 +23,11 @@ class Output(BaseModel):
     answer: str
 
 
+class MapOutput(BaseModel):
+    values: dict[str, float]
+    objects: list[dict[str, object]]
+
+
 def _request(adapter: str = "codex_cli", model: str = "gpt-5.6-sol") -> GenerationRequest:
     return GenerationRequest(
         stage="outline",
@@ -139,12 +144,75 @@ async def test_codex_exact_safe_invocation_stdin_env_and_tempdir(monkeypatch):
     }
 
 
+def test_codex_output_schema_requires_every_declared_property() -> None:
+    from open_notebook.course.contracts import CourseOutlineArtifact
+
+    schema = CodexCliAdapter.output_schema(CourseOutlineArtifact)
+    pending: list[object] = [schema]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            assert "default" not in value
+            assert "maxProperties" not in value
+            assert "minProperties" not in value
+            assert "discriminator" not in value
+            assert "oneOf" not in value
+            properties = value.get("properties")
+            if isinstance(properties, dict):
+                assert value.get("required") == list(properties)
+                assert value.get("additionalProperties") is False
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+
+
+def test_codex_output_schema_round_trips_dynamic_json_maps() -> None:
+    schema = CodexCliAdapter.output_schema(MapOutput)
+    values = schema["properties"]["values"]
+    objects = schema["properties"]["objects"]["items"]
+
+    assert values["type"] == "array"
+    assert objects["type"] == "array"
+    assert values["items"]["required"] == ["key", "value_json"]
+    assert values["items"]["additionalProperties"] is False
+
+    encoded = {
+        "values": [
+            {"key": "x", "value_json": "2.5"},
+            {"key": "y", "value_json": "-1"},
+        ],
+        "objects": [
+            [
+                {"key": "kind", "value_json": '"point"'},
+                {"key": "coordinates", "value_json": "[1,2]"},
+            ]
+        ],
+    }
+
+    restored = CodexCliAdapter.restore_output_payload(encoded, MapOutput)
+    assert MapOutput.model_validate(restored) == MapOutput(
+        values={"x": 2.5, "y": -1.0},
+        objects=[{"kind": "point", "coordinates": [1, 2]}],
+    )
+
+    duplicate = {
+        **encoded,
+        "values": [
+            {"key": "x", "value_json": "1"},
+            {"key": "x", "value_json": "2"},
+        ],
+    }
+    with pytest.raises(AdapterError, match="duplicate dictionary key"):
+        CodexCliAdapter.restore_output_payload(duplicate, MapOutput)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stderr", "message"),
     [
         (b"login required token=secret", "authentication"),
         (b"quota exceeded key=secret", "quota"),
+        (b"invalid_json_schema key=secret", "output schema"),
         (b"internal detail key=secret", "exit code 2"),
     ],
 )

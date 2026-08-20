@@ -337,7 +337,10 @@ async def test_version_publish_uses_legal_generating_to_published_transition(
         assert "id NOT IN $known_succeeded_run_ids" in normalized
         assert "SELECT VALUE id FROM chapter" in normalized
         assert "status = 'published'" in normalized
-        assert "updated = $expected_version_updated" in normalized
+        assert (
+            "time::micros(updated) = time::micros($expected_version_updated)"
+            in normalized
+        )
         assert "UPDATE course SET" in normalized
         assert "UPDATE course_version SET" in normalized
         assert normalized.count("status = 'generating'") >= 2
@@ -680,7 +683,8 @@ async def test_publish_transaction_uses_embedded_surreal_rollback_and_commit(
     )
     await repository.repo_query(
         "CREATE course_version:one SET course = course:one, "
-        "status = 'generating', outline_hash = $outline_hash;",
+        "version_no = 1, status = 'generating', outline_hash = $outline_hash, "
+        "updated = d'2026-08-20T13:06:59.988639680Z';",
         {"outline_hash": outline_hash},
     )
     await repository.repo_query(
@@ -695,6 +699,7 @@ async def test_publish_transaction_uses_embedded_surreal_rollback_and_commit(
         outline_version_id="course_version:one",
     )
     terminal_course = stale_course.model_copy(update={"status": "failed"})
+    persisted_version = await CourseVersion.get("course_version:one")
     version = CourseVersion(
         id="course_version:one",
         course="course:one",
@@ -704,6 +709,7 @@ async def test_publish_transaction_uses_embedded_surreal_rollback_and_commit(
         outline_hash=outline_hash,
         approved_at="2026-08-18T00:00:00Z",
         confirmation="确认大纲",
+        updated=persisted_version.updated,
     )
     chapter = Chapter(
         id="chapter:one",
@@ -1204,7 +1210,8 @@ async def test_chapter_promotion_transaction_rejects_published_version_in_embedd
         command="command:one",
     )
     await repository.repo_query(
-        "CREATE course_version:one SET course = course:one, status = 'published';"
+        "CREATE course_version:one SET course = course:one, version_no = 1, "
+        "status = 'published', updated = d'2026-08-20T13:06:59.988639680Z';"
     )
     await repository.repo_query(
         "CREATE chapter:one SET course_version = course_version:one, "
@@ -1220,13 +1227,14 @@ async def test_chapter_promotion_transaction_rejects_published_version_in_embedd
         "block_key = 'removed', orphan_status = 'active';"
     )
     monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[chapter]))
+    persisted_version = await CourseVersion.get("course_version:one")
 
     with pytest.raises(ValueError, match="no longer active"):
         await workflow_module.CourseWorkflowService.complete_chapter_run(
             run=run,
             chapter=chapter,
             artifact=artifact,
-            expected_version_updated=None,
+            expected_version_updated=persisted_version.updated,
         )
 
     assert await repository.repo_query(
@@ -1241,7 +1249,7 @@ async def test_chapter_promotion_transaction_rejects_published_version_in_embedd
         run=run,
         chapter=chapter,
         artifact=artifact,
-        expected_version_updated=None,
+        expected_version_updated=persisted_version.updated,
     )
 
     assert await repository.repo_query(

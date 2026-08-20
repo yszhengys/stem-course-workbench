@@ -809,7 +809,8 @@ class CourseService:
                     SET updated = time::now()
                     WHERE id = $version_id
                       AND status IN ['draft', 'generating']
-                      AND updated = $expected_version_updated
+                      AND time::micros(updated) =
+                          time::micros($expected_version_updated)
                     RETURN VALUE id
                 );
                 IF array::len($mutable_version) != 1 {
@@ -1065,7 +1066,8 @@ class CourseService:
                       AND course = $course_id
                       AND status = 'generating'
                       AND outline_hash = $outline_hash
-                      AND updated = $expected_version_updated
+                      AND time::micros(updated) =
+                          time::micros($expected_version_updated)
                     RETURN AFTER
                 );
                 LET $published_current_chapters = (

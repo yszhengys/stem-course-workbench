@@ -1,6 +1,8 @@
-"""Background commands for the isolated Course workflow."""
+"""Background commands for the isolated Course workflow.
 
-from __future__ import annotations
+Keep runtime annotations enabled in this module: surreal-commands derives its
+Pydantic queue schemas directly from the decorated function annotations.
+"""
 
 import asyncio
 from collections.abc import Awaitable, Callable

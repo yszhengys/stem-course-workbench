@@ -8,7 +8,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from jinja2 import Template
 from pint import UnitRegistry
@@ -43,6 +43,7 @@ COURSE_PROMPT_STAGES = {
     "review",
     "escalation",
 }
+ModelArtifactT = TypeVar("ModelArtifactT", bound=BaseModel)
 
 
 class PublicationBlocked(ValueError):
@@ -124,9 +125,46 @@ class CourseGenerationService:
         return Template(template_path.read_text(encoding="utf-8")).render(
             stage=stage,
             evidence=[str(item) for item in evidence],
-            instructions=instructions,
+            instructions=(
+                instructions
+                + "\nCopy every anchor ID literally, including its anchor: prefix; "
+                "never abbreviate, rewrite, or omit that prefix."
+            ),
             format_instructions=format_instructions,
         )
+
+    @staticmethod
+    def canonicalize_anchor_references(
+        artifact: ModelArtifactT, known_anchor_ids: set[str]
+    ) -> ModelArtifactT:
+        """Restore an omitted table prefix only for an exact selected anchor ID."""
+
+        suffixes: dict[str, str | None] = {}
+        for anchor_id in known_anchor_ids:
+            table, separator, suffix = anchor_id.partition(":")
+            if table != "anchor" or not separator or not suffix:
+                continue
+            suffixes[suffix] = anchor_id if suffix not in suffixes else None
+
+        def canonical(value: str) -> str:
+            if value in known_anchor_ids:
+                return value
+            restored = suffixes.get(value)
+            return restored if restored is not None else value
+
+        def visit(value: Any, field_name: str | None = None) -> Any:
+            if field_name == "anchor_id" and isinstance(value, str):
+                return canonical(value)
+            if field_name in {"anchor_ids", "citations"} and isinstance(value, list):
+                return [canonical(item) if isinstance(item, str) else item for item in value]
+            if isinstance(value, dict):
+                return {key: visit(item, key) for key, item in value.items()}
+            if isinstance(value, list):
+                return [visit(item) for item in value]
+            return value
+
+        payload = visit(artifact.model_dump(mode="json"))
+        return type(artifact).model_validate(payload)
 
     @staticmethod
     def _format_instructions(output_model: type[BaseModel]) -> str:
@@ -187,6 +225,7 @@ class CourseGenerationService:
                 format_instructions=self._format_instructions(CourseOutlineArtifact),
             ),
         )
+        generated = self.canonicalize_anchor_references(generated, set(anchor_ids))
         return self.validate_outline(
             generated,
             set(anchor_ids),
@@ -200,12 +239,18 @@ class CourseGenerationService:
         chapter_key: str,
         anchor_ids: list[str],
         evidence: Iterable[str],
+        approved_lab_keys: set[str],
         model: ModelSelection,
         stage: str = "chapter_content",
         prompt_version: str = "v1",
     ) -> ChapterArtifact:
         if stage not in {"chapter_content", "practice_labs"}:
             raise ValueError("chapter generation stage must be content or practice_labs")
+        if not approved_lab_keys or any(
+            re.fullmatch(SAFE_LAB_KEY_PATTERN, key) is None
+            for key in approved_lab_keys
+        ):
+            raise ValueError("Approved chapter Lab keys are missing or unsafe")
         request = GenerationRequest(
             stage=stage,  # type: ignore[arg-type]
             course_id=course_id,
@@ -216,16 +261,36 @@ class CourseGenerationService:
             schema_name="chapter_artifact",
         )
         adapter = self.adapter or build_adapter(model)
-        return await adapter.generate(
+        lab_policy = (
+            "Approved lab keys (exact sorted set): "
+            + json.dumps(
+                sorted(approved_lab_keys),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + ". Return exactly one declarative LabSpec for every key in this set. "
+            "Lab expressions must be pure expressions evaluated independently, "
+            "such as a*x+b and c for a function plot. Never use assignments or "
+            "named intermediate variables. Formula latex must contain one parseable "
+            "expression using arithmetic plus only "
+            r"\frac, \sqrt, \cdot, \times, \pi, \sin, \cos, or \log. "
+            "Do not include equality or implication "
+            "commands in FormulaArtifact.latex; explain them in the meaning field. "
+            "The citations array must contain bare anchor IDs only, with no labels, "
+            "quotes, roles, page text, or descriptions."
+        )
+        generated = await adapter.generate(
             request,
             ChapterArtifact,
             prompt=self.prompt_for(
                 stage,
                 evidence,
-                "Return the approved teaching contract as one structured chapter.",
+                "Return the approved teaching contract as one structured chapter.\n"
+                + lab_policy,
                 format_instructions=self._format_instructions(ChapterArtifact),
             ),
         )
+        return self.canonicalize_anchor_references(generated, set(anchor_ids))
 
     async def review(
         self,
@@ -247,7 +312,7 @@ class CourseGenerationService:
             schema_name="course_review",
         )
         adapter = self.adapter or build_adapter(model)
-        return await adapter.generate(
+        generated = await adapter.generate(
             request,
             ReviewArtifact,
             prompt=self.prompt_for(
@@ -257,6 +322,7 @@ class CourseGenerationService:
                 format_instructions=self._format_instructions(ReviewArtifact),
             ),
         )
+        return self.canonicalize_anchor_references(generated, set(anchor_ids))
 
     async def escalate(
         self,
@@ -328,7 +394,7 @@ class CourseGenerationService:
         selected_json = "\n".join(
             finding.model_dump_json(exclude_none=True) for finding in selected
         )
-        return await adapter.generate(
+        generated = await adapter.generate(
             request,
             ReviewArtifact,
             prompt=self.prompt_for(
@@ -341,6 +407,7 @@ class CourseGenerationService:
                 format_instructions=self._format_instructions(ReviewArtifact),
             ),
         )
+        return self.canonicalize_anchor_references(generated, set(anchor_ids))
 
     @staticmethod
     def validate_outline(
@@ -425,10 +492,11 @@ class CourseGenerationService:
             raise ValueError("Chapter prerequisites are required")
         lab_keys = {lab.key for lab in artifact.labs}
         unapproved = lab_keys - approved_lab_keys
-        if unapproved:
+        missing_approved = approved_lab_keys - lab_keys
+        if unapproved or missing_approved or len(lab_keys) != len(artifact.labs):
             raise ValueError(
-                "Lab is not declared in the approved outline: "
-                + ", ".join(sorted(unapproved))
+                "Lab set does not match the approved outline: "
+                + ", ".join(sorted(unapproved | missing_approved))
             )
         if not 1 <= len(artifact.exercises) <= 3:
             raise ValueError("Select between one and three exercises")

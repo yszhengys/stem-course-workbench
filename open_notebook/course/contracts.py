@@ -348,6 +348,10 @@ def _validate_bounded_lab_value(value: object, *, depth: int = 0) -> None:
 
 
 class LabControl(CourseContract):
+    model_config = ConfigDict(
+        extra="forbid", from_attributes=True, populate_by_name=True
+    )
+
     key: str = Field(min_length=1, max_length=100)
     label: str | None = Field(default=None, max_length=300)
     minimum: float = Field(alias="min", ge=-1_000_000, le=1_000_000)
@@ -579,6 +583,19 @@ class ChapterArtifact(CourseContract):
         "pitfalls",
         "quick_reference",
     )(_validate_generated_texts)
+
+    @field_validator("citations")
+    @classmethod
+    def citations_are_bare_anchor_ids(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)) or any(
+            re.fullmatch(r"anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}", value)
+            is None
+            for value in values
+        ):
+            raise ValueError(
+                "citations must be unique bare evidence anchor IDs"
+            )
+        return values
 
     @model_validator(mode="after")
     def text_attributions_are_parallel(self) -> "ChapterArtifact":

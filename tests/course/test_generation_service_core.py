@@ -1,6 +1,7 @@
 import copy
 import hashlib
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -11,6 +12,7 @@ from open_notebook.course.contracts import (
     ExerciseArtifact,
     FormulaArtifact,
     FunctionPlotLabSpec,
+    LabControl,
     ModelSelection,
     ReviewArtifact,
     ValidationFinding,
@@ -169,6 +171,46 @@ def test_chapter_attributions_are_parallel_and_nested_provenance_is_explicit():
     del missing_provenance["formulas"][0]["provenance"]
     with pytest.raises(ValidationError, match="provenance"):
         ChapterArtifact.model_validate(missing_provenance)
+
+
+def test_chapter_citations_are_bare_anchor_ids_only() -> None:
+    payload = _chapter().model_dump(mode="json")
+    payload["citations"] = ["anchor:one — PRIMARY, page 1: description"]
+
+    with pytest.raises(ValidationError, match="bare evidence anchor IDs"):
+        ChapterArtifact.model_validate(payload)
+
+
+def test_lab_control_accepts_equivalent_bounds_and_serializes_canonical_aliases():
+    control = LabControl.model_validate(
+        {
+            "key": "slope",
+            "minimum": -5,
+            "maximum": 5,
+            "value": 1,
+            "step": 0.5,
+        }
+    )
+
+    assert control.model_dump(mode="json", by_alias=True) == {
+        "key": "slope",
+        "label": None,
+        "min": -5.0,
+        "max": 5.0,
+        "value": 1.0,
+        "step": 0.5,
+    }
+
+    with pytest.raises(ValidationError, match="extra"):
+        LabControl.model_validate(
+            {
+                "key": "slope",
+                "min": -5,
+                "max": 5,
+                "value": 1,
+                "unexpected": True,
+            }
+        )
 
 
 def test_grounded_provenance_requires_anchors_and_any_unknown_anchor_is_blocking():
@@ -351,6 +393,61 @@ async def test_outline_prompt_requires_each_chapter_to_select_from_exact_safe_la
     ) in adapter.calls[0].prompt
 
 
+@pytest.mark.asyncio
+async def test_outline_restores_only_an_exact_selected_anchor_suffix() -> None:
+    payload: dict[str, Any] = {
+        "title": "Course",
+        "chapters": [
+            {
+                "key": "one",
+                "title": "One",
+                "purpose": "Purpose",
+                "objective_keys": ["concept"],
+                "anchor_ids": ["one"],
+                "lab_keys": ["approved"],
+            }
+        ],
+        "concepts": [
+            {"key": "concept", "label": "Concept", "anchor_ids": ["one"]}
+        ],
+    }
+    adapter = FakeCourseModelAdapter(payload)
+    service = CourseGenerationService(adapter=adapter)
+
+    outline = await service.generate_outline(
+        course_id="course:one",
+        anchor_ids=["anchor:one"],
+        evidence=["[anchor:one]: fact"],
+        available_lab_keys={"approved"},
+        model=ModelSelection(
+            adapter="codex_cli",
+            model="gpt-5.6-sol",
+            reasoning_effort="max",
+        ),
+    )
+
+    assert outline.chapters[0].anchor_ids == ["anchor:one"]
+    assert outline.concepts[0].anchor_ids == ["anchor:one"]
+    assert "Copy every anchor ID literally, including its anchor: prefix" in (
+        adapter.calls[0].prompt
+    )
+
+    payload["chapters"][0]["anchor_ids"] = ["unknown"]
+    payload["concepts"][0]["anchor_ids"] = ["unknown"]
+    with pytest.raises(ValueError, match="unknown evidence anchors"):
+        await service.generate_outline(
+            course_id="course:one",
+            anchor_ids=["anchor:one"],
+            evidence=["[anchor:one]: fact"],
+            available_lab_keys={"approved"},
+            model=ModelSelection(
+                adapter="codex_cli",
+                model="gpt-5.6-sol",
+                reasoning_effort="max",
+            ),
+        )
+
+
 def test_grounded_context_validates_selected_anchor_integrity():
     anchor, source_hash = _anchor()
     service = CourseGenerationService()
@@ -384,6 +481,44 @@ def test_chapter_composition_requires_core_four_hints_and_declared_lab():
         )
     with pytest.raises(ValueError, match="approved outline"):
         service.validate_chapter_composition(_chapter(), approved_lab_keys=set())
+
+
+@pytest.mark.asyncio
+async def test_chapter_prompt_names_every_approved_lab_key() -> None:
+    adapter = FakeCourseModelAdapter(_chapter())
+    service = CourseGenerationService(adapter=adapter)
+
+    artifact = await service.generate_chapter(
+        course_id="course:one",
+        chapter_key="limits",
+        anchor_ids=["anchor:one"],
+        evidence=["[anchor:one]: fact"],
+        approved_lab_keys={"limit-plot"},
+        model=ModelSelection(
+            adapter="codex_cli",
+            model="gpt-5.6-sol",
+            reasoning_effort="max",
+        ),
+    )
+
+    assert artifact.labs[0].key == "limit-plot"
+    assert (
+        'Approved lab keys (exact sorted set): ["limit-plot"]. '
+        "Return exactly one declarative LabSpec for every key in this set."
+    ) in adapter.calls[0].prompt
+    assert "Lab expressions must be pure expressions" in adapter.calls[0].prompt
+    assert "Never use assignments or named intermediate variables" in (
+        adapter.calls[0].prompt
+    )
+    assert "Formula latex must contain one parseable expression" in (
+        adapter.calls[0].prompt
+    )
+    assert "Do not include equality or implication commands" in (
+        adapter.calls[0].prompt
+    )
+    assert "citations array must contain bare anchor IDs only" in (
+        adapter.calls[0].prompt
+    )
 
 
 def test_sympy_equivalence_substitution_and_unparseable_manual_check():

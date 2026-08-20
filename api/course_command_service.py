@@ -65,6 +65,13 @@ async def _lock_for(input_hash: str) -> asyncio.Lock:
         return _claim_locks.setdefault(input_hash, asyncio.Lock())
 
 
+def _query_rows(result: Any) -> list[dict[str, Any]]:
+    """Normalize Surreal SDK single-record and multi-record query results."""
+
+    values = result if isinstance(result, list) else [result] if result else []
+    return [row for row in values if isinstance(row, dict)]
+
+
 def next_course_run_status(
     current_status: str, framework_status: str
 ) -> str | None:
@@ -290,12 +297,14 @@ class CourseCommandService:
                 "command": None,
                 "error_message": None,
             }
-            created = await repo_query(
-                "CREATE ONLY $run_id CONTENT $payload RETURN AFTER;",
-                {
-                    "run_id": ensure_record_id(run_id),
-                    "payload": payload,
-                },
+            created = _query_rows(
+                await repo_query(
+                    "CREATE ONLY $run_id CONTENT $payload RETURN AFTER;",
+                    {
+                        "run_id": ensure_record_id(run_id),
+                        "payload": payload,
+                    },
+                )
             )
             row = created[0] if created else {"id": run_id, **payload}
             return await self._ensure_bound(

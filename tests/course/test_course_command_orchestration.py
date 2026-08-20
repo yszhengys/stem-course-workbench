@@ -124,6 +124,61 @@ print(json.dumps(sorted(
     ]
 
 
+def test_registered_course_command_schemas_validate_real_queue_arguments() -> None:
+    from surreal_commands import registry
+
+    import commands  # noqa: F401
+
+    model = {
+        "adapter": "codex_cli",
+        "model": "gpt-5.6-sol",
+        "reasoning_effort": "low",
+    }
+    common = {
+        "run_id": "course_generation_run:one",
+        "course_id": "course:one",
+    }
+    payloads = {
+        "course_build_evidence": {
+            **common,
+            "source_id": "source:one",
+            "role": "PRIMARY",
+        },
+        "course_generate_outline": {
+            **common,
+            "anchor_ids": ["anchor:one"],
+            "available_lab_keys": ["function-plot"],
+            "prompt_version": "v1",
+            "model": model,
+        },
+        "course_generate_chapter": {
+            **common,
+            "anchor_ids": ["anchor:one"],
+            "chapter_key": "linear-equations",
+            "prompt_version": "v1",
+            "model": model,
+        },
+        "course_review_chapter": {
+            **common,
+            "anchor_ids": ["anchor:one"],
+            "chapter_key": "linear-equations",
+            "prompt_version": "v1",
+            "model": model,
+            "escalation_model": model,
+        },
+    }
+    registered = {
+        item.name: item
+        for item in registry.get_all_commands()
+        if item.app_id == "open_notebook" and item.name in payloads
+    }
+
+    assert set(registered) == set(payloads)
+    for name, payload in payloads.items():
+        validated = registered[name].input_schema(**payload)
+        assert validated.model_dump(mode="json") == payload
+
+
 def test_api_process_imports_complete_command_package() -> None:
     script = """
 import json
@@ -1164,7 +1219,10 @@ async def test_chapter_completion_and_stable_links_are_one_atomic_promotion(
         "UPDATE course_generation_run"
     )
     assert "status = 'generating'" in statements[0]
-    assert "AND updated = $expected_version_updated" in statements[0]
+    assert (
+        "AND time::micros(updated) = time::micros($expected_version_updated)"
+        in " ".join(statements[0].split())
+    )
     assert statements[0].index("WHERE id = $run_id AND status = 'running'") < statements[
         0
     ].index("UPDATE course_note")
@@ -1671,6 +1729,43 @@ async def test_persistent_active_run_dedupe_and_ordered_key(monkeypatch) -> None
     assert second == first
     assert reordered.run_id != first.run_id
     assert store.submit_count == 2
+
+
+@pytest.mark.asyncio
+async def test_new_run_accepts_surreal_create_only_single_record_shape(
+    monkeypatch,
+) -> None:
+    import api.course_command_service as module
+
+    store = _FakeQueueStore()
+
+    async def query(statement, variables=None):
+        result = await store.query(statement, variables)
+        if statement.lstrip().startswith("CREATE ONLY $run_id"):
+            assert isinstance(result, list) and len(result) == 1
+            return result[0]
+        return result
+
+    monkeypatch.setattr(module, "repo_query", query)
+    monkeypatch.setattr(module, "submit_command", store.submit)
+
+    submission = await module.CourseCommandService().submit_stage(
+        course_id="course:abc",
+        stage="outline",
+        command_name="course_generate_outline",
+        command_args={"course_id": "course:abc"},
+        model={
+            "adapter": "codex_cli",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "max",
+        },
+        prompt_version="v1",
+        anchor_ids=["anchor:a"],
+        source_hashes={"source:a": "a" * 64},
+    )
+
+    assert submission.status == "queued"
+    assert submission.command_id == "command:cmd1"
 
 
 @pytest.mark.asyncio

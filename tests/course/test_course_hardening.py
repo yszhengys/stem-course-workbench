@@ -335,7 +335,8 @@ async def test_manual_chapter_update_commits_on_mutable_version(monkeypatch):
     monkeypatch.setattr(repository, "db_connection", memory_connection)
     await repository.repo_query(
         "CREATE course_version:one SET course = course:one, "
-        "version_no = 1, status = 'generating';"
+        "version_no = 1, status = 'generating', "
+        "updated = d'2026-08-20T13:06:59.988639680Z';"
     )
     await repository.repo_query(
         "CREATE chapter:one SET course_version = course_version:one, "
