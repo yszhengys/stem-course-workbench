@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Awaitable, TypeVar
 
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import FileResponse, Response
 
 from api.course_command_service import CourseCommandService, CourseJobSubmission
 from api.course_service import (
@@ -155,6 +156,43 @@ async def list_evidence_anchors(course_id: str):
         _body(anchor)
         for anchor in await _call(course_commands.list_anchors(course_id))
     ]
+
+
+@router.get("/courses/{course_id}/evidence/anchors/{anchor_id}/preview")
+async def get_evidence_preview(course_id: str, anchor_id: str):
+    asset = await _call(CourseService.get_evidence_preview(course_id, anchor_id))
+    return Response(
+        content=asset.content,
+        media_type="image/svg+xml",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": f'inline; filename="{asset.filename}"',
+            "Content-Security-Policy": "default-src 'none'; style-src 'none'; sandbox",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/courses/{course_id}/evidence/anchors/{anchor_id}/source")
+async def get_evidence_source(
+    course_id: str, anchor_id: str, download: bool = False
+):
+    asset = await _call(CourseService.get_evidence_source(course_id, anchor_id))
+    media_type = (
+        "application/pdf"
+        if asset.kind == "pdf"
+        else "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+    return FileResponse(
+        path=asset.path,
+        filename=asset.filename,
+        media_type=media_type,
+        content_disposition_type="attachment" if download else "inline",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post(

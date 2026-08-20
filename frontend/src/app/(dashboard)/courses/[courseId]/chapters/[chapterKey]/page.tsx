@@ -10,6 +10,7 @@ import { ChapterPublicationGate } from '@/components/course/ChapterPublicationGa
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
 import { CourseModelPicker } from '@/components/course/CourseModelPicker'
 import { CourseExercises } from '@/components/course/CourseExercises'
+import { EvidenceAnchorCard } from '@/components/course/EvidenceAnchorCard'
 import {
   CourseInlineError,
   CourseInlineLoading,
@@ -22,7 +23,6 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { MarkdownRenderer } from '@/components/ui/markdown-renderer'
 import { Textarea } from '@/components/ui/textarea'
@@ -57,7 +57,6 @@ import {
 import {
   courseStatusLabel,
   provenanceLabel,
-  sourceRoleLabel,
 } from '@/lib/course/course-labels'
 import { selectableDefaultModel } from '@/lib/course/model-selection'
 import { canRequestChapterReview } from '@/lib/course/review-policy'
@@ -284,18 +283,18 @@ export default function CourseChapterPage() {
                 {anchors.isLoading ? <CourseInlineLoading /> : anchors.isError ? (
                   <CourseInlineError onRetry={() => void anchors.refetch()} />
                 ) : anchors.data?.length ? (
-                  <div className="grid max-h-52 gap-2 overflow-y-auto rounded-md border p-3 md:grid-cols-2">
+                  <div className="grid max-h-[32rem] gap-2 overflow-y-auto rounded-md border p-3 md:grid-cols-2">
                     {(anchors.data ?? []).map((anchor) => (
-                    <label key={anchor.anchor_id} className="flex cursor-pointer items-start gap-2 text-xs">
-                      <Checkbox
+                      <EvidenceAnchorCard
+                        key={anchor.anchor_id}
+                        courseId={courseId}
+                        anchor={anchor}
                         checked={selectedAnchorIds.includes(anchor.anchor_id)}
                         onCheckedChange={(checked) => setSelectedAnchorIds((previous) => checked
-                          ? [...new Set([...previous, anchor.anchor_id])]
-                          : previous.filter((item) => item !== anchor.anchor_id)
-                        )}
+                            ? [...new Set([...previous, anchor.anchor_id])]
+                            : previous.filter((item) => item !== anchor.anchor_id)
+                          )}
                       />
-                      <span>{sourceRoleLabel(t, anchor.source_role)} · {anchor.locator.index} · {anchor.locator.quote}</span>
-                    </label>
                     ))}
                   </div>
                 ) : <p className="text-sm text-muted-foreground">{t('course.noAnchors')}</p>}

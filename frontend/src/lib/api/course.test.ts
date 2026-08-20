@@ -39,6 +39,32 @@ describe('courseApi', () => {
     )
   })
 
+  it('loads evidence preview and source files through the authenticated API client', async () => {
+    const preview = new Blob(['preview'], { type: 'image/svg+xml' })
+    const source = new Blob(['source'], { type: 'application/pdf' })
+    vi.mocked(apiClient.get)
+      .mockResolvedValueOnce({ data: preview })
+      .mockResolvedValueOnce({ data: source })
+
+    await expect(
+      courseApi.getEvidencePreviewBlob('course:one', 'anchor:page/1')
+    ).resolves.toBe(preview)
+    await expect(
+      courseApi.getEvidenceSourceBlob('course:one', 'anchor:page/1')
+    ).resolves.toBe(source)
+
+    expect(apiClient.get).toHaveBeenNthCalledWith(
+      1,
+      '/courses/course%3Aone/evidence/anchors/anchor%3Apage%2F1/preview',
+      { responseType: 'blob' },
+    )
+    expect(apiClient.get).toHaveBeenNthCalledWith(
+      2,
+      '/courses/course%3Aone/evidence/anchors/anchor%3Apage%2F1/source',
+      { responseType: 'blob' },
+    )
+  })
+
   it('submits the real Open Notebook model record ID', async () => {
     vi.mocked(apiClient.post).mockResolvedValue({
       data: {

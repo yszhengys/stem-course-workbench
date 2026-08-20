@@ -34,6 +34,7 @@ PDF/PPTX Source
 
 1. Course 必须绑定一个 Notebook；Source 继续由 Open Notebook 管理，Course 只记录 `PRIMARY`/`SUPPLEMENT` 角色。
 2. 证据锚点绑定当前 Source SHA256、1-based 页/幻灯片位置、引文哈希和归一化 bbox。
+   PDF 通过 Course-owned inline source 端点打开对应页；PPTX 预览是缓存于 Course/source-hash 命名空间的确定性静态 SVG。预览读取会重验 Course/Source 归属、当前哈希、精确缓存身份、根目录和非符号链接条件。
 3. 模型只能读取调用中明确选择且重新验证过的锚点；队列参数、顺序、当前源哈希和持久 run claim 必须一致。
 4. 大纲批准要求当前版本、服务端 artifact hash、合法 DAG 和精确确认短语 `确认大纲`。
 5. 已批准/已发布 artifact 不可变；`force` 或终态重试创建 run-scoped 的下一版本，同一 run 重放不重复创建。

@@ -8,6 +8,7 @@ import { AlertTriangle, ArrowLeft, BookOpen, CheckCircle2, FileText, Network } f
 import { AppShell } from '@/components/layout/AppShell'
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
 import { CourseModelPicker } from '@/components/course/CourseModelPicker'
+import { EvidenceAnchorCard } from '@/components/course/EvidenceAnchorCard'
 import {
   CourseInlineError,
   CourseInlineLoading,
@@ -21,10 +22,9 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Checkbox } from '@/components/ui/checkbox'
 import { QUERY_KEYS } from '@/lib/api/query-client'
 import { IneligibleEvidenceSourceError, submitEvidenceSource } from '@/lib/course/evidence-source'
-import { courseStatusLabel, locatorKindLabel, sourceRoleLabel } from '@/lib/course/course-labels'
+import { courseStatusLabel, sourceRoleLabel } from '@/lib/course/course-labels'
 import { selectableDefaultModel } from '@/lib/course/model-selection'
 import { useCommandStatus } from '@/lib/hooks/use-command-status'
 import {
@@ -247,24 +247,19 @@ export default function CourseOutlinePage() {
                   {anchors.isLoading ? <CourseInlineLoading /> : anchors.isError ? (
                     <CourseInlineError onRetry={() => void anchors.refetch()} />
                   ) : anchors.data?.length ? (
-                    <div className="max-h-56 space-y-2 overflow-y-auto rounded-md border p-3">
+                    <div className="max-h-[32rem] space-y-2 overflow-y-auto rounded-md border p-3">
                       {anchors.data.map((anchor) => (
-                        <label key={anchor.anchor_id} className="flex cursor-pointer items-start gap-3 text-sm">
-                          <Checkbox
-                            checked={selectedAnchorIds.includes(anchor.anchor_id)}
-                            onCheckedChange={(checked) => setSelectedAnchorIds((previous) =>
-                              checked
-                                ? [...new Set([...previous, anchor.anchor_id])]
-                                : previous.filter((item) => item !== anchor.anchor_id)
-                            )}
-                          />
-                          <span>
-                            <span className="font-medium">
-                              {sourceRoleLabel(t, anchor.source_role)} · {locatorKindLabel(t, anchor.locator.kind)} {anchor.locator.index}
-                            </span>
-                            <span className="mt-1 block text-muted-foreground">{anchor.locator.quote}</span>
-                          </span>
-                        </label>
+                        <EvidenceAnchorCard
+                          key={anchor.anchor_id}
+                          courseId={courseId}
+                          anchor={anchor}
+                          checked={selectedAnchorIds.includes(anchor.anchor_id)}
+                          onCheckedChange={(checked) => setSelectedAnchorIds((previous) =>
+                            checked
+                              ? [...new Set([...previous, anchor.anchor_id])]
+                              : previous.filter((item) => item !== anchor.anchor_id)
+                          )}
+                        />
                       ))}
                     </div>
                   ) : <p className="text-sm text-muted-foreground">{t('course.noAnchors')}</p>}

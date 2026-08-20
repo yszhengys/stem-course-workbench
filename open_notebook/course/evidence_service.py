@@ -7,7 +7,10 @@ import hashlib
 import inspect
 import json
 import re
+import textwrap
 import zipfile
+from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import urlparse
@@ -25,6 +28,19 @@ SourceRole = Literal["PRIMARY", "SUPPLEMENT"]
 DoclingRecord = tuple[int, str, str, tuple[float, float, float, float] | None]
 
 
+@dataclass(frozen=True)
+class EvidencePreviewAsset:
+    content: bytes
+    filename: str
+
+
+@dataclass(frozen=True)
+class EvidenceSourceAsset:
+    path: Path
+    filename: str
+    kind: EvidenceKind
+
+
 class EvidenceInputError(InvalidInputError, ValueError):
     """A permanent, actionable source-file or evidence-integrity failure."""
 
@@ -39,6 +55,10 @@ class EvidenceService:
     MAX_SOURCE_BYTES = 100 * 1024 * 1024
     MAX_PPTX_MEMBERS = 10_000
     MAX_PPTX_EXPANDED_BYTES = 500 * 1024 * 1024
+    MAX_PREVIEW_LINES = 12
+    MAX_PREVIEW_LINE_CHARS = 96
+    MAX_PREVIEW_TEXT_CHARS = MAX_PREVIEW_LINES * MAX_PREVIEW_LINE_CHARS
+    MAX_PREVIEW_BYTES = 64 * 1024
 
     def __init__(
         self,
@@ -395,6 +415,201 @@ class EvidenceService:
         return self.data_root / course_namespace / source_sha256 / safe_name
 
     @staticmethod
+    def _course_namespace(course_id: str) -> str:
+        return hashlib.sha256(course_id.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _source_namespace(source_id: str) -> str:
+        return hashlib.sha256(source_id.encode("utf-8")).hexdigest()
+
+    def _preview_directory(
+        self, course_id: str, source_id: str, source_sha256: str
+    ) -> Path:
+        return (
+            Path(self._course_namespace(course_id))
+            / source_sha256
+            / "previews"
+            / self._source_namespace(source_id)
+        )
+
+    def _ensure_cache_directory(self, relative: Path) -> Path:
+        if relative.is_absolute() or ".." in relative.parts:
+            raise EvidenceInputError("Evidence preview cache path is invalid.")
+        self.data_root.mkdir(parents=True, exist_ok=True)
+        current = self.data_root
+        for part in relative.parts:
+            current = current / part
+            if current.exists():
+                if current.is_symlink() or not current.is_dir():
+                    raise EvidenceInputError(
+                        "Evidence preview cache must not contain symbolic links."
+                    )
+            else:
+                current.mkdir()
+        resolved = current.resolve(strict=True)
+        if self.data_root != resolved and self.data_root not in resolved.parents:
+            raise EvidenceInputError("Evidence preview cache path escaped its root.")
+        return current
+
+    @classmethod
+    def render_slide_preview(cls, slide_index: int, quotes: list[str]) -> bytes:
+        """Render bounded provenance text into a static, non-executable SVG."""
+
+        xml_safe = "".join(
+            character
+            for character in " ".join(quotes)
+            if ord(character) in {0x09, 0x0A, 0x0D}
+            or 0x20 <= ord(character) <= 0xD7FF
+            or 0xE000 <= ord(character) <= 0xFFFD
+            or 0x10000 <= ord(character) <= 0x10FFFF
+        )
+        normalized = cls.normalize_text(xml_safe)[: cls.MAX_PREVIEW_TEXT_CHARS]
+        lines = textwrap.wrap(
+            normalized,
+            width=cls.MAX_PREVIEW_LINE_CHARS,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )[: cls.MAX_PREVIEW_LINES]
+        if not lines:
+            lines = ["No provenance-backed text was extracted for this slide."]
+        tspans = "".join(
+            f'<tspan x="72" dy="{42 if position else 0}">{escape(line)}</tspan>'
+            for position, line in enumerate(lines)
+        )
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" '
+            'viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">'
+            '<title id="title">Course evidence slide preview</title>'
+            f'<desc id="desc">Slide {slide_index} provenance text</desc>'
+            '<rect width="1280" height="720" fill="#f8fafc"/>'
+            '<rect x="32" y="32" width="1216" height="656" rx="18" '
+            'fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>'
+            f'<text x="72" y="92" font-family="system-ui, sans-serif" '
+            f'font-size="30" font-weight="700" fill="#0f172a">Slide {slide_index}</text>'
+            '<text x="72" y="146" font-family="system-ui, sans-serif" '
+            f'font-size="24" fill="#334155">{tspans}</text>'
+            '</svg>'
+        ).encode("utf-8")
+        if len(svg) > cls.MAX_PREVIEW_BYTES:
+            raise EvidenceInputError("Evidence preview exceeds its safe size limit.")
+        return svg
+
+    def write_pptx_previews(
+        self,
+        *,
+        course_id: str,
+        source_id: str,
+        source_sha256: str,
+        records: list[DoclingRecord],
+        slide_count: int,
+    ) -> dict[int, str]:
+        """Create one deterministic cache-relative SVG identity per slide."""
+
+        if slide_count < 1 or slide_count > self.MAX_PPTX_MEMBERS:
+            raise EvidenceInputError("The PPTX slide count is outside safe limits.")
+        quotes_by_slide: dict[int, list[str]] = {
+            index: [] for index in range(1, slide_count + 1)
+        }
+        for index, _block_key, quote, _bbox in records:
+            if index in quotes_by_slide:
+                quotes_by_slide[index].append(quote)
+        relative_directory = self._preview_directory(
+            course_id, source_id, source_sha256
+        )
+        directory = self._ensure_cache_directory(relative_directory)
+        previews: dict[int, str] = {}
+        for index in range(1, slide_count + 1):
+            content = self.render_slide_preview(index, quotes_by_slide[index])
+            digest = hashlib.sha256(content).hexdigest()[:16]
+            filename = f"slide-{index:04d}-{digest}.svg"
+            target = directory / filename
+            if target.is_symlink():
+                raise EvidenceInputError(
+                    "Evidence preview cache must not contain symbolic links."
+                )
+            target.write_bytes(content)
+            previews[index] = (relative_directory / filename).as_posix()
+        return previews
+
+    def load_preview_asset(
+        self,
+        anchor: CourseEvidenceAnchor,
+        *,
+        course_id: str,
+        source_hash: str,
+    ) -> EvidencePreviewAsset:
+        """Load only the exact immutable preview identity stored on an anchor."""
+
+        self.validate_anchor_integrity(
+            anchor, course_id=course_id, source_hash=source_hash
+        )
+        if anchor.locator.kind != "pptx_slide" or not anchor.preview_path:
+            raise EvidenceInputError("Evidence preview is unavailable for this anchor.")
+        relative = Path(anchor.preview_path)
+        expected_directory = self._preview_directory(
+            course_id, anchor.source, source_hash
+        )
+        filename_match = re.fullmatch(
+            rf"slide-{anchor.locator.index:04d}-([0-9a-f]{{16}})\.svg",
+            relative.name,
+        )
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != anchor.preview_path
+            or relative.parent != expected_directory
+            or filename_match is None
+        ):
+            raise EvidenceInputError("Evidence preview identity or path is invalid.")
+        candidate = self.data_root
+        for part in relative.parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                raise EvidenceInputError(
+                    "Evidence preview must not be a symbolic link."
+                )
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (FileNotFoundError, OSError) as exc:
+            raise EvidenceInputError("Evidence preview file is missing.") from exc
+        if self.data_root != resolved and self.data_root not in resolved.parents:
+            raise EvidenceInputError("Evidence preview path escaped its cache root.")
+        if not resolved.is_file():
+            raise EvidenceInputError("Evidence preview file is missing.")
+        content = resolved.read_bytes()
+        if not content or len(content) > self.MAX_PREVIEW_BYTES:
+            raise EvidenceInputError("Evidence preview file has an invalid size.")
+        if hashlib.sha256(content).hexdigest()[:16] != filename_match.group(1):
+            raise EvidenceInputError("Evidence preview identity hash does not match.")
+        lowered = content.lower()
+        if (
+            not content.startswith(b'<svg xmlns="http://www.w3.org/2000/svg"')
+            or any(
+                token in lowered
+                for token in (
+                    b"<script",
+                    b"javascript:",
+                    b"<foreignobject",
+                    b" href=",
+                    b" xlink:href=",
+                    b" onload=",
+                    b" onclick=",
+                )
+            )
+        ):
+            raise EvidenceInputError("Evidence preview content is not safe SVG.")
+        return EvidencePreviewAsset(
+            content=content,
+            filename=f"slide-{anchor.locator.index:04d}.svg",
+        )
+
+    @staticmethod
+    def pptx_slide_count(path: Path) -> int:
+        from pptx import Presentation
+
+        return len(Presentation(str(path)).slides)
+
+    @staticmethod
     def manifest(
         *,
         course_id: str,
@@ -599,6 +814,17 @@ COMMIT TRANSACTION;
             locator_kind: Literal["pdf_page", "pptx_slide"] = (
                 "pdf_page" if kind == "pdf" else "pptx_slide"
             )
+            preview_paths = (
+                self.write_pptx_previews(
+                    course_id=course_id,
+                    source_id=source_id,
+                    source_sha256=source_hash,
+                    records=records,
+                    slide_count=self.pptx_slide_count(path),
+                )
+                if kind == "pptx"
+                else {}
+            )
             anchors = [
                 self.make_anchor(
                     course_id=course_id,
@@ -610,6 +836,7 @@ COMMIT TRANSACTION;
                     quote=quote,
                     source_role=source_role,
                     bbox=bbox,
+                    preview_path=preview_paths.get(index),
                 )
                 for index, block_key, quote, bbox in records
             ]

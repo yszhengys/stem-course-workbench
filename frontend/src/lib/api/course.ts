@@ -94,6 +94,22 @@ export const courseApi = {
     return z.array(evidenceAnchorSchema).parse(response.data)
   },
 
+  async getEvidencePreviewBlob(courseId: string, anchorId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/evidence/anchors/${pathId(anchorId)}/preview`,
+      { responseType: 'blob' },
+    )
+    return response.data as Blob
+  },
+
+  async getEvidenceSourceBlob(courseId: string, anchorId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/evidence/anchors/${pathId(anchorId)}/source`,
+      { responseType: 'blob' },
+    )
+    return response.data as Blob
+  },
+
   async getModelOptions() {
     const response = await apiClient.get('/courses/model-options')
     return courseModelOptionsSchema.parse(response.data)

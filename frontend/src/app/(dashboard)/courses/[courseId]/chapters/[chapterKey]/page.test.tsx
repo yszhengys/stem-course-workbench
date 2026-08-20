@@ -120,7 +120,8 @@ describe('CourseChapterPage review models', () => {
       },
     }) as never)
     vi.mocked(useCourseAnchors).mockReturnValue(queryResult([{
-      anchor_id: 'anchor:one', source_role: 'PRIMARY', locator: { index: 1, quote: 'Grounded.' },
+      anchor_id: 'anchor:one', source_role: 'PRIMARY', preview_path: null,
+      locator: { kind: 'pdf_page', index: 1, quote: 'Grounded.' },
     }]) as never)
     vi.mocked(useCourseModelOptions).mockReturnValue(queryResult({
       defaults: { chapter_content: sol, review: luna, escalation: sol },

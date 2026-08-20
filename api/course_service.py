@@ -18,7 +18,12 @@ from open_notebook.course.contracts import (
     CourseOutlineArtifact,
     ValidationFinding,
 )
-from open_notebook.course.evidence_service import EvidenceInputError, EvidenceService
+from open_notebook.course.evidence_service import (
+    EvidenceInputError,
+    EvidencePreviewAsset,
+    EvidenceService,
+    EvidenceSourceAsset,
+)
 from open_notebook.course.generation_service import (
     CourseGenerationService,
     PublicationBlocked,
@@ -29,6 +34,7 @@ from open_notebook.course.models import (
     Attempt,
     Chapter,
     Course,
+    CourseEvidenceAnchor,
     CourseNote,
     CourseVersion,
     Lab,
@@ -533,6 +539,81 @@ class CourseService:
                 course.supplement_source_ids.remove(source_id)
             raise
         return course
+
+    @staticmethod
+    async def _owned_evidence_asset(
+        course_id: str, anchor_id: str
+    ) -> tuple[
+        CourseEvidenceAnchor,
+        EvidenceService,
+        EvidenceSourceAsset,
+        str,
+    ]:
+        """Resolve a current Course anchor to its unchanged, server-owned original."""
+
+        course = await CourseService.get_course(course_id)
+        rows = await repo_query(
+            """
+            SELECT * FROM course_evidence_anchor
+            WHERE course = $course
+              AND anchor_id = $anchor_id
+              AND is_current = true;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "anchor_id": anchor_id,
+            },
+        )
+        if len(rows) != 1:
+            raise NotFoundError("Course evidence anchor not found")
+        anchor = CourseEvidenceAnchor(**rows[0])
+        if anchor.course != course_id or anchor.source not in course.source_ids:
+            raise NotFoundError("Course evidence anchor not found")
+        source = await _typed_get(Source, anchor.source, "source")
+        file_path = source.asset.file_path if source.asset else None
+        if not file_path:
+            raise NotFoundError("Course evidence source not found")
+        evidence = EvidenceService()
+        path, kind = evidence.validate_local_source_file(file_path)
+        source_hash = evidence.sha256_file(path)
+        evidence.validate_anchor_integrity(
+            anchor,
+            course_id=course_id,
+            source_hash=source_hash,
+        )
+        expected_kind = "pdf_page" if kind == "pdf" else "pptx_slide"
+        if anchor.locator.kind != expected_kind:
+            raise EvidenceInputError("Evidence anchor source kind does not match.")
+        return (
+            anchor,
+            evidence,
+            EvidenceSourceAsset(path=path, filename=path.name, kind=kind),
+            source_hash,
+        )
+
+    @staticmethod
+    async def get_evidence_preview(
+        course_id: str, anchor_id: str
+    ) -> EvidencePreviewAsset:
+        anchor, evidence, source, source_hash = (
+            await CourseService._owned_evidence_asset(course_id, anchor_id)
+        )
+        if source.kind != "pptx":
+            raise EvidenceInputError("PDF evidence uses the original page view.")
+        return evidence.load_preview_asset(
+            anchor,
+            course_id=course_id,
+            source_hash=source_hash,
+        )
+
+    @staticmethod
+    async def get_evidence_source(
+        course_id: str, anchor_id: str
+    ) -> EvidenceSourceAsset:
+        _anchor, _evidence, source, _source_hash = (
+            await CourseService._owned_evidence_asset(course_id, anchor_id)
+        )
+        return source
 
     @staticmethod
     async def create_version(course_id: str, values: dict[str, Any]) -> CourseVersion:
