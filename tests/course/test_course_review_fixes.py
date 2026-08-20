@@ -84,6 +84,91 @@ def approved_outline() -> dict:
     }
 
 
+def generated_chapter_artifact() -> dict:
+    """Small, fully attributed artifact for publication-path fixtures."""
+
+    return {
+        "chapter_key": "limits",
+        "purpose": "Learn limits.",
+        "objectives": ["Understand limits"],
+        "sections": [
+            {
+                "key": "definition",
+                "title": "Definition",
+                "markdown": "A grounded definition.",
+                "anchor_ids": ["anchor:one"],
+                "provenance": "adapted",
+            }
+        ],
+        "attributions": {
+            "purpose": {
+                "anchor_ids": ["anchor:one"],
+                "provenance": "adapted",
+            },
+            "prerequisites": [],
+            "objectives": [
+                {
+                    "anchor_ids": ["anchor:one"],
+                    "provenance": "adapted",
+                }
+            ],
+            "definitions": [],
+            "misconceptions": [],
+            "pitfalls": [],
+            "quick_reference": [],
+        },
+        "physics_checks": [],
+    }
+
+
+def bind_generated_chapter(
+    chapter: Chapter,
+    *,
+    course_id: str,
+    version_id: str,
+    run_id: str,
+) -> CourseGenerationRun:
+    """Attach the immutable artifact to a matching succeeded generation run."""
+
+    run = CourseGenerationRun(
+        id=run_id,
+        course=course_id,
+        course_version=version_id,
+        chapter=str(chapter.id),
+        chapter_key=chapter.chapter_key,
+        stage="chapter_content",
+        adapter="codex_cli",
+        model="gpt-5.6-sol",
+        status="succeeded",
+        prompt_version="v1",
+        input_hash="generated-claim",
+        output_hash=artifact_hash({"output": chapter.artifact or {}}),
+        command=f"command:{run_id.split(':', 1)[-1]}",
+    )
+    chapter.input_hash = artifact_replay_hash(run)
+    return run
+
+
+def patch_promotion_runs(
+    monkeypatch, runs: list[CourseGenerationRun]
+) -> None:
+    async def query(statement: str, variables=None):
+        del variables
+        if "FROM course_generation_run" in statement:
+            return [run.model_dump(mode="json") for run in runs]
+        raise AssertionError(statement)
+
+    monkeypatch.setattr("open_notebook.course.workflow_service.repo_query", query)
+
+
+def patch_publication_evidence(monkeypatch) -> AsyncMock:
+    grounded = AsyncMock(return_value=([], {}, []))
+    monkeypatch.setattr(
+        "api.course_service.CourseWorkflowService.grounded_inputs", grounded
+    )
+    return grounded
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("version_status", ["published", "failed"])
 async def test_outline_reapproval_rejects_terminal_version(monkeypatch, version_status):
@@ -144,6 +229,8 @@ async def test_version_publish_rejects_illegal_state(monkeypatch, version_status
         chapter_key="limits",
         title="Limits",
         status="published",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
     )
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
@@ -183,6 +270,8 @@ async def test_version_publish_revalidates_current_approved_outline_hash(monkeyp
         chapter_key="limits",
         title="Limits",
         status="published",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
     )
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
@@ -225,6 +314,14 @@ async def test_version_publish_uses_legal_generating_to_published_transition(
         chapter_key="limits",
         title="Limits",
         status="published",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
+    )
+    generation_run = bind_generated_chapter(
+        chapter,
+        course_id="course:one",
+        version_id="course_version:1",
+        run_id="course_generation_run:published",
     )
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
@@ -232,6 +329,8 @@ async def test_version_publish_uses_legal_generating_to_published_transition(
     version_save = AsyncMock()
 
     async def publish_atomically(statement, variables=None):
+        if "course_validation_finding" in statement:
+            return []
         normalized = " ".join(statement.split())
         assert "BEGIN TRANSACTION" in normalized
         assert "SELECT VALUE id FROM course_generation_run" in normalized
@@ -248,11 +347,15 @@ async def test_version_publish_uses_legal_generating_to_published_transition(
         assert [str(item) for item in variables["current_chapter_ids"]] == [
             "chapter:one"
         ]
-        assert variables["known_succeeded_run_ids"] == []
+        assert [str(item) for item in variables["known_succeeded_run_ids"]] == [
+            "course_generation_run:published"
+        ]
         return []
 
     monkeypatch.setattr(CourseVersion, "save", version_save)
     monkeypatch.setattr("api.course_service.repo_query", publish_atomically)
+    patch_promotion_runs(monkeypatch, [generation_run])
+    patch_publication_evidence(monkeypatch)
 
     published = await CourseService.publish_version("course_version:1")
 
@@ -356,6 +459,14 @@ async def test_version_publish_ignores_older_immutable_chapter_versions(monkeypa
         version_no=2,
         title="Limits v2",
         status="published",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
+    )
+    generation_run = bind_generated_chapter(
+        latest,
+        course_id="course:one",
+        version_id="course_version:1",
+        run_id="course_generation_run:published",
     )
     unrelated = Chapter(
         id="chapter:archived-experiment",
@@ -375,6 +486,8 @@ async def test_version_publish_ignores_older_immutable_chapter_versions(monkeypa
     )
     monkeypatch.setattr(CourseVersion, "save", AsyncMock())
     monkeypatch.setattr("api.course_service.repo_query", AsyncMock(return_value=[]))
+    patch_promotion_runs(monkeypatch, [generation_run])
+    patch_publication_evidence(monkeypatch)
 
     published = await CourseService.publish_version("course_version:1")
 
@@ -409,6 +522,14 @@ async def test_version_publish_ignores_newer_failed_partial_chapter(monkeypatch)
         version_no=1,
         title="Limits",
         status="published",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
+    )
+    published_run = bind_generated_chapter(
+        published,
+        course_id="course:one",
+        version_id="course_version:1",
+        run_id="course_generation_run:published",
     )
     failed_run = CourseGenerationRun(
         id="course_generation_run:failed",
@@ -437,8 +558,13 @@ async def test_version_publish_ignores_newer_failed_partial_chapter(monkeypatch)
 
     async def query(statement: str, variables=None):
         del variables
+        if "course_validation_finding" in statement:
+            return []
         if "FROM course_generation_run" in statement:
-            return [failed_run.model_dump(mode="json")]
+            return [
+                published_run.model_dump(mode="json"),
+                failed_run.model_dump(mode="json"),
+            ]
         if "BEGIN TRANSACTION" in statement:
             return []
         raise AssertionError(statement)
@@ -450,6 +576,7 @@ async def test_version_publish_ignores_newer_failed_partial_chapter(monkeypatch)
     )
     monkeypatch.setattr("api.course_service.repo_query", query)
     monkeypatch.setattr("open_notebook.course.workflow_service.repo_query", query)
+    patch_publication_evidence(monkeypatch)
 
     result = await CourseService.publish_version("course_version:1")
 
@@ -484,6 +611,14 @@ async def test_version_publish_does_not_regress_concurrent_terminal_course(monke
         chapter_key="limits",
         title="Limits",
         status="published",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
+    )
+    generation_run = bind_generated_chapter(
+        chapter,
+        course_id="course:one",
+        version_id="course_version:1",
+        run_id="course_generation_run:published",
     )
     persisted_version = version.model_copy()
     monkeypatch.setattr(
@@ -492,17 +627,25 @@ async def test_version_publish_does_not_regress_concurrent_terminal_course(monke
         AsyncMock(side_effect=[version, persisted_version]),
     )
     monkeypatch.setattr(
-        Course, "get", AsyncMock(side_effect=[stale_course, terminal_course])
+        Course,
+        "get",
+        AsyncMock(side_effect=[stale_course, stale_course, terminal_course]),
     )
     monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[chapter]))
     version_save = AsyncMock()
     monkeypatch.setattr(CourseVersion, "save", version_save)
     course_save = AsyncMock()
     monkeypatch.setattr(Course, "save", course_save)
-    monkeypatch.setattr(
-        "api.course_service.repo_query",
-        AsyncMock(side_effect=RuntimeError("Course publication conflict")),
-    )
+
+    async def publication_conflict(statement: str, variables=None):
+        del variables
+        if "course_validation_finding" in statement:
+            return []
+        raise RuntimeError("Course publication conflict")
+
+    monkeypatch.setattr("api.course_service.repo_query", publication_conflict)
+    patch_promotion_runs(monkeypatch, [generation_run])
+    patch_publication_evidence(monkeypatch)
 
     with pytest.raises(CourseConflictError, match="Course is no longer generating"):
         await CourseService.publish_version("course_version:1")
@@ -569,6 +712,18 @@ async def test_publish_transaction_uses_embedded_surreal_rollback_and_commit(
         chapter_key="limits",
         title="Limits",
         status="published",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
+    )
+    generation_run = bind_generated_chapter(
+        chapter,
+        course_id="course:one",
+        version_id="course_version:one",
+        run_id="course_generation_run:published",
+    )
+    await repository.repo_query(
+        "UPDATE chapter:one SET input_hash = $input_hash;",
+        {"input_hash": chapter.input_hash},
     )
     monkeypatch.setattr(
         CourseVersion,
@@ -578,9 +733,11 @@ async def test_publish_transaction_uses_embedded_surreal_rollback_and_commit(
     monkeypatch.setattr(
         Course,
         "get",
-        AsyncMock(side_effect=[stale_course, terminal_course]),
+        AsyncMock(side_effect=[stale_course, stale_course, terminal_course]),
     )
     monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=[chapter]))
+    patch_promotion_runs(monkeypatch, [generation_run])
+    patch_publication_evidence(monkeypatch)
 
     with pytest.raises(CourseConflictError, match="no longer generating"):
         await CourseService.publish_version("course_version:one")
@@ -652,6 +809,14 @@ async def test_publish_transaction_rejects_newly_promoted_chapter_snapshot(
         version_no=1,
         title="Published limits",
         status="published",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
+    )
+    published_run = bind_generated_chapter(
+        published,
+        course_id="course:one",
+        version_id="course_version:one",
+        run_id="course_generation_run:published",
     )
     run = CourseGenerationRun(
         id="course_generation_run:new",
@@ -698,6 +863,12 @@ async def test_publish_transaction_rejects_newly_promoted_chapter_snapshot(
         "chapter_key = 'limits', status = 'reviewing', input_hash = $input_hash;",
         {"input_hash": partial.input_hash},
     )
+    published_run_data = published_run._prepare_save_data()
+    published_run_data.pop("id", None)
+    await repository.repo_query(
+        "CREATE course_generation_run:published CONTENT $run;",
+        {"run": published_run_data},
+    )
     run_data = run._prepare_save_data()
     run_data.pop("id", None)
     await repository.repo_query(
@@ -725,13 +896,14 @@ async def test_publish_transaction_rejects_newly_promoted_chapter_snapshot(
     monkeypatch.setattr(
         Course,
         "get",
-        AsyncMock(side_effect=[course, course.model_copy()]),
+        AsyncMock(side_effect=[course, course.model_copy(), course.model_copy()]),
     )
     monkeypatch.setattr(
         CourseVersion,
         "chapters",
         AsyncMock(return_value=[published, partial]),
     )
+    patch_publication_evidence(monkeypatch)
 
     with pytest.raises(CourseConflictError, match="no longer generating"):
         await CourseService.publish_version("course_version:one")
@@ -792,6 +964,14 @@ async def test_publish_transaction_rejects_same_run_content_promotion_race(
         version_no=1,
         title="Published limits",
         status="published",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
+    )
+    published_run = bind_generated_chapter(
+        published,
+        course_id="course:one",
+        version_id="course_version:one",
+        run_id="course_generation_run:published",
     )
     partial_artifact = {"chapter_key": "limits", "sections": []}
     run = CourseGenerationRun(
@@ -820,7 +1000,7 @@ async def test_publish_transaction_rejects_same_run_content_promotion_race(
         input_hash="wrong",
         artifact=partial_artifact,
     )
-    for record in (course, version, published, partial, run):
+    for record in (course, version, published, published_run, partial, run):
         data = record._prepare_save_data()
         record_id = data.pop("id")
         await repository.repo_query(
@@ -845,6 +1025,7 @@ async def test_publish_transaction_rejects_same_run_content_promotion_race(
         "api.course_service.repo_query", mutate_known_chapter_before_publish
     )
     monkeypatch.setattr(workflow_module, "repo_query", repository.repo_query)
+    patch_publication_evidence(monkeypatch)
 
     with pytest.raises(CourseConflictError, match="no longer generating"):
         await CourseService.publish_version("course_version:one")
@@ -986,7 +1167,7 @@ async def test_chapter_promotion_transaction_rejects_published_version_in_embedd
 ):
     import open_notebook.course.workflow_service as workflow_module
     import open_notebook.database.repository as repository
-    from open_notebook.course.contracts import ChapterArtifact, ChapterSection
+    from open_notebook.course.contracts import ChapterArtifact
 
     database = AsyncSurreal("mem://")
     await database.use("course_promotion_test", "course_promotion_test")
@@ -997,19 +1178,7 @@ async def test_chapter_promotion_transaction_rejects_published_version_in_embedd
 
     monkeypatch.setattr(repository, "db_connection", memory_connection)
     monkeypatch.setattr(workflow_module, "repo_query", repository.repo_query)
-    artifact = ChapterArtifact(
-        chapter_key="limits",
-        purpose="Learn limits.",
-        objectives=["Understand limits"],
-        sections=[
-            ChapterSection(
-                key="kept",
-                title="Kept",
-                markdown="Grounded.",
-                anchor_ids=["anchor:one"],
-            )
-        ],
-    )
+    artifact = ChapterArtifact.model_validate(generated_chapter_artifact())
     chapter = Chapter(
         id="chapter:one",
         course_version="course_version:one",
@@ -1112,6 +1281,8 @@ def publishable_chapter_records():
         status="ready",
         review_status="passed",
         validation_status="passed",
+        input_hash="generated-content-hash",
+        artifact=generated_chapter_artifact(),
     )
     return course, version, chapter
 
@@ -1193,6 +1364,7 @@ async def test_publish_chapter_succeeds_after_every_gate_passes(monkeypatch):
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
     monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
     monkeypatch.setattr("api.course_service.repo_query", AsyncMock(return_value=[]))
+    patch_publication_evidence(monkeypatch)
     save = AsyncMock()
     monkeypatch.setattr(Chapter, "save", save)
 

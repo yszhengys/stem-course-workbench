@@ -272,13 +272,15 @@ def test_chapter_section_rejects_code_fences_and_arbitrary_html():
                 title="Unsafe",
                 markdown=unsafe,
                 anchor_ids=["anchor:one"],
+                provenance="adapted",
             )
-    with pytest.raises(ValidationError, match="anchor_ids"):
+    with pytest.raises(ValidationError, match="grounded provenance"):
         ChapterSection(
             key="ungrounded",
             title="Ungrounded",
             markdown="A claim.",
             anchor_ids=[],
+            provenance="adapted",
         )
 
 
@@ -292,6 +294,7 @@ def test_generated_text_allows_math_angles_and_inline_tildes():
             "Three inline tildes ~~~ are ordinary prose."
         ),
         anchor_ids=["anchor:one"],
+        provenance="adapted",
     )
 
     assert "<x,y>" in section.markdown
@@ -321,6 +324,7 @@ def test_generated_text_rejects_unclosed_standard_single_letter_html(unsafe):
             title="Unsafe unclosed HTML",
             markdown=unsafe,
             anchor_ids=["anchor:one"],
+            provenance="adapted",
         )
 
 
@@ -344,6 +348,7 @@ def test_generated_text_rejects_html_elements_custom_elements_and_attributes(uns
             title="Unsafe HTML",
             markdown=unsafe,
             anchor_ids=["anchor:one"],
+            provenance="adapted",
         )
 
 

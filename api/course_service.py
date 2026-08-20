@@ -13,7 +13,11 @@ import httpx
 
 from open_notebook.ai.models import Model
 from open_notebook.course import state_machine as sm
-from open_notebook.course.contracts import CourseOutlineArtifact, ValidationFinding
+from open_notebook.course.contracts import (
+    ChapterArtifact,
+    CourseOutlineArtifact,
+    ValidationFinding,
+)
 from open_notebook.course.evidence_service import EvidenceInputError, EvidenceService
 from open_notebook.course.generation_service import (
     CourseGenerationService,
@@ -102,6 +106,137 @@ def _artifact_block_keys(artifact: dict[str, Any] | None) -> set[str]:
     for field in ("sections", "formulas", "worked_examples", "labs", "exercises"):
         keys.update(_artifact_keys(artifact, field))
     return keys
+
+
+def _extend_unique_anchor_ids(
+    target: list[str], seen: set[str], anchor_ids: list[str]
+) -> None:
+    """Append anchors once while preserving their first contract-defined position."""
+
+    for anchor_id in anchor_ids:
+        if anchor_id not in seen:
+            seen.add(anchor_id)
+            target.append(anchor_id)
+
+
+def _chapter_artifact_anchor_ids(artifact: ChapterArtifact) -> list[str]:
+    """Collect every evidence-bearing ChapterArtifact field in stable order."""
+
+    collected: list[str] = []
+    seen: set[str] = set()
+    _extend_unique_anchor_ids(collected, seen, artifact.citations)
+    _extend_unique_anchor_ids(
+        collected, seen, artifact.attributions.purpose.anchor_ids
+    )
+    for field_name in (
+        "prerequisites",
+        "objectives",
+        "definitions",
+        "misconceptions",
+        "pitfalls",
+        "quick_reference",
+    ):
+        for attribution in getattr(artifact.attributions, field_name):
+            _extend_unique_anchor_ids(collected, seen, attribution.anchor_ids)
+    for items in (
+        artifact.sections,
+        artifact.formulas,
+        artifact.worked_examples,
+        artifact.labs,
+        artifact.exercises,
+        artifact.physics_checks,
+    ):
+        for item in items:
+            _extend_unique_anchor_ids(collected, seen, item.anchor_ids)
+    return collected
+
+
+def _generated_chapter_artifact(chapter: Chapter) -> ChapterArtifact:
+    """Fail closed when a publication candidate is manual or malformed."""
+
+    if chapter.input_hash is None or chapter.artifact is None:
+        raise CourseConflictError(
+            "Chapter artifact is missing or invalid for generated publication"
+        )
+    try:
+        artifact = ChapterArtifact.model_validate(chapter.artifact)
+    except (TypeError, ValueError) as exc:
+        raise CourseConflictError(
+            "Chapter artifact is missing or invalid for generated publication"
+        ) from exc
+    if artifact.chapter_key != chapter.chapter_key:
+        raise CourseConflictError(
+            "Chapter artifact is missing or invalid for generated publication"
+        )
+    return artifact
+
+
+def _publishable_findings(rows: list[dict[str, Any]]) -> list[ValidationFinding]:
+    try:
+        findings = [ValidationFinding.model_validate(row["finding"]) for row in rows]
+        CourseGenerationService.assert_publishable(findings)
+    except (KeyError, TypeError, ValueError, PublicationBlocked) as exc:
+        raise CourseConflictError(
+            "Chapter has unresolved validation findings"
+        ) from exc
+    return sorted(
+        findings,
+        key=lambda finding: (
+            finding.item_key,
+            finding.kind,
+            finding.severity,
+            finding.status,
+            finding.message,
+        ),
+    )
+
+
+def _publication_anchor_ids(
+    *,
+    outline: CourseOutlineArtifact,
+    artifacts: list[ChapterArtifact],
+    findings: list[ValidationFinding],
+    chapter_keys: list[str],
+    include_concepts: bool,
+) -> list[str]:
+    collected: list[str] = []
+    seen: set[str] = set()
+    chapters_by_key = {chapter.key: chapter for chapter in outline.chapters}
+    for chapter_key in chapter_keys:
+        proposal = chapters_by_key[chapter_key]
+        _extend_unique_anchor_ids(collected, seen, proposal.anchor_ids)
+    if include_concepts:
+        for concept in outline.concepts:
+            _extend_unique_anchor_ids(collected, seen, concept.anchor_ids)
+    for artifact in artifacts:
+        _extend_unique_anchor_ids(
+            collected, seen, _chapter_artifact_anchor_ids(artifact)
+        )
+    for finding in findings:
+        _extend_unique_anchor_ids(collected, seen, finding.anchor_ids)
+    return collected
+
+
+async def _revalidate_publication_evidence(
+    *,
+    course_id: str,
+    version: CourseVersion,
+    outline: CourseOutlineArtifact,
+    anchor_ids: list[str],
+) -> Course:
+    """Reload Course ownership and use owned Source assets at the commit boundary."""
+
+    current_course = await CourseService.get_course(course_id)
+    try:
+        CourseWorkflowService.validate_approved_version(current_course, version)
+        await CourseWorkflowService().grounded_inputs(
+            course=current_course, anchor_ids=anchor_ids
+        )
+    except (EvidenceInputError, ValueError) as exc:
+        raise CourseConflictError(
+            "Evidence changed; rebuild evidence before publication"
+        ) from exc
+    return current_course
 
 
 async def _installed_ollama_models() -> set[str]:
@@ -680,15 +815,21 @@ class CourseService:
                 "chapter": ensure_record_id(chapter_id),
             },
         )
-        try:
-            findings = [
-                ValidationFinding.model_validate(row["finding"]) for row in rows
-            ]
-            CourseGenerationService.assert_publishable(findings)
-        except (KeyError, TypeError, ValueError, PublicationBlocked) as exc:
-            raise CourseConflictError(
-                "Chapter has unresolved validation findings"
-            ) from exc
+        findings = _publishable_findings(rows)
+        artifact = _generated_chapter_artifact(chapter)
+        anchor_ids = _publication_anchor_ids(
+            outline=outline,
+            artifacts=[artifact],
+            findings=findings,
+            chapter_keys=[chapter.chapter_key],
+            include_concepts=False,
+        )
+        await _revalidate_publication_evidence(
+            course_id=course_id,
+            version=version,
+            outline=outline,
+            anchor_ids=anchor_ids,
+        )
         chapter.status = sm.transition(
             "chapter", chapter.status, sm.ChapterStatus.PUBLISHED
         )
@@ -741,6 +882,22 @@ class CourseService:
         ):
             raise CourseConflictError("All chapters must be published first")
 
+        artifacts: list[ChapterArtifact] = []
+        findings: list[ValidationFinding] = []
+        for chapter in latest:
+            artifacts.append(_generated_chapter_artifact(chapter))
+            rows = await repo_query(
+                "SELECT * FROM course_validation_finding "
+                "WHERE course = $course AND course_version = $version "
+                "AND chapter = $chapter;",
+                {
+                    "course": ensure_record_id(version.course),
+                    "version": ensure_record_id(version_id),
+                    "chapter": ensure_record_id(str(chapter.id)),
+                },
+            )
+            findings.extend(_publishable_findings(rows))
+
         known_succeeded_run_ids = sorted(
             {
                 run_id
@@ -773,6 +930,20 @@ class CourseService:
             next_course_status = sm.transition(
                 "course", course.status, sm.CourseStatus.READY
             )
+
+        anchor_ids = _publication_anchor_ids(
+            outline=outline,
+            artifacts=artifacts,
+            findings=findings,
+            chapter_keys=sorted(expected_keys),
+            include_concepts=True,
+        )
+        await _revalidate_publication_evidence(
+            course_id=version.course,
+            version=version,
+            outline=outline,
+            anchor_ids=anchor_ids,
+        )
 
         try:
             await repo_query(

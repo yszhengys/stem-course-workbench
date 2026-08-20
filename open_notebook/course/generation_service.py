@@ -16,13 +16,18 @@ from pydantic import BaseModel
 from sympy import N, cos, limit, log, pi, sin, sqrt, sympify
 
 from .contracts import (
+    BoundaryPhysicsCheck,
     ChapterArtifact,
     CourseOutlineArtifact,
+    DirectionPhysicsCheck,
     ExerciseArtifact,
     GenerationRequest,
+    LimitPhysicsCheck,
     ModelSelection,
+    ReferenceFramePhysicsCheck,
     ReviewArtifact,
     ValidationFinding,
+    VectorPhysicsCheck,
     WorkedExampleArtifact,
 )
 from .evidence_service import EvidenceService
@@ -408,13 +413,6 @@ class CourseGenerationService:
             raise ValueError("Each core exercise requires exactly four hints in hierarchy")
         if any(not exercise.transfer_task.strip() for exercise in artifact.exercises):
             raise ValueError("Every exercise requires a transfer task")
-        has_ungrounded_item = (
-            any(not item.anchor_ids for item in artifact.sections)
-            or any(not item.anchor_ids for item in artifact.formulas)
-            or any(not item.anchor_ids for item in artifact.worked_examples)
-        )
-        if has_ungrounded_item:
-            raise ValueError("Grounded chapter items require evidence anchors")
 
     @staticmethod
     def _braced_group(value: str, start: int) -> tuple[str, int]:
@@ -607,15 +605,36 @@ class CourseGenerationService:
 
     @classmethod
     def validate_chapter(
-        cls, artifact: ChapterArtifact, known_anchor_ids: set[str]
+        cls,
+        artifact: ChapterArtifact,
+        known_anchor_ids: set[str],
+        *,
+        subject: str | None = None,
     ) -> list[ValidationFinding]:
         findings: list[ValidationFinding] = []
+        text_attributions = artifact.attributions
         cited_items: list[tuple[str, list[str]]] = [
+            ("purpose", text_attributions.purpose.anchor_ids),
+            *(
+                (f"{field_name}[{index}]", attribution.anchor_ids)
+                for field_name in (
+                    "prerequisites",
+                    "objectives",
+                    "definitions",
+                    "misconceptions",
+                    "pitfalls",
+                    "quick_reference",
+                )
+                for index, attribution in enumerate(
+                    getattr(text_attributions, field_name)
+                )
+            ),
             *((section.key, section.anchor_ids) for section in artifact.sections),
             *((formula.key, formula.anchor_ids) for formula in artifact.formulas),
             *((example.key, example.anchor_ids) for example in artifact.worked_examples),
             *((lab.key, lab.anchor_ids) for lab in artifact.labs),
             *((exercise.key, exercise.anchor_ids) for exercise in artifact.exercises),
+            *((check.key, check.anchor_ids) for check in artifact.physics_checks),
             (artifact.chapter_key, artifact.citations),
         ]
         for item_key, anchors in cited_items:
@@ -850,57 +869,85 @@ class CourseGenerationService:
                         message="Lab expressions must not contain assignments.",
                     )
                 )
-        return findings
-
-    @classmethod
-    def validate_physics_rules(
-        cls, rules: Iterable[Mapping[str, Any]]
-    ) -> list[ValidationFinding]:
-        findings: list[ValidationFinding] = []
-        for rule in rules:
-            key = str(rule.get("key", "physics"))
-            kind = rule.get("kind")
-            raw_anchor_ids = rule.get("anchor_ids", [])
-            anchor_ids = (
-                [anchor_id for anchor_id in raw_anchor_ids if isinstance(anchor_id, str)]
-                if isinstance(raw_anchor_ids, list)
-                else []
+        if (subject or "").strip().lower() == "physics" and not artifact.physics_checks:
+            findings.append(
+                ValidationFinding(
+                    kind="physics",
+                    severity="high",
+                    status="manual_check",
+                    item_key=artifact.chapter_key,
+                    anchor_ids=[],
+                    message="Physics chapters require explicit deterministic checks.",
+                )
             )
-            failed = False
+        for check in artifact.physics_checks:
+            if not set(check.anchor_ids).issubset(known_anchor_ids):
+                continue
             try:
-                if kind in {"direction", "reference_frame"}:
-                    failed = rule.get("actual") != rule.get("expected")
-                elif kind == "boundary":
-                    value = float(rule["value"])
-                    failed = not float(rule["minimum"]) <= value <= float(rule["maximum"])
-                elif kind == "limit":
-                    expression = cls._parse_safe_expression(str(rule["expression"]))
-                    variable = cls._parse_safe_expression(str(rule["variable"]))
-                    actual = limit(expression, variable, rule["point"])
-                    failed = not bool((actual - rule["expected"]).equals(0))
-                else:
-                    failed = True
+                mismatch = False
+                if isinstance(check, VectorPhysicsCheck):
+                    mismatch = any(
+                        not math.isclose(
+                            actual,
+                            expected,
+                            rel_tol=check.relative_tolerance,
+                            abs_tol=check.absolute_tolerance,
+                        )
+                        for actual, expected in zip(
+                            check.actual_components,
+                            check.expected_components,
+                            strict=True,
+                        )
+                    )
+                elif isinstance(check, DirectionPhysicsCheck):
+                    mismatch = check.actual != check.expected
+                elif isinstance(check, ReferenceFramePhysicsCheck):
+                    mismatch = check.actual.casefold() != check.expected.casefold()
+                elif isinstance(check, BoundaryPhysicsCheck):
+                    mismatch = not check.minimum <= check.value <= check.maximum
+                elif isinstance(check, LimitPhysicsCheck):
+                    expression = cls._parse_safe_expression(check.expression)
+                    variable = cls._parse_safe_expression(check.variable)
+                    directions = {
+                        "left": ("-",),
+                        "right": ("+",),
+                        "both": ("-", "+"),
+                    }[check.side]
+                    mismatch = any(
+                        not bool(
+                            (
+                                limit(
+                                    expression,
+                                    variable,
+                                    check.point,
+                                    dir=direction,
+                                )
+                                - check.expected
+                            ).equals(0)
+                        )
+                        for direction in directions
+                    )
             except Exception:
                 findings.append(
                     ValidationFinding(
                         kind="physics",
                         severity="high",
                         status="manual_check",
-                        item_key=key,
-                        anchor_ids=anchor_ids,
-                        message="Physics rule could not be evaluated.",
+                        item_key=check.key,
+                        anchor_ids=check.anchor_ids,
+                        message="Physics check could not be evaluated.",
                     )
                 )
                 continue
-            if failed:
+            if mismatch:
                 findings.append(
                     ValidationFinding(
                         kind="physics",
                         severity="error",
-                        status="open" if anchor_ids else "manual_check",
-                        item_key=key,
-                        anchor_ids=anchor_ids,
-                        message=f"Physics {kind} check failed.",
+                        status="open",
+                        item_key=check.key,
+                        anchor_ids=check.anchor_ids,
+                        message="Physics check does not match its expected result.",
                     )
                 )
         return findings

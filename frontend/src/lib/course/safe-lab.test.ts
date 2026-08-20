@@ -29,24 +29,24 @@ describe('safe Lab expression interpreter', () => {
   it('enforces expression, control and total sample limits', () => {
     const valid = validateLabSpec({
       kind: 'function_plot', key: 'plot', title: 'Plot', anchor_ids: [],
-      expressions: ['x'], domain: { x: [-1, 1] }, controls: [], objects: [],
+      provenance: 'pedagogical', expressions: ['x'], domain: { x: [-1, 1] }, controls: [], objects: [],
     })
     expect(sampleLab(valid).totalSamples).toBeLessThanOrEqual(1000)
 
     expect(() => validateLabSpec({
       kind: 'function_plot', key: 'plot', title: 'Plot', anchor_ids: [],
-      expressions: Array.from({ length: 9 }, () => 'x'),
+      provenance: 'pedagogical', expressions: Array.from({ length: 9 }, () => 'x'),
       domain: { x: [-1, 1] }, controls: [], objects: [],
     })).toThrow()
 
     expect(() => validateLabSpec({
       kind: 'parametric_curve', key: 'curve', title: 'Curve', anchor_ids: [],
-      expressions: ['t'], domain: { t: [0, 1] }, controls: [], objects: [],
+      provenance: 'pedagogical', expressions: ['t'], domain: { t: [0, 1] }, controls: [], objects: [],
     })).toThrow(/two expressions/)
 
     expect(() => validateLabSpec({
       kind: 'geometry', key: 'geometry', title: 'Geometry', anchor_ids: [],
-      expressions: [], domain: {}, controls: [],
+      provenance: 'pedagogical', expressions: [], domain: {}, controls: [],
       objects: [{ type: 'point', x: 1_000_001, y: 0 }],
     })).toThrow(/safe range/)
   })

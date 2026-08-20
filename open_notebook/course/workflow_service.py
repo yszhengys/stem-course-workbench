@@ -1241,7 +1241,7 @@ class CourseWorkflowService:
                     prompt_version=prompt_version,
                 )
             findings = reviewed.findings + self.generation.validate_chapter(
-                artifact, set(anchor_ids)
+                artifact, set(anchor_ids), subject=course.subject
             )
             unique: dict[str, ValidationFinding] = {}
             for finding in findings:

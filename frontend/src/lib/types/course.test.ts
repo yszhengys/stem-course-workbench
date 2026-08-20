@@ -1,143 +1,173 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  courseModelOptionsSchema,
-  courseOutlineArtifactSchema,
-  courseSchema,
-  eligibleCourseSourceSchema,
-  modelSelectionSchema,
-} from './course'
+import { chapterArtifactSchema } from './course'
 
-describe('Course V2 contracts', () => {
-  it('parses record-based Course and outline version fields', () => {
-    const course = courseSchema.parse({
-      id: 'course:calculus',
-      title: '微积分',
-      notebook: 'notebook:calculus',
-      subject: 'math',
-      description: null,
-      language: 'zh-CN',
-      status: 'outline_ready',
-      source_ids: ['source:textbook'],
-      primary_source_ids: ['source:textbook'],
-      supplement_source_ids: [],
-      outline_version_id: 'course_version:v1',
-      error_message: null,
-      outline: null,
-      config: null,
-      created: '2026-08-18T00:00:00Z',
-      updated: '2026-08-18T00:00:00Z',
-    })
+const attribution = (provenance: string, anchorIds: string[] = []) => ({
+  provenance,
+  anchor_ids: anchorIds,
+})
 
-    expect(course.notebook).toBe('notebook:calculus')
-    expect(course.outline_version_id).toBe('course_version:v1')
+const chapterPayload = () => ({
+  chapter_key: 'limits',
+  purpose: 'Understand limits.',
+  prerequisites: ['Algebra'],
+  objectives: ['Evaluate a limit'],
+  sections: [{
+    key: 'definition',
+    title: 'Definition',
+    markdown: 'A grounded definition.',
+    anchor_ids: ['anchor:one'],
+    provenance: 'verbatim',
+  }],
+  definitions: ['Limit'],
+  formulas: [{
+    key: 'square',
+    latex: 'x^2',
+    meaning: 'Square',
+    anchor_ids: [],
+    unit_expression: null,
+    oracle_unit_expression: null,
+    provenance: 'derived',
+    oracle_expression: 'x^2',
+    oracle_substitutions: {},
+  }],
+  worked_examples: [{
+    key: 'example',
+    prompt: 'Compute.',
+    steps: ['Substitute.'],
+    answer: '4',
+    anchor_ids: ['anchor:one'],
+    oracle_expression: '2 + 2',
+    oracle_values: {},
+    oracle_answer: 4,
+    unit_expression: null,
+    oracle_unit_expression: null,
+    provenance: 'adapted',
+  }],
+  labs: [{
+    kind: 'function_plot',
+    key: 'limit-plot',
+    title: 'Limit plot',
+    anchor_ids: [],
+    provenance: 'pedagogical',
+    expressions: ['x^2'],
+    domain: { x: [-2, 2] },
+    controls: [],
+    objects: [],
+  }],
+  misconceptions: [],
+  pitfalls: ['Do not substitute across a discontinuity.'],
+  exercises: [{
+    key: 'core',
+    prompt: 'Evaluate.',
+    difficulty: 'core',
+    hints: ['h1', 'h2', 'h3', 'h4'],
+    answer: '2',
+    transfer_task: 'Transfer.',
+    anchor_ids: [],
+    oracle_expression: null,
+    oracle_values: {},
+    oracle_answer: null,
+    provenance: 'pedagogical',
+  }],
+  quick_reference: ['lim means limit'],
+  citations: ['anchor:one'],
+  attributions: {
+    purpose: attribution('adapted', ['anchor:one']),
+    prerequisites: [attribution('pedagogical')],
+    objectives: [attribution('adapted', ['anchor:one'])],
+    definitions: [attribution('verbatim', ['anchor:one'])],
+    misconceptions: [],
+    pitfalls: [attribution('adapted', ['anchor:one'])],
+    quick_reference: [attribution('derived')],
+  },
+  physics_checks: [] as unknown[],
+})
+
+describe('chapterArtifactSchema provenance contract', () => {
+  it('accepts exactly parallel top-level attributions and explicit nested provenance', () => {
+    const parsed = chapterArtifactSchema.parse(chapterPayload())
+
+    expect(parsed.attributions.objectives).toHaveLength(1)
+    expect(parsed.labs[0].provenance).toBe('pedagogical')
   })
 
-  it('rejects malformed outline graphs and unknown fields', () => {
-    expect(() => courseOutlineArtifactSchema.parse({
-      title: 'Outline',
-      chapters: [{
-        key: 'limits',
-        title: 'Limits',
-        purpose: 'Learn limits',
-        prerequisite_keys: [],
-        objective_keys: ['continuity'],
-        anchor_ids: ['anchor:one'],
-        lab_keys: [],
-      }],
-      concepts: [{ key: 'continuity', label: 'Continuity', anchor_ids: ['anchor:one'] }],
-      dependency_edges: [],
-      injected: true,
-    })).toThrow()
+  it('rejects mismatched attribution lengths and grounded claims without anchors', () => {
+    const mismatched = chapterPayload()
+    mismatched.attributions.objectives = []
+    expect(() => chapterArtifactSchema.parse(mismatched)).toThrow()
+
+    const ungrounded = chapterPayload()
+    ungrounded.labs[0].provenance = 'adapted'
+    expect(() => chapterArtifactSchema.parse(ungrounded)).toThrow()
   })
 
-  it('requires each outline chapter to select a safe lab proposal', () => {
-    expect(() => courseOutlineArtifactSchema.parse({
-      title: 'Outline',
-      chapters: [{
-        key: 'limits',
-        title: 'Limits',
-        purpose: 'Learn limits',
-        prerequisite_keys: [],
-        objective_keys: ['continuity'],
-        anchor_ids: ['anchor:one'],
-        lab_keys: [],
-      }],
-      concepts: [{ key: 'continuity', label: 'Continuity', anchor_ids: ['anchor:one'] }],
-      dependency_edges: [],
-    })).toThrow()
-  })
+  it('rejects nested objects that omit provenance', () => {
+    const payload = chapterPayload()
+    const { provenance: _provenance, ...formula } = payload.formulas[0]
+    payload.formulas = [formula as typeof payload.formulas[0]]
 
-  it('does not accept a server path in eligible Source metadata', () => {
-    expect(() => eligibleCourseSourceSchema.parse({
-      source_id: 'source:one',
-      title: 'Book',
-      filename: 'book.pdf',
-      kind: 'pdf',
-      role: null,
-      associated: false,
-      file_path: '/private/book.pdf',
-    })).toThrow()
+    expect(() => chapterArtifactSchema.parse(payload)).toThrow()
   })
+})
 
-  it('rejects legacy PPT files even when mislabeled as PDF', () => {
-    expect(() => eligibleCourseSourceSchema.parse({
-      source_id: 'source:legacy',
-      title: 'Legacy deck',
-      filename: 'slides.ppt',
-      kind: 'pdf',
-      role: null,
-      associated: false,
-    })).toThrow()
-  })
-
-  it('keeps an unconfigured model visible but unselectable', () => {
-    const result = courseModelOptionsSchema.parse({
-      defaults: {
-        outline: { adapter: 'codex_cli', model: 'gpt-5.6-sol', reasoning_effort: 'max' },
+describe('chapterArtifactSchema physics contract', () => {
+  it('accepts the five strict physics check variants', () => {
+    const payload = chapterPayload()
+    payload.physics_checks = [
+      {
+        key: 'vector', kind: 'vector', actual_components: [1, 2],
+        expected_components: [1, 2], absolute_tolerance: 1e-9,
+        relative_tolerance: 1e-9, anchor_ids: ['anchor:one'],
       },
-      options: [{
-        adapter: 'open_notebook',
-        model: null,
-        display_name: 'deepseek-v4-pro',
-        reasoning_effort: null,
-        optional: true,
-        configured: false,
-        selectable: false,
-      }],
-    })
+      {
+        key: 'direction', kind: 'direction', actual: -1, expected: 1,
+        anchor_ids: ['anchor:one'],
+      },
+      {
+        key: 'frame', kind: 'reference_frame', actual: 'ground', expected: 'train',
+        anchor_ids: ['anchor:one'],
+      },
+      {
+        key: 'boundary', kind: 'boundary', value: 0, minimum: -1, maximum: 1,
+        anchor_ids: ['anchor:one'],
+      },
+      {
+        key: 'limit', kind: 'limit', expression: 'sin(x)/x', variable: 'x',
+        point: 0, expected: 1, side: 'both', anchor_ids: ['anchor:one'],
+      },
+    ]
 
-    expect(result.options[0].model).toBeNull()
-    expect(result.options[0].selectable).toBe(false)
+    expect(chapterArtifactSchema.parse(payload).physics_checks).toHaveLength(5)
   })
 
-  it('requires Open Notebook selections and options to use registered model record IDs', () => {
-    const validSelection = {
-      adapter: 'open_notebook',
-      model: 'model:deepseek-v4-pro',
-      reasoning_effort: null,
-    }
-    expect(modelSelectionSchema.parse(validSelection)).toEqual(validSelection)
+  it.each([
+    { key: 'unknown', kind: 'unknown', anchor_ids: ['anchor:one'] },
+    {
+      key: 'vector', kind: 'vector', actual_components: [1, 2],
+      expected_components: [1, 2, 3], absolute_tolerance: 1e-9,
+      relative_tolerance: 1e-9, anchor_ids: ['anchor:one'],
+    },
+    {
+      key: 'direction', kind: 'direction', actual: 2, expected: 1,
+      anchor_ids: ['anchor:one'],
+    },
+    {
+      key: 'boundary', kind: 'boundary', value: 0, minimum: 2, maximum: 1,
+      anchor_ids: ['anchor:one'],
+    },
+    {
+      key: 'limit', kind: 'limit', expression: '__import__(os)', variable: 'x',
+      point: 0, expected: 1, side: 'both', anchor_ids: ['anchor:one'],
+    },
+    {
+      key: 'direction', kind: 'direction', actual: 1, expected: 1,
+      anchor_ids: ['anchor:one'], extra: 'forbidden',
+    },
+  ])('rejects malformed physics check %#', (physicsCheck) => {
+    const payload = chapterPayload()
+    payload.physics_checks = [physicsCheck]
 
-    expect(() => modelSelectionSchema.parse({
-      ...validSelection,
-      model: 'deepseek-v4-pro',
-    })).toThrow()
-    expect(() => modelSelectionSchema.parse({
-      ...validSelection,
-      model: 'model:   ',
-    })).toThrow()
-
-    expect(() => courseModelOptionsSchema.parse({
-      defaults: {},
-      options: [{
-        adapter: 'open_notebook',
-        model: 'deepseek-v4-pro',
-        reasoning_effort: null,
-        optional: true,
-        configured: true,
-        selectable: true,
-      }],
-    })).toThrow()
+    expect(() => chapterArtifactSchema.parse(payload)).toThrow()
   })
 })

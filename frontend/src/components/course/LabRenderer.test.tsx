@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { LabRenderer } from './LabRenderer'
 
 const base = {
-  key: 'lab', title: 'Lab', anchor_ids: [], controls: [], objects: [],
+  key: 'lab', title: 'Lab', anchor_ids: [], provenance: 'pedagogical', controls: [], objects: [],
 }
 
 describe('LabRenderer', () => {

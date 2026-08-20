@@ -24,6 +24,7 @@ class CourseContract(BaseModel):
 ProvenanceLabel: TypeAlias = Literal[
     "verbatim", "adapted", "derived", "pedagogical", "补充"
 ]
+GROUNDED_PROVENANCE_LABELS = frozenset({"verbatim", "adapted", "补充"})
 
 _COMMONMARK_FENCE = re.compile(r"(?m)^[ \t]{0,3}(?:`{3,}|~{3,})")
 _ANGLE_TOKEN = re.compile(r"<[^<>\r\n]+>")
@@ -35,6 +36,7 @@ _MATH_INNER_PRODUCT = re.compile(
 _MATH_FUNCTION_VALUE = re.compile(
     r"[A-Za-z][A-Za-z0-9_]*\([A-Za-z0-9_+*/^.,|\- \t]*\)"
 )
+_SAFE_PHYSICS_EXPRESSION = re.compile(r"[A-Za-z0-9_+\-*/^()., \t]+")
 
 
 def _is_math_angle_token(token: str) -> bool:
@@ -225,14 +227,37 @@ class CourseOutlineArtifact(CourseContract):
         return self
 
 
-class FormulaArtifact(CourseContract):
+class ProvenancedArtifact(CourseContract):
+    anchor_ids: list[str] = Field(max_length=100)
+    provenance: ProvenanceLabel
+
+    @model_validator(mode="after")
+    def grounded_claim_has_anchor(self) -> "ProvenancedArtifact":
+        if self.provenance in GROUNDED_PROVENANCE_LABELS and not self.anchor_ids:
+            raise ValueError("grounded provenance requires at least one evidence anchor")
+        return self
+
+
+class ChapterTextAttribution(ProvenancedArtifact):
+    """Provenance for one rendered top-level chapter string."""
+
+
+class ChapterTextAttributions(CourseContract):
+    purpose: ChapterTextAttribution
+    prerequisites: list[ChapterTextAttribution] = Field(max_length=100)
+    objectives: list[ChapterTextAttribution] = Field(max_length=100)
+    definitions: list[ChapterTextAttribution] = Field(max_length=100)
+    misconceptions: list[ChapterTextAttribution] = Field(max_length=100)
+    pitfalls: list[ChapterTextAttribution] = Field(max_length=100)
+    quick_reference: list[ChapterTextAttribution] = Field(max_length=100)
+
+
+class FormulaArtifact(ProvenancedArtifact):
     key: str = Field(min_length=1, max_length=100)
     latex: str = Field(min_length=1, max_length=4000)
     meaning: str = Field(min_length=1, max_length=2000)
-    anchor_ids: list[str] = Field(min_length=1, max_length=100)
     unit_expression: str | None = Field(default=None, max_length=500)
     oracle_unit_expression: str | None = Field(default=None, max_length=500)
-    provenance: ProvenanceLabel = "derived"
     oracle_expression: str | None = Field(default=None, max_length=1000)
     oracle_substitutions: dict[str, FiniteFloat] = Field(
         default_factory=dict, max_length=20
@@ -244,18 +269,16 @@ class FormulaArtifact(CourseContract):
     )(_validate_optional_generated_text)
 
 
-class WorkedExampleArtifact(CourseContract):
+class WorkedExampleArtifact(ProvenancedArtifact):
     key: str = Field(min_length=1, max_length=100)
     prompt: str = Field(min_length=1, max_length=4000)
     steps: list[str] = Field(min_length=1, max_length=50)
     answer: str = Field(min_length=1, max_length=4000)
-    anchor_ids: list[str] = Field(default_factory=list, max_length=100)
     oracle_expression: str | None = Field(default=None, max_length=1000)
     oracle_values: dict[str, FiniteFloat] = Field(default_factory=dict, max_length=20)
     oracle_answer: FiniteFloat | None = None
     unit_expression: str | None = Field(default=None, max_length=500)
     oracle_unit_expression: str | None = Field(default=None, max_length=500)
-    provenance: ProvenanceLabel = "derived"
 
     _safe_text = field_validator("prompt", "answer")(_validate_generated_text)
     _safe_steps = field_validator("steps")(_validate_generated_texts)
@@ -264,18 +287,16 @@ class WorkedExampleArtifact(CourseContract):
     )(_validate_optional_generated_text)
 
 
-class ExerciseArtifact(CourseContract):
+class ExerciseArtifact(ProvenancedArtifact):
     key: str = Field(min_length=1, max_length=100)
     prompt: str = Field(min_length=1, max_length=4000)
     difficulty: Literal["core", "challenge"]
     hints: list[str] = Field(default_factory=list, max_length=5)
     answer: str = Field(min_length=1, max_length=4000)
     transfer_task: str = Field(min_length=1, max_length=4000)
-    anchor_ids: list[str] = Field(default_factory=list, max_length=100)
     oracle_expression: str | None = Field(default=None, max_length=1000)
     oracle_values: dict[str, FiniteFloat] = Field(default_factory=dict, max_length=20)
     oracle_answer: FiniteFloat | None = None
-    provenance: ProvenanceLabel = "pedagogical"
 
     _safe_text = field_validator(
         "prompt", "answer", "transfer_task"
@@ -331,7 +352,7 @@ class LabControl(CourseContract):
         return _validate_optional_generated_text(value)
 
 
-class LabSpec(CourseContract):
+class LabSpec(ProvenancedArtifact):
     """Common bounded, declarative lab payload; never contains executable code."""
 
     kind: Literal[
@@ -339,7 +360,6 @@ class LabSpec(CourseContract):
     ]
     key: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=300)
-    anchor_ids: list[str] = Field(default_factory=list, max_length=100)
     expressions: list[str] = Field(default_factory=list, max_length=8)
     domain: dict[str, tuple[float, float]] = Field(default_factory=dict, max_length=8)
     controls: list[LabControl] = Field(default_factory=list, max_length=8)
@@ -426,12 +446,92 @@ LabSpecVariant: TypeAlias = Annotated[
 ]
 
 
-class ChapterSection(CourseContract):
+class PhysicsCheck(CourseContract):
+    key: str = Field(min_length=1, max_length=100)
+    anchor_ids: list[str] = Field(min_length=1, max_length=100)
+
+
+class VectorPhysicsCheck(PhysicsCheck):
+    kind: Literal["vector"] = "vector"
+    actual_components: list[FiniteFloat] = Field(min_length=2, max_length=3)
+    expected_components: list[FiniteFloat] = Field(min_length=2, max_length=3)
+    absolute_tolerance: FiniteFloat = Field(ge=0, le=1)
+    relative_tolerance: FiniteFloat = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def vectors_have_same_dimension(self) -> "VectorPhysicsCheck":
+        if len(self.actual_components) != len(self.expected_components):
+            raise ValueError("physics vectors must have the same dimension")
+        return self
+
+
+class DirectionPhysicsCheck(PhysicsCheck):
+    kind: Literal["direction"] = "direction"
+    actual: Literal[-1, 0, 1]
+    expected: Literal[-1, 0, 1]
+
+
+class ReferenceFramePhysicsCheck(PhysicsCheck):
+    kind: Literal["reference_frame"] = "reference_frame"
+    actual: str = Field(min_length=1, max_length=200)
+    expected: str = Field(min_length=1, max_length=200)
+
+    @field_validator("actual", "expected")
+    @classmethod
+    def frame_is_normalized_and_safe(cls, value: str) -> str:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        if not normalized:
+            raise ValueError("reference frame must not be blank")
+        return _validate_generated_text(normalized)
+
+
+class BoundaryPhysicsCheck(PhysicsCheck):
+    kind: Literal["boundary"] = "boundary"
+    value: FiniteFloat
+    minimum: FiniteFloat
+    maximum: FiniteFloat
+
+    @model_validator(mode="after")
+    def interval_is_closed_and_ordered(self) -> "BoundaryPhysicsCheck":
+        if self.minimum > self.maximum:
+            raise ValueError("physics boundary interval is invalid")
+        return self
+
+
+class LimitPhysicsCheck(PhysicsCheck):
+    kind: Literal["limit"] = "limit"
+    expression: str = Field(min_length=1, max_length=1000)
+    variable: str = Field(pattern=r"^[A-Za-z]$")
+    point: FiniteFloat
+    expected: FiniteFloat
+    side: Literal["left", "right", "both"]
+
+    @field_validator("expression")
+    @classmethod
+    def expression_uses_safe_subset(cls, value: str) -> str:
+        _validate_generated_text(value)
+        if "__" in value or not _SAFE_PHYSICS_EXPRESSION.fullmatch(value):
+            raise ValueError("physics limit expression is unsafe")
+        return value
+
+
+PhysicsCheckVariant: TypeAlias = Annotated[
+    Union[
+        VectorPhysicsCheck,
+        DirectionPhysicsCheck,
+        ReferenceFramePhysicsCheck,
+        BoundaryPhysicsCheck,
+        LimitPhysicsCheck,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+class ChapterSection(ProvenancedArtifact):
     key: str = Field(min_length=1, max_length=100)
     title: str = Field(min_length=1, max_length=300)
     markdown: str = Field(min_length=1, max_length=100_000)
-    anchor_ids: list[str] = Field(min_length=1, max_length=200)
-    provenance: ProvenanceLabel = "derived"
+    anchor_ids: list[str] = Field(max_length=200)
 
     @field_validator("markdown")
     @classmethod
@@ -456,6 +556,10 @@ class ChapterArtifact(CourseContract):
     exercises: list[ExerciseArtifact] = Field(default_factory=list, max_length=200)
     quick_reference: list[str] = Field(default_factory=list, max_length=100)
     citations: list[str] = Field(default_factory=list, max_length=500)
+    attributions: ChapterTextAttributions
+    physics_checks: list[PhysicsCheckVariant] = Field(
+        default_factory=list, max_length=100
+    )
 
     _safe_purpose = field_validator("purpose")(_validate_generated_text)
     _safe_text_lists = field_validator(
@@ -466,6 +570,24 @@ class ChapterArtifact(CourseContract):
         "pitfalls",
         "quick_reference",
     )(_validate_generated_texts)
+
+    @model_validator(mode="after")
+    def text_attributions_are_parallel(self) -> "ChapterArtifact":
+        for field_name in (
+            "prerequisites",
+            "objectives",
+            "definitions",
+            "misconceptions",
+            "pitfalls",
+            "quick_reference",
+        ):
+            rendered = getattr(self, field_name)
+            attributions = getattr(self.attributions, field_name)
+            if len(rendered) != len(attributions):
+                raise ValueError(
+                    f"{field_name} attributions must match rendered values exactly"
+                )
+        return self
 
 
 class ValidationFinding(CourseContract):

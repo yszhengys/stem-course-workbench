@@ -5,6 +5,21 @@ const recordId = z.string().min(3).refine((value) => value.includes(':'), {
 })
 const timestamp = z.string().nullable().optional()
 const finiteNumber = z.number().finite()
+const provenanceSchema = z.enum(['verbatim', 'adapted', 'derived', 'pedagogical', '补充'])
+const groundedProvenance = new Set(['verbatim', 'adapted', '补充'])
+
+function validateProvenance(
+  value: { provenance: string; anchor_ids: string[] },
+  context: z.RefinementCtx,
+): void {
+  if (groundedProvenance.has(value.provenance) && value.anchor_ids.length === 0) {
+    context.addIssue({
+      code: 'custom',
+      path: ['anchor_ids'],
+      message: 'Grounded provenance requires at least one evidence anchor',
+    })
+  }
+}
 
 export const sourceRoleSchema = z.enum(['PRIMARY', 'SUPPLEMENT'])
 export type SourceRole = z.infer<typeof sourceRoleSchema>
@@ -192,7 +207,8 @@ const labObjectsSchema = z.array(z.record(z.string(), z.unknown())).max(8).super
 const labBase = {
   key: z.string().min(1).max(100),
   title: z.string().min(1).max(300),
-  anchor_ids: z.array(z.string()).max(100),
+  anchor_ids: z.array(z.string().min(1)).max(100),
+  provenance: provenanceSchema,
   expressions: z.array(z.string().min(1).max(500)).max(8),
   domain: labDomainSchema,
   controls: z.array(labControlSchema).max(8),
@@ -206,6 +222,7 @@ export const labSpecSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('geometry'), ...labBase }).strict(),
   z.object({ kind: z.literal('kinematics'), ...labBase }).strict(),
 ]).superRefine((spec, context) => {
+  validateProvenance(spec, context)
   const count = spec.expressions.length
   if (spec.kind === 'function_plot' && count < 1) {
     context.addIssue({ code: 'custom', path: ['expressions'], message: 'A function plot requires at least one expression' })
@@ -224,50 +241,167 @@ export const labSpecSchema = z.discriminatedUnion('kind', [
 export type LabSpec = z.infer<typeof labSpecSchema>
 
 export const chapterSectionSchema = z.object({
-  key: z.string().min(1),
-  title: z.string().min(1),
-  markdown: z.string().min(1),
-  anchor_ids: z.array(z.string()).min(1),
-  provenance: z.enum(['verbatim', 'adapted', 'derived', 'pedagogical', '补充']),
-}).strict()
+  key: z.string().min(1).max(100),
+  title: z.string().min(1).max(300),
+  markdown: z.string().min(1).max(100_000),
+  anchor_ids: z.array(z.string().min(1)).max(200),
+  provenance: provenanceSchema,
+}).strict().superRefine(validateProvenance)
 
 const formulaSchema = z.object({
-  key: z.string(), latex: z.string(), meaning: z.string(), anchor_ids: z.array(z.string()),
-  unit_expression: z.string().nullable(), oracle_unit_expression: z.string().nullable(),
-  provenance: z.string(), oracle_expression: z.string().nullable(),
+  key: z.string().min(1).max(100),
+  latex: z.string().min(1).max(4000),
+  meaning: z.string().min(1).max(2000),
+  anchor_ids: z.array(z.string().min(1)).max(100),
+  unit_expression: z.string().max(500).nullable(),
+  oracle_unit_expression: z.string().max(500).nullable(),
+  provenance: provenanceSchema,
+  oracle_expression: z.string().max(1000).nullable(),
   oracle_substitutions: z.record(z.string(), finiteNumber),
-}).strict()
+}).strict().superRefine(validateProvenance)
 const workedExampleSchema = z.object({
-  key: z.string(), prompt: z.string(), steps: z.array(z.string()), answer: z.string(),
-  anchor_ids: z.array(z.string()), oracle_expression: z.string().nullable(),
+  key: z.string().min(1).max(100),
+  prompt: z.string().min(1).max(4000),
+  steps: z.array(z.string()).min(1).max(50),
+  answer: z.string().min(1).max(4000),
+  anchor_ids: z.array(z.string().min(1)).max(100),
+  oracle_expression: z.string().max(1000).nullable(),
   oracle_values: z.record(z.string(), finiteNumber), oracle_answer: finiteNumber.nullable(),
-  unit_expression: z.string().nullable(), oracle_unit_expression: z.string().nullable(),
-  provenance: z.string(),
-}).strict()
+  unit_expression: z.string().max(500).nullable(),
+  oracle_unit_expression: z.string().max(500).nullable(),
+  provenance: provenanceSchema,
+}).strict().superRefine(validateProvenance)
 const exerciseSchema = z.object({
-  key: z.string(), prompt: z.string(), difficulty: z.enum(['core', 'challenge']),
-  hints: z.array(z.string()), answer: z.string(), transfer_task: z.string(),
-  anchor_ids: z.array(z.string()), oracle_expression: z.string().nullable(),
+  key: z.string().min(1).max(100),
+  prompt: z.string().min(1).max(4000),
+  difficulty: z.enum(['core', 'challenge']),
+  hints: z.array(z.string()).max(5),
+  answer: z.string().min(1).max(4000),
+  transfer_task: z.string().min(1).max(4000),
+  anchor_ids: z.array(z.string().min(1)).max(100),
+  oracle_expression: z.string().max(1000).nullable(),
   oracle_values: z.record(z.string(), finiteNumber), oracle_answer: finiteNumber.nullable(),
-  provenance: z.string(),
+  provenance: provenanceSchema,
+}).strict().superRefine(validateProvenance)
+
+const chapterTextAttributionSchema = z.object({
+  anchor_ids: z.array(z.string().min(1)).max(100),
+  provenance: provenanceSchema,
+}).strict().superRefine(validateProvenance)
+
+const chapterTextAttributionsSchema = z.object({
+  purpose: chapterTextAttributionSchema,
+  prerequisites: z.array(chapterTextAttributionSchema).max(100),
+  objectives: z.array(chapterTextAttributionSchema).max(100),
+  definitions: z.array(chapterTextAttributionSchema).max(100),
+  misconceptions: z.array(chapterTextAttributionSchema).max(100),
+  pitfalls: z.array(chapterTextAttributionSchema).max(100),
+  quick_reference: z.array(chapterTextAttributionSchema).max(100),
 }).strict()
 
+const physicsCheckBase = {
+  key: z.string().min(1).max(100),
+  anchor_ids: z.array(z.string().min(1)).min(1).max(100),
+}
+
+const safePhysicsExpression = z.string().min(1).max(1000).refine(
+  (value) => !value.includes('__') && /^[A-Za-z0-9_+\-*/^()., \t]+$/.test(value),
+  'Physics limit expression is unsafe',
+)
+
+export const physicsCheckSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('vector'),
+    ...physicsCheckBase,
+    actual_components: z.array(finiteNumber).min(2).max(3),
+    expected_components: z.array(finiteNumber).min(2).max(3),
+    absolute_tolerance: finiteNumber.min(0).max(1),
+    relative_tolerance: finiteNumber.min(0).max(1),
+  }).strict(),
+  z.object({
+    kind: z.literal('direction'),
+    ...physicsCheckBase,
+    actual: z.union([z.literal(-1), z.literal(0), z.literal(1)]),
+    expected: z.union([z.literal(-1), z.literal(0), z.literal(1)]),
+  }).strict(),
+  z.object({
+    kind: z.literal('reference_frame'),
+    ...physicsCheckBase,
+    actual: z.string().trim().min(1).max(200),
+    expected: z.string().trim().min(1).max(200),
+  }).strict(),
+  z.object({
+    kind: z.literal('boundary'),
+    ...physicsCheckBase,
+    value: finiteNumber,
+    minimum: finiteNumber,
+    maximum: finiteNumber,
+  }).strict(),
+  z.object({
+    kind: z.literal('limit'),
+    ...physicsCheckBase,
+    expression: safePhysicsExpression,
+    variable: z.string().regex(/^[A-Za-z]$/),
+    point: finiteNumber,
+    expected: finiteNumber,
+    side: z.enum(['left', 'right', 'both']),
+  }).strict(),
+]).superRefine((check, context) => {
+  if (
+    check.kind === 'vector'
+    && check.actual_components.length !== check.expected_components.length
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['expected_components'],
+      message: 'Physics vectors must have the same dimension',
+    })
+  }
+  if (check.kind === 'boundary' && check.minimum > check.maximum) {
+    context.addIssue({
+      code: 'custom',
+      path: ['maximum'],
+      message: 'Physics boundary interval is invalid',
+    })
+  }
+})
+
 export const chapterArtifactSchema = z.object({
-  chapter_key: z.string().min(1),
-  purpose: z.string().min(1),
-  prerequisites: z.array(z.string()),
-  objectives: z.array(z.string()).min(1),
-  sections: z.array(chapterSectionSchema).min(1),
-  definitions: z.array(z.string()),
-  formulas: z.array(formulaSchema),
-  worked_examples: z.array(workedExampleSchema),
-  labs: z.array(labSpecSchema),
-  misconceptions: z.array(z.string()),
-  pitfalls: z.array(z.string()),
-  exercises: z.array(exerciseSchema),
-  quick_reference: z.array(z.string()),
-  citations: z.array(z.string()),
-}).strict()
+  chapter_key: z.string().min(1).max(100),
+  purpose: z.string().min(1).max(4000),
+  prerequisites: z.array(z.string()).max(100),
+  objectives: z.array(z.string()).min(1).max(100),
+  sections: z.array(chapterSectionSchema).min(1).max(100),
+  definitions: z.array(z.string()).max(100),
+  formulas: z.array(formulaSchema).max(100),
+  worked_examples: z.array(workedExampleSchema).max(100),
+  labs: z.array(labSpecSchema).max(20),
+  misconceptions: z.array(z.string()).max(100),
+  pitfalls: z.array(z.string()).max(100),
+  exercises: z.array(exerciseSchema).max(200),
+  quick_reference: z.array(z.string()).max(100),
+  citations: z.array(z.string()).max(500),
+  attributions: chapterTextAttributionsSchema,
+  physics_checks: z.array(physicsCheckSchema).max(100),
+}).strict().superRefine((artifact, context) => {
+  const parallelFields = [
+    'prerequisites',
+    'objectives',
+    'definitions',
+    'misconceptions',
+    'pitfalls',
+    'quick_reference',
+  ] as const
+  for (const field of parallelFields) {
+    if (artifact[field].length !== artifact.attributions[field].length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['attributions', field],
+        message: `${field} attributions must match rendered values exactly`,
+      })
+    }
+  }
+})
 export type ChapterArtifact = z.infer<typeof chapterArtifactSchema>
 
 export const chapterSchema = z.object({

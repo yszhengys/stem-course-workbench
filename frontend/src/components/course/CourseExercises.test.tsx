@@ -14,7 +14,7 @@ const exercise = {
   oracle_expression: null,
   oracle_values: {},
   oracle_answer: null,
-  provenance: 'derived',
+  provenance: 'derived' as const,
 }
 
 describe('CourseExercises', () => {

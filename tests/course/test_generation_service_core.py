@@ -1,3 +1,4 @@
+import copy
 import hashlib
 from pathlib import Path
 
@@ -103,6 +104,8 @@ def _chapter() -> ChapterArtifact:
             FunctionPlotLabSpec(
                 key="limit-plot",
                 title="Limit plot",
+                anchor_ids=[],
+                provenance="pedagogical",
                 expressions=["x^2"],
                 domain={"x": (-2, 2)},
             )
@@ -122,7 +125,75 @@ def _chapter() -> ChapterArtifact:
         ],
         quick_reference=["lim means limit"],
         citations=["anchor:one"],
+        attributions=_chapter_text_attributions(),
     )
+
+
+def _chapter_text_attributions() -> dict[str, object]:
+    return {
+        "purpose": {"provenance": "adapted", "anchor_ids": ["anchor:one"]},
+        "prerequisites": [
+            {"provenance": "pedagogical", "anchor_ids": []}
+        ],
+        "objectives": [
+            {"provenance": "adapted", "anchor_ids": ["anchor:one"]}
+        ],
+        "definitions": [
+            {"provenance": "verbatim", "anchor_ids": ["anchor:one"]}
+        ],
+        "misconceptions": [],
+        "pitfalls": [
+            {"provenance": "adapted", "anchor_ids": ["anchor:one"]}
+        ],
+        "quick_reference": [
+            {"provenance": "derived", "anchor_ids": []}
+        ],
+    }
+
+
+def test_chapter_attributions_are_parallel_and_nested_provenance_is_explicit():
+    payload = _chapter().model_dump(mode="json")
+    payload["attributions"] = _chapter_text_attributions()
+    payload["labs"][0]["provenance"] = "pedagogical"
+
+    artifact = ChapterArtifact.model_validate(payload)
+
+    assert artifact.attributions.objectives[0].anchor_ids == ["anchor:one"]
+
+    mismatched = copy.deepcopy(payload)
+    mismatched["attributions"]["objectives"] = []
+    with pytest.raises(ValidationError, match="objectives"):
+        ChapterArtifact.model_validate(mismatched)
+
+    missing_provenance = copy.deepcopy(payload)
+    del missing_provenance["formulas"][0]["provenance"]
+    with pytest.raises(ValidationError, match="provenance"):
+        ChapterArtifact.model_validate(missing_provenance)
+
+
+def test_grounded_provenance_requires_anchors_and_any_unknown_anchor_is_blocking():
+    payload = _chapter().model_dump(mode="json")
+    payload["attributions"] = _chapter_text_attributions()
+    payload["labs"][0]["provenance"] = "adapted"
+    payload["labs"][0]["anchor_ids"] = []
+    with pytest.raises(ValidationError, match="anchor"):
+        ChapterArtifact.model_validate(payload)
+
+    payload["labs"][0]["provenance"] = "pedagogical"
+    payload["attributions"]["quick_reference"][0]["anchor_ids"] = [
+        "anchor:missing"
+    ]
+    artifact = ChapterArtifact.model_validate(payload)
+    findings = CourseGenerationService.validate_chapter(artifact, {"anchor:one"})
+
+    citation = next(
+        finding
+        for finding in findings
+        if finding.kind == "citation" and finding.item_key == "quick_reference[0]"
+    )
+    assert citation.severity == "error"
+    assert citation.status == "manual_check"
+    assert citation.anchor_ids == ["anchor:missing"]
 
 
 def test_outline_requires_grounded_dag_prerequisites_and_proposed_labs():
@@ -379,6 +450,7 @@ def test_oracle_contracts_reject_nonfinite_numbers(nonfinite):
             latex="x",
             meaning="Formula",
             anchor_ids=["anchor:one"],
+            provenance="adapted",
             oracle_expression="x",
             oracle_substitutions={"x": nonfinite},
         )
@@ -388,6 +460,8 @@ def test_oracle_contracts_reject_nonfinite_numbers(nonfinite):
             prompt="Compute.",
             steps=["Substitute."],
             answer="1",
+            anchor_ids=["anchor:one"],
+            provenance="adapted",
             oracle_expression="x",
             oracle_values={"x": 1},
             oracle_answer=nonfinite,
@@ -399,6 +473,8 @@ def test_oracle_contracts_reject_nonfinite_numbers(nonfinite):
             difficulty="core",
             answer="1",
             transfer_task="Transfer.",
+            anchor_ids=["anchor:one"],
+            provenance="adapted",
             oracle_expression="x",
             oracle_values={"x": nonfinite},
             oracle_answer=1,
@@ -575,33 +651,175 @@ def test_formula_parse_failure_still_runs_unit_oracle(
 
 
 def test_direction_reference_frame_boundary_and_limit_rules():
-    findings = CourseGenerationService.validate_physics_rules(
-        [
-            {"key": "direction", "kind": "direction", "actual": -1, "expected": 1},
-            {
-                "key": "frame",
-                "kind": "reference_frame",
-                "actual": "ground",
-                "expected": "train",
-            },
-            {"key": "boundary", "kind": "boundary", "value": 11, "minimum": 0, "maximum": 10},
-            {
-                "key": "limit",
-                "kind": "limit",
-                "expression": "sin(x)/x",
-                "variable": "x",
-                "point": 0,
-                "expected": 2,
-            },
-        ]
+    payload = _chapter().model_dump(mode="json")
+    payload["physics_checks"] = [
+        {
+            "key": "vector",
+            "kind": "vector",
+            "actual_components": [1, 2],
+            "expected_components": [1, 3],
+            "absolute_tolerance": 1e-9,
+            "relative_tolerance": 1e-9,
+            "anchor_ids": ["anchor:one"],
+        },
+        {
+            "key": "direction",
+            "kind": "direction",
+            "actual": -1,
+            "expected": 1,
+            "anchor_ids": ["anchor:one"],
+        },
+        {
+            "key": "frame",
+            "kind": "reference_frame",
+            "actual": "  Ground   frame ",
+            "expected": "train frame",
+            "anchor_ids": ["anchor:one"],
+        },
+        {
+            "key": "boundary",
+            "kind": "boundary",
+            "value": 11,
+            "minimum": 0,
+            "maximum": 10,
+            "anchor_ids": ["anchor:one"],
+        },
+        {
+            "key": "limit",
+            "kind": "limit",
+            "expression": "sin(x)/x",
+            "variable": "x",
+            "point": 0,
+            "expected": 2,
+            "side": "both",
+            "anchor_ids": ["anchor:one"],
+        },
+    ]
+    artifact = ChapterArtifact.model_validate(payload)
+
+    findings = CourseGenerationService.validate_chapter(
+        artifact, {"anchor:one"}, subject="physics"
     )
 
     assert {finding.item_key for finding in findings} == {
+        "vector",
         "direction",
         "frame",
         "boundary",
         "limit",
     }
+    assert all(
+        finding.kind == "physics"
+        and finding.severity == "error"
+        and finding.status == "open"
+        and finding.anchor_ids == ["anchor:one"]
+        for finding in findings
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid_check",
+    [
+        {
+            "key": "unknown",
+            "kind": "unknown",
+            "anchor_ids": ["anchor:one"],
+        },
+        {
+            "key": "vector",
+            "kind": "vector",
+            "actual_components": [1, 2],
+            "expected_components": [1, 2, 3],
+            "absolute_tolerance": 1e-9,
+            "relative_tolerance": 1e-9,
+            "anchor_ids": ["anchor:one"],
+        },
+        {
+            "key": "direction",
+            "kind": "direction",
+            "actual": 2,
+            "expected": 1,
+            "anchor_ids": ["anchor:one"],
+        },
+        {
+            "key": "boundary",
+            "kind": "boundary",
+            "value": 0,
+            "minimum": 2,
+            "maximum": 1,
+            "anchor_ids": ["anchor:one"],
+        },
+        {
+            "key": "limit",
+            "kind": "limit",
+            "expression": "__import__('os')",
+            "variable": "x",
+            "point": 0,
+            "expected": 1,
+            "side": "both",
+            "anchor_ids": ["anchor:one"],
+        },
+        {
+            "key": "direction",
+            "kind": "direction",
+            "actual": 1,
+            "expected": 1,
+            "anchor_ids": ["anchor:one"],
+            "extra": "forbidden",
+        },
+    ],
+)
+def test_physics_check_union_rejects_unknown_unsafe_or_malformed_payloads(
+    invalid_check,
+):
+    payload = _chapter().model_dump(mode="json")
+    payload["physics_checks"] = [invalid_check]
+
+    with pytest.raises(ValidationError):
+        ChapterArtifact.model_validate(payload)
+
+
+def test_unparseable_physics_check_and_missing_physics_checks_fail_closed():
+    payload = _chapter().model_dump(mode="json")
+    payload["physics_checks"] = [
+        {
+            "key": "limit",
+            "kind": "limit",
+            "expression": "sin(",
+            "variable": "x",
+            "point": 0,
+            "expected": 1,
+            "side": "left",
+            "anchor_ids": ["anchor:one"],
+        }
+    ]
+    unparseable = ChapterArtifact.model_validate(payload)
+    findings = CourseGenerationService.validate_chapter(
+        unparseable, {"anchor:one"}, subject="physics"
+    )
+
+    assert any(
+        finding.kind == "physics"
+        and finding.item_key == "limit"
+        and finding.severity == "high"
+        and finding.status == "manual_check"
+        for finding in findings
+    )
+
+    no_checks = _chapter()
+    physics_findings = CourseGenerationService.validate_chapter(
+        no_checks, {"anchor:one"}, subject="physics"
+    )
+    math_findings = CourseGenerationService.validate_chapter(
+        no_checks, {"anchor:one"}, subject="math"
+    )
+    assert any(
+        finding.kind == "physics"
+        and finding.severity == "high"
+        and finding.status == "manual_check"
+        for finding in physics_findings
+    )
+    assert not any(finding.kind == "physics" for finding in math_findings)
 
 
 def test_deterministic_findings_use_content_anchors_or_become_manual_check():
@@ -612,44 +830,24 @@ def test_deterministic_findings_use_content_anchors_or_become_manual_check():
             title="Unsafe lab",
             expressions=["x=1"],
             anchor_ids=["anchor:lab"],
+            provenance="adapted",
         ),
         FunctionPlotLabSpec(
             key="ungrounded-lab",
             title="Ungrounded lab",
             expressions=["y=1"],
+            anchor_ids=[],
+            provenance="pedagogical",
         ),
     ]
 
     lab_findings = CourseGenerationService.validate_chapter(
         artifact, {"anchor:one", "anchor:lab"}
     )
-    physics_findings = CourseGenerationService.validate_physics_rules(
-        [
-            {
-                "key": "grounded-direction",
-                "kind": "direction",
-                "actual": -1,
-                "expected": 1,
-                "anchor_ids": ["anchor:physics"],
-            },
-            {
-                "key": "ungrounded-direction",
-                "kind": "direction",
-                "actual": -1,
-                "expected": 1,
-            },
-        ]
-    )
-
-    by_key = {
-        finding.item_key: finding for finding in [*lab_findings, *physics_findings]
-    }
+    by_key = {finding.item_key: finding for finding in lab_findings}
     assert by_key["unsafe-lab"].anchor_ids == ["anchor:lab"]
     assert by_key["unsafe-lab"].status == "open"
-    assert by_key["grounded-direction"].anchor_ids == ["anchor:physics"]
-    assert by_key["grounded-direction"].status == "open"
     assert by_key["ungrounded-lab"].status == "manual_check"
-    assert by_key["ungrounded-direction"].status == "manual_check"
 
 
 def test_publishability_resolution_and_warning_acknowledgement_reason():

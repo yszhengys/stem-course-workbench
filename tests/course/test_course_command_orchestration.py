@@ -17,6 +17,30 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 
+def _chapter_text_attributions(
+    *,
+    anchor_id: str = "anchor:one",
+    prerequisites: int = 0,
+    objectives: int = 1,
+    definitions: int = 0,
+    misconceptions: int = 0,
+    pitfalls: int = 0,
+    quick_reference: int = 0,
+) -> dict[str, object]:
+    def grounded() -> dict[str, object]:
+        return {"anchor_ids": [anchor_id], "provenance": "adapted"}
+
+    return {
+        "purpose": grounded(),
+        "prerequisites": [grounded() for _ in range(prerequisites)],
+        "objectives": [grounded() for _ in range(objectives)],
+        "definitions": [grounded() for _ in range(definitions)],
+        "misconceptions": [grounded() for _ in range(misconceptions)],
+        "pitfalls": [grounded() for _ in range(pitfalls)],
+        "quick_reference": [grounded() for _ in range(quick_reference)],
+    }
+
+
 class _FakeQueueStore:
     def __init__(self) -> None:
         self.runs: dict[str, dict[str, object]] = {}
@@ -468,6 +492,7 @@ async def test_lab_save_failure_keeps_last_successful_chapter_current(
                 title="Introduction",
                 markdown="Grounded.",
                 anchor_ids=["anchor:one"],
+                provenance="adapted",
             )
         ],
         definitions=["Limit"],
@@ -477,6 +502,7 @@ async def test_lab_save_failure_keeps_last_successful_chapter_current(
                 latex="x",
                 meaning="Identity",
                 anchor_ids=["anchor:one"],
+                provenance="adapted",
                 oracle_expression="x",
             )
         ],
@@ -487,6 +513,7 @@ async def test_lab_save_failure_keeps_last_successful_chapter_current(
                 steps=["Add."],
                 answer="4",
                 anchor_ids=["anchor:one"],
+                provenance="adapted",
                 oracle_expression="2 + 2",
                 oracle_answer=4,
             )
@@ -496,6 +523,8 @@ async def test_lab_save_failure_keeps_last_successful_chapter_current(
                 key="limit-plot",
                 title="Plot",
                 expressions=["x"],
+                anchor_ids=[],
+                provenance="pedagogical",
             )
         ],
         pitfalls=["Check the domain."],
@@ -508,10 +537,18 @@ async def test_lab_save_failure_keeps_last_successful_chapter_current(
                 answer="2",
                 transfer_task="Try another.",
                 anchor_ids=["anchor:one"],
+                provenance="adapted",
             )
         ],
         quick_reference=["lim"],
         citations=["anchor:one"],
+        attributions=_chapter_text_attributions(
+            prerequisites=1,
+            objectives=1,
+            definitions=1,
+            pitfalls=1,
+            quick_reference=1,
+        ),
     )
     outline_payload = outline.model_dump(mode="json")
     course = Course(
@@ -1067,8 +1104,10 @@ async def test_chapter_completion_and_stable_links_are_one_atomic_promotion(
                 title="Introduction",
                 markdown="Grounded.",
                 anchor_ids=["anchor:one"],
+                provenance="adapted",
             )
         ],
+        attributions=_chapter_text_attributions(),
     )
     chapter = Chapter(
         id="chapter:partial",
@@ -1152,8 +1191,10 @@ async def test_stable_link_promotion_uses_exact_legacy_current_snapshot(
                 title="Old",
                 markdown="Old grounded content.",
                 anchor_ids=["anchor:one"],
+                provenance="adapted",
             )
         ],
+        attributions=_chapter_text_attributions(),
     )
     new_artifact = ChapterArtifact(
         chapter_key="limits",
@@ -1165,8 +1206,10 @@ async def test_stable_link_promotion_uses_exact_legacy_current_snapshot(
                 title="New",
                 markdown="New grounded content.",
                 anchor_ids=["anchor:one"],
+                provenance="adapted",
             )
         ],
+        attributions=_chapter_text_attributions(),
     )
     completing_run = CourseGenerationRun(
         id="course_generation_run:old",
@@ -1373,6 +1416,7 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
         ReviewArtifact,
         ValidationFinding,
     )
+    from open_notebook.course.generation_service import CourseGenerationService
     from open_notebook.course.models import (
         Chapter,
         Course,
@@ -1386,6 +1430,7 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
         id="course:canonical-review",
         title="Physics",
         notebook="notebook:one",
+        subject="physics",
         status="outline_approved",
         outline_version_id="course_version:one",
     )
@@ -1434,6 +1479,9 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
                     "provenance": "derived",
                 }
             ],
+            "attributions": _chapter_text_attributions(
+                anchor_id="anchor:one", objectives=1
+            ),
         },
     )
     original_findings = [
@@ -1449,7 +1497,7 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
     review = AsyncMock(return_value=ReviewArtifact(findings=original_findings))
     generation = SimpleNamespace(
         review=review,
-        validate_chapter=lambda _artifact, _anchors: [],
+        validate_chapter=CourseGenerationService.validate_chapter,
         assert_publishable=lambda _findings: None,
     )
     workflow = module.CourseWorkflowService(
@@ -1558,7 +1606,11 @@ async def test_review_replay_hash_ignores_row_order_metadata_and_human_resolutio
         prompt_version="v1",
     )
 
-    assert [finding.item_key for finding in initial] == ["a", "b"]
+    assert [finding.item_key for finding in initial] == ["a", "b", "motion"]
+    assert any(
+        cast(dict[str, object], row["finding"])["kind"] == "physics"
+        for row in persisted_rows
+    )
     assert {finding.status for finding in replayed} == {"resolved"}
     assert review.await_count == 1
 
@@ -1765,7 +1817,11 @@ async def test_worker_atomically_claims_unbound_run_after_full_preflight(
     )
     workflow = module.CourseWorkflowService()
     monkeypatch.setattr(module.Course, "get", AsyncMock(return_value=course))
-    monkeypatch.setattr(workflow, "_source_hash", AsyncMock(return_value=source_hash))
+    monkeypatch.setattr(
+        module.CourseWorkflowService,
+        "_source_hash",
+        AsyncMock(return_value=source_hash),
+    )
     monkeypatch.setattr(module.Course, "save", AsyncMock(return_value=None))
     monkeypatch.setattr(module.CourseGenerationRun, "save", AsyncMock(return_value=None))
 
@@ -2607,8 +2663,10 @@ async def test_re_review_ignores_failed_partial_and_blocks_on_high_finding(
                 title="Definition",
                 markdown="Grounded definition.",
                 anchor_ids=["anchor:one"],
+                provenance="adapted",
             )
         ],
+        attributions=_chapter_text_attributions(),
     )
     course = Course(
         id="course:one",
@@ -2690,7 +2748,7 @@ async def test_re_review_ignores_failed_partial_and_blocks_on_high_finding(
     )
     generation = SimpleNamespace(
         review=AsyncMock(return_value=ReviewArtifact(findings=[finding])),
-        validate_chapter=lambda _artifact, _anchors: [],
+        validate_chapter=lambda _artifact, _anchors, *, subject=None: [],
         assert_publishable=CourseGenerationService.assert_publishable,
     )
     workflow = module.CourseWorkflowService(
@@ -2897,6 +2955,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
                 title="Definition",
                 markdown="Grounded definition.",
                 anchor_ids=[anchor.anchor_id],
+                provenance="adapted",
             )
         ],
         definitions=["Limit"],
@@ -2906,6 +2965,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
                 latex="x",
                 meaning="Identity",
                 anchor_ids=[anchor.anchor_id],
+                provenance="adapted",
                 oracle_expression="x",
             )
         ],
@@ -2916,6 +2976,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
                 steps=["Add."],
                 answer="4",
                 anchor_ids=[anchor.anchor_id],
+                provenance="adapted",
                 oracle_expression="2 + 2",
                 oracle_answer=4,
             )
@@ -2925,6 +2986,8 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
                 key="limit-plot",
                 title="Plot",
                 expressions=["x"],
+                anchor_ids=[],
+                provenance="pedagogical",
             )
         ],
         pitfalls=["Check the domain."],
@@ -2937,10 +3000,19 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
                 answer="2",
                 transfer_task="Try another.",
                 anchor_ids=[anchor.anchor_id],
+                provenance="adapted",
             )
         ],
         quick_reference=["lim"],
         citations=[anchor.anchor_id],
+        attributions=_chapter_text_attributions(
+            anchor_id=anchor.anchor_id,
+            prerequisites=1,
+            objectives=1,
+            definitions=1,
+            pitfalls=1,
+            quick_reference=1,
+        ),
     )
     versions: list[CourseVersion] = []
     chapters: list[Chapter] = []
@@ -3096,7 +3168,11 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         return run
 
     monkeypatch.setattr(workflow, "activate_run", activate)
-    monkeypatch.setattr(workflow, "_source_hash", AsyncMock(return_value=source_hash))
+    monkeypatch.setattr(
+        module.CourseWorkflowService,
+        "_source_hash",
+        AsyncMock(return_value=source_hash),
+    )
     evidence_build = AsyncMock(return_value=[anchor])
     monkeypatch.setattr(workflow.evidence, "build", evidence_build)
     selection = ModelSelection(
