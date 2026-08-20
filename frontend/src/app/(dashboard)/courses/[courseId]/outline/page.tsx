@@ -199,6 +199,7 @@ export default function CourseOutlinePage() {
                     role={sourceRole}
                     onSourceIdChange={handleSourceChange}
                     onRoleChange={setSourceRole}
+                    onSourcesChanged={() => sources.refetch()}
                     disabled={buildEvidence.isPending || evidenceStatus.isFetching}
                   />
                 )}

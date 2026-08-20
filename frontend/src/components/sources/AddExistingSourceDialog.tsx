@@ -27,7 +27,8 @@ interface AddExistingSourceDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   notebookId: string
-  onSuccess?: () => void
+  onSuccess?: (sourceIds: string[]) => void
+  allowedFileExtensions?: readonly string[]
 }
 
 export function AddExistingSourceDialog({
@@ -35,6 +36,7 @@ export function AddExistingSourceDialog({
   onOpenChange,
   notebookId,
   onSuccess,
+  allowedFileExtensions,
 }: AddExistingSourceDialogProps) {
   const { t } = useTranslation()
   const [searchQuery, setSearchQuery] = useState('')
@@ -63,6 +65,23 @@ export function AddExistingSourceDialog({
     () => allSourcesQuery.data ?? [],
     [allSourcesQuery.data]
   )
+  const normalizedExtensions = useMemo(
+    () => allowedFileExtensions?.map((extension) => extension.toLowerCase()) ?? [],
+    [allowedFileExtensions]
+  )
+  const isAllowedSource = useCallback((source: SourceListResponse) => {
+    if (normalizedExtensions.length === 0) return true
+    const filePath = source.asset?.file_path?.toLowerCase()
+    return Boolean(filePath && normalizedExtensions.some((extension) => filePath.endsWith(extension)))
+  }, [normalizedExtensions])
+  const allowedSources = useMemo(
+    () => allSources.filter(isAllowedSource),
+    [allSources, isAllowedSource]
+  )
+  const allSourcesById = useMemo(
+    () => new Map(allSources.map((source) => [source.id, source])),
+    [allSources]
+  )
   const isLoadingAll = allSourcesQuery.isPending
 
   // Get sources already in this notebook
@@ -77,7 +96,7 @@ export function AddExistingSourceDialog({
   const performSearch = useCallback(async () => {
     if (!debouncedSearchQuery.trim()) {
       // Empty query - show all sources
-      setFilteredSources(allSources)
+      setFilteredSources(allowedSources)
       setIsSearching(false)
       return
     }
@@ -95,38 +114,40 @@ export function AddExistingSourceDialog({
 
       // Since we set search_sources=true and search_notes=false,
       // the API only returns sources, no need to filter
-      const sources = response.results.map(r => ({
-        id: r.parent_id,
-        title: r.title || 'Untitled',
-        topics: [],
-        asset: null,
-        embedded: false,
-        embedded_chunks: 0,
-        insights_count: 0,
-        created: r.created,
-        updated: r.updated,
-      })) as SourceListResponse[]
+      const sources = response.results
+        .map((result): SourceListResponse => allSourcesById.get(result.parent_id) ?? ({
+          id: result.parent_id,
+          title: result.title || 'Untitled',
+          topics: [],
+          asset: null,
+          embedded: false,
+          embedded_chunks: 0,
+          insights_count: 0,
+          created: result.created,
+          updated: result.updated,
+        }))
+        .filter(isAllowedSource)
 
       setFilteredSources(sources)
     } catch (error) {
       console.error('Error searching sources:', error)
       // On error, fall back to showing all sources
-      setFilteredSources(allSources)
+      setFilteredSources(allowedSources)
     } finally {
       setIsSearching(false)
     }
-  }, [debouncedSearchQuery, allSources])
+  }, [debouncedSearchQuery, allowedSources, allSourcesById, isAllowedSource])
 
   // Filter sources when search query changes
   useEffect(() => {
     if (!debouncedSearchQuery) {
-      setFilteredSources(allSources)
+      setFilteredSources(allowedSources)
       setIsSearching(false)
       return
     }
 
     performSearch()
-  }, [debouncedSearchQuery, allSources, performSearch])
+  }, [debouncedSearchQuery, allowedSources, performSearch])
 
   const handleToggleSource = (sourceId: string) => {
     setSelectedSourceIds(prev =>
@@ -140,16 +161,18 @@ export function AddExistingSourceDialog({
     if (selectedSourceIds.length === 0) return
 
     try {
-      await addSources.mutateAsync({
+      const linkedSourceIds = [...selectedSourceIds]
+      const result = await addSources.mutateAsync({
         notebookId,
-        sourceIds: selectedSourceIds,
+        sourceIds: linkedSourceIds,
       })
+      if (result.failures > 0) return
 
       // Reset state
       setSelectedSourceIds([])
       setSearchQuery('')
       onOpenChange(false)
-      onSuccess?.()
+      onSuccess?.(linkedSourceIds)
     } catch (error) {
       // Error handled by the hook's onError
       console.error('Error adding sources:', error)
@@ -260,7 +283,7 @@ export function AddExistingSourceDialog({
           </ScrollArea>
 
           {/* Truncation Warning */}
-          {allSources.length >= 100 && !debouncedSearchQuery && (
+          {allowedSources.length >= 100 && !debouncedSearchQuery && (
             <p className="text-xs text-muted-foreground">
               {t('sources.showingFirst100')}
             </p>

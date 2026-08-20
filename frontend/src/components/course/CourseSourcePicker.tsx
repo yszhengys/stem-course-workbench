@@ -1,7 +1,10 @@
 'use client'
 
+import { useState } from 'react'
 import Link from 'next/link'
 
+import { AddExistingSourceDialog } from '@/components/sources/AddExistingSourceDialog'
+import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useTranslation } from '@/lib/hooks/use-translation'
@@ -14,6 +17,7 @@ interface CourseSourcePickerProps {
   role: SourceRole
   onSourceIdChange: (sourceId: string) => void
   onRoleChange: (role: SourceRole) => void
+  onSourcesChanged?: () => void | Promise<unknown>
   disabled?: boolean
 }
 
@@ -24,9 +28,17 @@ export function CourseSourcePicker({
   role,
   onSourceIdChange,
   onRoleChange,
+  onSourcesChanged,
   disabled = false,
 }: CourseSourcePickerProps) {
   const { t } = useTranslation()
+  const [addExistingOpen, setAddExistingOpen] = useState(false)
+
+  const handleExistingSourcesAdded = (sourceIds: string[]) => {
+    const selectedSourceId = sourceIds[0]
+    if (selectedSourceId) onSourceIdChange(selectedSourceId)
+    void onSourcesChanged?.()
+  }
 
   return (
     <div className="space-y-4">
@@ -47,6 +59,14 @@ export function CourseSourcePicker({
             </option>
           ))}
         </select>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => setAddExistingOpen(true)}
+          disabled={disabled}
+        >
+          {t('sources.addExistingTitle')}
+        </Button>
         {sources.length === 0 && (
           <p className="text-sm text-muted-foreground">
             {t('course.noEligibleSources')}{' '}
@@ -86,6 +106,16 @@ export function CourseSourcePicker({
           <option value="SUPPLEMENT">{t('course.supplement')}</option>
         </select>
       </div>
+
+      {addExistingOpen && (
+        <AddExistingSourceDialog
+          open={addExistingOpen}
+          onOpenChange={setAddExistingOpen}
+          notebookId={notebookId}
+          onSuccess={handleExistingSourcesAdded}
+          allowedFileExtensions={['.pdf', '.pptx']}
+        />
+      )}
     </div>
   )
 }
