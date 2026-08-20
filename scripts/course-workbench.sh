@@ -477,6 +477,10 @@ process_started() {
         sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
 }
 
+process_parent() {
+    ps -p "$1" -o ppid= 2>/dev/null | tr -d '[:space:]'
+}
+
 process_group() {
     ps -p "$1" -o pgid= 2>/dev/null | tr -d '[:space:]'
 }
@@ -746,12 +750,44 @@ terminate_new_launch() {
     service=$1
     pid=$2
     handshake=$3
+    pinned_pgid=$4
+    pinned_cwd=$5
+    pinned_started=$6
+    pinned_parent=$7
     handshake_pid=""
     handshake_pgid=""
     if [ -f "$handshake" ]; then
         handshake_pid=$(sed -n '1p' "$handshake")
         handshake_pgid=$(sed -n '2p' "$handshake")
     fi
+
+    if process_alive "$pid"; then
+        current_pgid=$(process_group "$pid")
+        current_cwd=$(process_cwd "$pid")
+        current_started=$(process_started "$pid")
+        current_parent=$(process_parent "$pid")
+        if [ -z "$pinned_pgid" ] || [ -z "$pinned_cwd" ] || \
+           [ -z "$pinned_started" ] || [ -z "$pinned_parent" ] || \
+           [ "$current_pgid" != "$pinned_pgid" ] || \
+           [ "$current_cwd" != "$pinned_cwd" ] || \
+           [ "$current_started" != "$pinned_started" ] || \
+           [ "$current_parent" != "$pinned_parent" ] || \
+           [ "$current_parent" != "$$" ]; then
+            error "$service launch identity changed; refusing to signal replacement PID or process group $pid."
+            rm -f "$handshake"
+            cleanup_process_metadata "$service"
+            set_started_flag "$service" 0
+            return 0
+        fi
+    elif [ "$handshake_pid" != "$pid" ] || [ "$handshake_pgid" != "$pid" ]; then
+        # The uncommitted direct child is already gone and no verified process
+        # group exists. There is nothing safe to signal.
+        rm -f "$handshake"
+        cleanup_process_metadata "$service"
+        set_started_flag "$service" 0
+        return 0
+    fi
+
     if [ "$handshake_pid" = "$pid" ] && [ "$handshake_pgid" = "$pid" ]; then
         if ! terminate_owned_process_group "$pid"; then
             error "$service process group $pid survived TERM and KILL; ownership metadata was preserved."
@@ -818,6 +854,11 @@ os.execvpe(command[0], command, os.environ)
     handshake="${handshake_prefix}.${pid}"
     set_started_flag "$service" 1
 
+    pinned_pgid=""
+    pinned_cwd=""
+    pinned_started=""
+    pinned_parent=""
+    PROCESS_REASON=""
     attempts=0
     while [ "$attempts" -lt 40 ]; do
         if [ -f "$handshake" ]; then
@@ -827,6 +868,7 @@ os.execvpe(command[0], command, os.environ)
             actual_cwd=$(process_cwd "$pid")
             actual_argv=$(process_command "$pid")
             actual_executable=$(process_executable "$pid")
+            actual_parent=$(process_parent "$pid")
             actual_started=$(process_started "$pid")
             case "$actual_argv" in
                 *"$marker"*) marker_matches=1 ;;
@@ -835,8 +877,22 @@ os.execvpe(command[0], command, os.environ)
             if [ "$handshake_pid" = "$pid" ] && [ "$handshake_pgid" = "$pid" ] && \
                [ -n "$actual_pgid" ] && [ -n "$actual_cwd" ] && \
                [ -n "$actual_argv" ] && [ -n "$actual_executable" ] && \
-               [ -n "$actual_started" ]; then
-                if [ "$actual_pgid" != "$pid" ] || [ "$actual_cwd" != "$cwd" ]; then
+               [ -n "$actual_parent" ] && [ -n "$actual_started" ]; then
+                if [ -z "$pinned_started" ]; then
+                    pinned_pgid=$actual_pgid
+                    pinned_cwd=$actual_cwd
+                    pinned_started=$actual_started
+                    pinned_parent=$actual_parent
+                elif [ "$actual_pgid" != "$pinned_pgid" ] || \
+                     [ "$actual_cwd" != "$pinned_cwd" ] || \
+                     [ "$actual_started" != "$pinned_started" ] || \
+                     [ "$actual_parent" != "$pinned_parent" ]; then
+                    PROCESS_REASON="launch identity changed during marker stabilization"
+                    break
+                fi
+                if [ "$actual_pgid" != "$pid" ] || [ "$actual_cwd" != "$cwd" ] || \
+                   [ "$actual_parent" != "$$" ]; then
+                    PROCESS_REASON="launch PID is not the expected direct child/session/cwd"
                     break
                 fi
                 # npm keeps the verified PID/session/cwd while its argv briefly
@@ -858,9 +914,12 @@ os.execvpe(command[0], command, os.environ)
         attempts=$((attempts + 1))
         sleep 0.05
     done
-    PROCESS_REASON="session/argv/executable/cwd/start fingerprint validation failed"
+    if [ -z "$PROCESS_REASON" ]; then
+        PROCESS_REASON="session/argv/executable/cwd/start/parent fingerprint validation failed"
+    fi
     error "$service did not start as an owned process group: $PROCESS_REASON"
-    terminate_new_launch "$service" "$pid" "$handshake" || true
+    terminate_new_launch "$service" "$pid" "$handshake" \
+        "$pinned_pgid" "$pinned_cwd" "$pinned_started" "$pinned_parent" || true
     return 1
 }
 

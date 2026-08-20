@@ -51,12 +51,22 @@ pid = args[args.index("-p") + 1]
 if "pgid=" in args:
     print(pid)
     raise SystemExit(0)
+if "ppid=" in args:
+    parent_file = state / f"pid.{pid}.parent"
+    print(parent_file.read_text(encoding="utf-8").strip() if parent_file.exists() else "")
+    raise SystemExit(0)
 if "stat=" in args:
     print("Z" if (state / f"pid.{pid}.dead").exists() else "S")
     raise SystemExit(0)
 if "lstart=" in args:
     start_file = state / f"pid.{pid}.start"
-    print(start_file.read_text(encoding="utf-8").strip() if start_file.exists() else "")
+    started = start_file.read_text(encoding="utf-8").strip() if start_file.exists() else ""
+    print(started)
+    if (
+        os.environ.get("FAKE_NPM_PID_REUSE") == "1"
+        and started == "Mon Aug 18 01:00:00 2026"
+    ):
+        (state / "frontend.identity-observed").touch()
     raise SystemExit(0)
 if "comm=" in args:
     executable_file = state / f"pid.{pid}.executable"
@@ -89,11 +99,14 @@ state = Path(os.environ["FAKE_STATE"])
 
 def raise_exit():
     pid = os.getpid()
+    if (state / "frontend.replacement-ready").exists():
+        (state / "frontend.replacement-signaled").touch()
     (state / "port.3000").unlink(missing_ok=True)
     (state / f"pid.{pid}.cwd").unlink(missing_ok=True)
     (state / f"pid.{pid}.command").unlink(missing_ok=True)
     (state / f"pid.{pid}.executable").unlink(missing_ok=True)
     (state / f"pid.{pid}.start").unlink(missing_ok=True)
+    (state / f"pid.{pid}.parent").unlink(missing_ok=True)
     (state / f"pid.{pid}.dead").touch()
     raise SystemExit(0)
 
@@ -110,9 +123,13 @@ if sys.argv[1:] == ["run", "dev"]:
     )
     (state / "port.3000").write_text(str(pid), encoding="utf-8")
     (state / f"pid.{pid}.cwd").write_text(str(Path.cwd()), encoding="utf-8")
+    (state / f"pid.{pid}.parent").write_text(str(os.getppid()), encoding="utf-8")
     command = "npm run dev"
     executable = "/fake/node"
-    if os.environ.get("FAKE_NPM_EXEC_TRANSITION") == "1":
+    if (
+        os.environ.get("FAKE_NPM_EXEC_TRANSITION") == "1"
+        or os.environ.get("FAKE_NPM_PID_REUSE") == "1"
+    ):
         command = "npm"
         executable = "/fake/npm"
     elif os.environ.get("FAKE_NPM_PERMANENT_WRONG_MARKER") == "1":
@@ -133,6 +150,24 @@ if sys.argv[1:] == ["run", "dev"]:
             )
 
         threading.Thread(target=settle_exec_transition, daemon=True).start()
+    if os.environ.get("FAKE_NPM_PID_REUSE") == "1":
+
+        def replace_launch_identity():
+            while not (state / "frontend.identity-observed").exists():
+                time.sleep(0.001)
+            (state / f"pid.{pid}.start").write_text(
+                "Mon Aug 18 01:00:01 2026", encoding="utf-8"
+            )
+            (state / f"pid.{pid}.parent").write_text("999999", encoding="utf-8")
+            (state / f"pid.{pid}.executable").write_text(
+                "/fake/replacement-node", encoding="utf-8"
+            )
+            (state / f"pid.{pid}.command").write_text(
+                "npm run dev", encoding="utf-8"
+            )
+            (state / "frontend.replacement-ready").touch()
+
+        threading.Thread(target=replace_launch_identity, daemon=True).start()
     print("frontend ready", flush=True)
     signal.signal(signal.SIGTERM, lambda *_: raise_exit())
     while True:
@@ -325,6 +360,7 @@ def raise_exit():
     (state / f"pid.{pid}.command").unlink(missing_ok=True)
     (state / f"pid.{pid}.executable").unlink(missing_ok=True)
     (state / f"pid.{pid}.start").unlink(missing_ok=True)
+    (state / f"pid.{pid}.parent").unlink(missing_ok=True)
     (state / f"pid.{pid}.dead").touch()
     raise SystemExit(0)
 
@@ -345,6 +381,7 @@ if args[:2] == ["sync", "--locked"]:
     raise SystemExit(0)
 if args and args[0] == "run":
     pid = os.getpid()
+    (state / f"pid.{pid}.parent").write_text(str(os.getppid()), encoding="utf-8")
     (state / f"pid.{pid}.cwd").write_text(str(Path.cwd()), encoding="utf-8")
     if "run_api.py" in args:
         (state / "port.5055").write_text(str(pid), encoding="utf-8")
@@ -678,6 +715,38 @@ def test_frontend_launch_waits_for_same_pid_npm_exec_transition(
     assert _run(repo, env, "stop").returncode == 0
 
 
+def test_frontend_launch_refuses_reused_pid_without_signaling_replacement(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = {
+        **_with_ui_contract(env),
+        "FAKE_NPM_PID_REUSE": "1",
+    }
+    frontend_pid = 0
+
+    try:
+        result = _run(repo, env, "start", "--no-open", timeout=30)
+        frontend_pid = int(
+            (state / "frontend.pid").read_text(encoding="utf-8").strip()
+        )
+
+        assert result.returncode != 0
+        assert "launch identity changed" in (result.stdout + result.stderr).lower()
+        assert (state / "frontend.replacement-ready").exists()
+        assert not (state / "frontend.replacement-signaled").exists()
+        assert _pid_is_running(frontend_pid)
+        runtime = repo / ".runtime" / "course-workbench"
+        assert not list(runtime.glob("frontend.*"))
+    finally:
+        if frontend_pid:
+            try:
+                os.killpg(frontend_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            _wait_for_pid_exit(frontend_pid)
+
+
 def test_frontend_launch_rejects_marker_that_never_matches_and_clears_metadata(
     fake_repo: tuple[Path, dict[str, str], Path],
 ) -> None:
@@ -687,9 +756,12 @@ def test_frontend_launch_rejects_marker_that_never_matches_and_clears_metadata(
         "FAKE_NPM_PERMANENT_WRONG_MARKER": "1",
     }
 
-    result = _run(repo, env, "start", "--no-open")
+    started_at = time.monotonic()
+    result = _run(repo, env, "start", "--no-open", timeout=35)
+    elapsed = time.monotonic() - started_at
 
     assert result.returncode != 0
+    assert elapsed < 30
     assert "frontend did not start as an owned process group" in (
         result.stdout + result.stderr
     )
