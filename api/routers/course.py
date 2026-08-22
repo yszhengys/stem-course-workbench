@@ -13,6 +13,7 @@ from api.course_service import (
     CourseConflictError,
     CourseService,
 )
+from api.course_v2_service import course_v2_service
 from api.models import (
     AttemptCreate,
     AttemptStatusUpdate,
@@ -24,8 +25,13 @@ from api.models import (
     CourseChapterReviewRequest,
     CourseCreate,
     CourseEvidenceBuildRequest,
+    CourseExerciseGradeRequest,
+    CourseExerciseGradeResponse,
     CourseFindingUpdate,
     CourseJobResponse,
+    CourseLearningEventRequest,
+    CourseLearningEventResponse,
+    CourseLearningOverviewResponse,
     CourseNoteCreate,
     CourseNoteReattach,
     CourseOutlineApproval,
@@ -36,6 +42,11 @@ from api.models import (
     CourseVersionCreate,
     LabCreate,
     ProgressUpdate,
+)
+from open_notebook.course.v2_contracts import (
+    ExerciseBlueprint,
+    ReviewQueueItem,
+    StableKey,
 )
 from open_notebook.domain.base import ObjectModel
 from open_notebook.exceptions import InvalidInputError, NotFoundError, OpenNotebookError
@@ -104,6 +115,62 @@ async def get_course_model_options():
 @router.get("/courses/{course_id}")
 async def get_course(course_id: str):
     return _body(await _call(CourseService.get_course(course_id)))
+
+
+@router.get(
+    "/courses/{course_id}/learning/overview",
+    response_model=CourseLearningOverviewResponse,
+)
+async def get_learning_overview(course_id: str):
+    return await _call(course_v2_service.get_learning_overview(course_id))
+
+
+@router.get(
+    "/courses/{course_id}/learning/review-queue",
+    response_model=list[ReviewQueueItem],
+)
+async def get_learning_review_queue(course_id: str):
+    return await _call(course_v2_service.get_review_queue(course_id))
+
+
+@router.post(
+    "/courses/{course_id}/learning/events",
+    response_model=CourseLearningEventResponse,
+)
+async def append_learning_event(
+    course_id: str,
+    request: CourseLearningEventRequest,
+):
+    return await _call(
+        course_v2_service.append_learning_event(course_id, request)
+    )
+
+
+@router.get(
+    "/courses/{course_id}/exercises",
+    response_model=list[ExerciseBlueprint],
+)
+async def list_course_exercises(
+    course_id: str,
+    chapter_key: StableKey | None = None,
+):
+    return await _call(
+        course_v2_service.list_exercises(course_id, chapter_key)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/exercises/{exercise_key}/grade",
+    response_model=CourseExerciseGradeResponse,
+)
+async def grade_course_exercise(
+    course_id: str,
+    exercise_key: StableKey,
+    request: CourseExerciseGradeRequest,
+):
+    return await _call(
+        course_v2_service.grade_exercise(course_id, exercise_key, request)
+    )
 
 
 @router.patch("/courses/{course_id}")

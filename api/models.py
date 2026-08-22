@@ -1,3 +1,5 @@
+import json
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -6,6 +8,14 @@ from open_notebook.course.contracts import (
     LabSpecVariant,
     ModelSelection,
     SafeLabKey,
+)
+from open_notebook.course.v2_contracts import (
+    ConceptMastery,
+    GradeResult,
+    LearningEvent,
+    LearningEventPayload,
+    ReviewQueueItem,
+    StableKey,
 )
 
 
@@ -809,6 +819,103 @@ class StrictCourseRequest(BaseModel):
     """Reject unknown Course fields at the HTTP trust boundary."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+CourseClientLearningEventKind = Literal[
+    "chapter_opened",
+    "hint_viewed",
+    "answer_revealed",
+    "transfer_required",
+    "transfer_completed",
+    "reading_position",
+]
+
+
+class CourseLearningEventRequest(StrictCourseRequest):
+    """Client-authored action; Course ownership is added by the server."""
+
+    event_key: StableKey
+    chapter_key: StableKey
+    concept_key: StableKey | None = None
+    exercise_key: StableKey | None = None
+    kind: CourseClientLearningEventKind
+    payload: LearningEventPayload
+    occurred_at: datetime
+
+    @model_validator(mode="after")
+    def transition_shape_is_valid(self) -> "CourseLearningEventRequest":
+        is_activity = self.kind in {"chapter_opened", "reading_position"}
+        if is_activity:
+            if self.concept_key is not None or self.exercise_key is not None:
+                raise ValueError("activity events cannot claim a concept or exercise")
+        elif self.concept_key is None or self.exercise_key is None:
+            raise ValueError(
+                "exercise events require concept_key and exercise_key stable keys"
+            )
+        LearningEvent(
+            event_id=self.event_key,
+            course_id="course:request",
+            course_version_id="course_version:request",
+            chapter_key=self.chapter_key,
+            concept_key=self.concept_key,
+            exercise_key=self.exercise_key,
+            kind=self.kind,
+            payload=self.payload,
+            occurred_at=self.occurred_at,
+        )
+        return self
+
+
+class CourseExerciseGradeRequest(StrictCourseRequest):
+    chapter_key: StableKey
+    concept_key: StableKey
+    attempt_key: StableKey
+    answer: Any
+    hints_used: int = Field(default=0, ge=0, le=4)
+    answer_revealed: bool = False
+    mode: Literal["practice", "review"] = "practice"
+
+    @field_validator("answer")
+    @classmethod
+    def answer_is_bounded_json(cls, value: Any) -> Any:
+        try:
+            encoded = json.dumps(
+                value,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("answer must be valid JSON") from exc
+        if len(encoded.encode("utf-8")) > 32_000:
+            raise ValueError("answer is too large")
+        return value
+
+
+class CourseLearningEventResponse(BaseModel):
+    event: LearningEvent
+    mastery: ConceptMastery | None = None
+
+
+class CourseExerciseGradeResponse(BaseModel):
+    grade: GradeResult
+    mastery: ConceptMastery | None = None
+    event_key: StableKey | None = None
+
+
+class CourseLearningChapterOverview(BaseModel):
+    chapter_key: StableKey
+    chapter_no: int = Field(ge=1)
+    title: str
+    latest_position: LearningEvent | None = None
+
+
+class CourseLearningOverviewResponse(BaseModel):
+    course_id: str
+    course_version_id: str
+    chapters: tuple[CourseLearningChapterOverview, ...]
+    masteries: tuple[ConceptMastery, ...]
+    review_queue: tuple[ReviewQueueItem, ...]
 
 
 class CourseJobRequest(StrictCourseRequest):

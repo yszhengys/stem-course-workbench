@@ -40,6 +40,8 @@ from open_notebook.course.models import (
     Lab,
     Progress,
 )
+from open_notebook.course.v2_contracts import ConceptMastery
+from open_notebook.course.v2_models import CourseConceptMastery, CourseExercise
 from open_notebook.course.workflow_service import (
     CourseWorkflowService,
 )
@@ -482,6 +484,203 @@ class CourseService:
     @staticmethod
     async def get_course(course_id: str) -> Course:
         return await _typed_get(Course, course_id, "course")
+
+    @staticmethod
+    async def get_current_published_version(course_id: str) -> CourseVersion:
+        """Resolve the only version that may receive V2 learning activity."""
+
+        course = await CourseService.get_course(course_id)
+        if course.outline_version_id is not None:
+            try:
+                pointed = await _typed_get(
+                    CourseVersion,
+                    course.outline_version_id,
+                    "course_version",
+                )
+            except NotFoundError as exc:
+                raise CourseConflictError(
+                    "Course current version was not found"
+                ) from exc
+            if pointed.course != course_id:
+                raise CourseConflictError(
+                    "Course current version does not belong to the Course"
+                )
+            if pointed.status == sm.VersionStatus.PUBLISHED:
+                return pointed
+
+        versions = await Course.versions(course_id)
+        published = [
+            version
+            for version in versions
+            if version.course == course_id
+            and version.status == sm.VersionStatus.PUBLISHED
+        ]
+        if not published:
+            raise NotFoundError("Current published Course version not found")
+        return max(published, key=lambda version: version.version_no)
+
+    @staticmethod
+    async def list_current_published_chapters(
+        course_id: str,
+    ) -> tuple[CourseVersion, tuple[Chapter, ...]]:
+        version = await CourseService.get_current_published_version(course_id)
+        if version.id is None:
+            raise OpenNotebookError("Published Course version has no identity")
+        chapters = await CourseVersion.chapters(str(version.id))
+        published = tuple(
+            chapter
+            for chapter in chapters
+            if chapter.course_version == str(version.id)
+            and chapter.status == sm.ChapterStatus.PUBLISHED
+        )
+        keys = [chapter.chapter_key for chapter in published]
+        if len(keys) != len(set(keys)):
+            raise CourseConflictError(
+                "Course has multiple published chapters with the same stable key"
+            )
+        return version, tuple(
+            sorted(published, key=lambda chapter: (chapter.chapter_no, chapter.chapter_key))
+        )
+
+    @staticmethod
+    async def resolve_current_published_chapter(
+        course_id: str,
+        chapter_key: str,
+    ) -> tuple[CourseVersion, Chapter]:
+        version, chapters = await CourseService.list_current_published_chapters(
+            course_id
+        )
+        chapter = next(
+            (item for item in chapters if item.chapter_key == chapter_key),
+            None,
+        )
+        if chapter is None:
+            raise NotFoundError("Current published chapter not found")
+        return version, chapter
+
+    @staticmethod
+    async def list_current_exercises(
+        course_id: str,
+        chapter_key: str | None = None,
+    ) -> tuple[CourseVersion, tuple[CourseExercise, ...]]:
+        if chapter_key is None:
+            version, chapters = await CourseService.list_current_published_chapters(
+                course_id
+            )
+        else:
+            version, chapter = (
+                await CourseService.resolve_current_published_chapter(
+                    course_id, chapter_key
+                )
+            )
+            chapters = (chapter,)
+        if version.id is None:
+            raise OpenNotebookError("Published Course version has no identity")
+
+        rows = await repo_query(
+            """
+            SELECT * FROM course_exercise
+            WHERE course = $course AND course_version = $version;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(str(version.id)),
+            },
+        )
+        chapter_ids = {
+            chapter.chapter_key: str(chapter.id)
+            for chapter in chapters
+            if chapter.id is not None
+        }
+        records = tuple(
+            CourseExercise(**row)
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+        )
+        current = tuple(
+            record
+            for record in records
+            if record.course == course_id
+            and record.course_version == str(version.id)
+            and chapter_ids.get(record.chapter_key) == record.chapter
+        )
+        return version, tuple(
+            sorted(
+                current,
+                key=lambda record: (record.chapter_key, record.exercise_key),
+            )
+        )
+
+    @staticmethod
+    async def get_current_exercise(
+        course_id: str,
+        chapter_key: str,
+        exercise_key: str,
+    ) -> CourseExercise:
+        _version, exercises = await CourseService.list_current_exercises(
+            course_id, chapter_key
+        )
+        matches = [
+            exercise
+            for exercise in exercises
+            if exercise.exercise_key == exercise_key
+        ]
+        if not matches:
+            raise NotFoundError("Current Course exercise not found")
+        if len(matches) != 1:
+            raise CourseConflictError("Course exercise stable key is ambiguous")
+        return matches[0]
+
+    @staticmethod
+    async def list_current_masteries(
+        course_id: str,
+    ) -> tuple[CourseVersion, tuple[ConceptMastery, ...]]:
+        version, chapters = await CourseService.list_current_published_chapters(
+            course_id
+        )
+        if version.id is None:
+            raise OpenNotebookError("Published Course version has no identity")
+        rows = await repo_query(
+            """
+            SELECT * FROM course_concept_mastery
+            WHERE course = $course AND course_version = $version;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(str(version.id)),
+            },
+        )
+        chapter_keys = {chapter.chapter_key for chapter in chapters}
+        records = tuple(
+            CourseConceptMastery(**row)
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+        )
+        masteries = tuple(
+            ConceptMastery(
+                course_id=record.course,
+                course_version_id=record.course_version,
+                chapter_key=record.chapter_key,
+                concept_key=record.concept_key,
+                status=record.status,
+                successful_exercise_keys=record.successful_exercise_keys,
+                unrevealed_success_count=record.unrevealed_success_count,
+                review_level=record.review_level,
+                review_due_at=record.review_due_at,
+                last_event_at=record.last_event_at,
+                snapshot_hash=record.snapshot_hash,
+            )
+            for record in records
+            if record.course == course_id
+            and record.course_version == str(version.id)
+            and record.chapter_key in chapter_keys
+        )
+        return version, tuple(
+            sorted(
+                masteries,
+                key=lambda mastery: (mastery.chapter_key, mastery.concept_key),
+            )
+        )
 
     @staticmethod
     async def update_course(course_id: str, values: dict[str, Any]) -> Course:
