@@ -151,7 +151,13 @@ class ModelSelection(CourseContract):
 
 class GenerationRequest(CourseContract):
     stage: Literal[
-        "outline", "chapter_content", "practice_labs", "review", "escalation"
+        "outline",
+        "chapter_content",
+        "practice_labs",
+        "review",
+        "escalation",
+        "exercise_bank",
+        "transfer_task",
     ]
     course_id: str = Field(min_length=1)
     chapter_key: str | None = Field(default=None, max_length=100)

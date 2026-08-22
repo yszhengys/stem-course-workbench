@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import PurePosixPath
@@ -27,6 +28,34 @@ from .contracts import LabSpecVariant, _validate_generated_text
 
 StableKey: TypeAlias = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,99}$")]
 Sha256: TypeAlias = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+AnswerType: TypeAlias = Literal[
+    "numeric",
+    "symbolic",
+    "unit",
+    "vector",
+    "set",
+    "multipart",
+    "proof",
+    "explanation",
+]
+_SAFE_SYMBOLIC_EXPRESSION = re.compile(r"[A-Za-z0-9_+\-*/^()., \t]+")
+_SAFE_SYMBOLIC_FUNCTIONS = frozenset(
+    {"abs", "acos", "asin", "atan", "cos", "exp", "log", "sin", "sqrt", "tan"}
+)
+_SAFE_SYMBOLIC_CONSTANTS = frozenset({"E", "I", "e", "oo", "pi"})
+
+
+def _expected_grader_kind(answer_type: AnswerType) -> str:
+    return {
+        "numeric": "numeric",
+        "symbolic": "symbolic",
+        "unit": "unit",
+        "vector": "vector",
+        "set": "set",
+        "multipart": "multipart",
+        "proof": "advisory",
+        "explanation": "advisory",
+    }[answer_type]
 
 
 class V2Contract(BaseModel):
@@ -56,6 +85,27 @@ class DifficultyVector(V2Contract):
         )
 
 
+EvidenceCategory: TypeAlias = Literal[
+    "definition",
+    "theorem",
+    "worked_example",
+    "exercise",
+    "answer",
+    "figure",
+    "prerequisite",
+    "unclassified",
+]
+
+
+class EvidenceClassification(V2Contract):
+    """Deterministic assessment label for one immutable evidence anchor."""
+
+    anchor_id: str = Field(pattern=r"^anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}$")
+    category: EvidenceCategory
+    confidence: Literal["high", "medium", "low"]
+    source_number: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class NumericGraderSpec(V2Contract):
     kind: Literal["numeric"]
     expected: str = Field(min_length=1, max_length=500)
@@ -69,6 +119,34 @@ class SymbolicGraderSpec(V2Contract):
     allowed_symbols: tuple[StableKey, ...] = Field(
         default_factory=tuple, max_length=100
     )
+
+    @field_validator("expected_expression")
+    @classmethod
+    def expression_uses_safe_subset(cls, value: str) -> str:
+        _validate_generated_text(value)
+        if "__" in value or not _SAFE_SYMBOLIC_EXPRESSION.fullmatch(value):
+            raise ValueError("symbolic grader expression is unsafe")
+        return value
+
+    @model_validator(mode="after")
+    def symbols_and_functions_are_declared(self) -> "SymbolicGraderSpec":
+        if re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\.|\.\s*[A-Za-z_]", self.expected_expression):
+            raise ValueError("symbolic grader expression is unsafe")
+        functions = set(
+            re.findall(
+                r"([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+                self.expected_expression,
+            )
+        )
+        if functions - _SAFE_SYMBOLIC_FUNCTIONS:
+            raise ValueError("symbolic grader expression uses an unsafe function")
+        identifiers = set(
+            re.findall(r"[A-Za-z_][A-Za-z0-9_]*", self.expected_expression)
+        )
+        used_symbols = identifiers - functions - _SAFE_SYMBOLIC_CONSTANTS
+        if used_symbols - set(self.allowed_symbols):
+            raise ValueError("symbolic grader expression uses an undeclared symbol")
+        return self
 
 
 class UnitGraderSpec(V2Contract):
@@ -141,11 +219,28 @@ TransferDimension: TypeAlias = Literal[
 ]
 
 
+class TransferDimensionEvidence(V2Contract):
+    """Auditable before/after structure supporting one declared deep change."""
+
+    dimension: TransferDimension
+    source_structure: str = Field(min_length=1, max_length=2000)
+    target_structure: str = Field(min_length=1, max_length=2000)
+    rationale: str = Field(min_length=1, max_length=4000)
+
+    _safe_text = field_validator("source_structure", "target_structure", "rationale")(
+        _validate_generated_text
+    )
+
+
 class TransferTaskSpec(V2Contract):
     key: StableKey
     prompt: str = Field(min_length=1, max_length=12000)
     invariant_concept_keys: tuple[StableKey, ...] = Field(min_length=1, max_length=50)
     dimensions: tuple[TransferDimension, ...] = Field(min_length=1, max_length=6)
+    change_evidence: tuple[TransferDimensionEvidence, ...] = Field(
+        default_factory=tuple, max_length=6
+    )
+    answer_type: AnswerType
     difficulty: DifficultyVector
     grader: GraderSpec
     anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
@@ -158,6 +253,21 @@ class TransferTaskSpec(V2Contract):
         if len(value) != len(set(value)):
             raise ValueError("values must be unique")
         return value
+
+    @model_validator(mode="after")
+    def evidence_matches_declared_dimensions(self) -> "TransferTaskSpec":
+        evidence_dimensions = tuple(
+            evidence.dimension for evidence in self.change_evidence
+        )
+        if len(evidence_dimensions) != len(set(evidence_dimensions)):
+            raise ValueError("change_evidence dimensions must be unique")
+        if self.change_evidence and set(evidence_dimensions) != set(self.dimensions):
+            raise ValueError(
+                "change_evidence must cover exactly the declared dimensions"
+            )
+        if self.grader.kind != _expected_grader_kind(self.answer_type):
+            raise ValueError("answer_type must match the grader kind")
+        return self
 
 
 class ExerciseBlueprint(V2Contract):
@@ -172,16 +282,7 @@ class ExerciseBlueprint(V2Contract):
         "generated_challenge",
         "transfer",
     ]
-    answer_type: Literal[
-        "numeric",
-        "symbolic",
-        "unit",
-        "vector",
-        "set",
-        "multipart",
-        "proof",
-        "explanation",
-    ]
+    answer_type: AnswerType
     source_anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
     source_number: str | None = Field(default=None, min_length=1, max_length=100)
     source_section: str | None = Field(default=None, min_length=1, max_length=300)
@@ -202,19 +303,16 @@ class ExerciseBlueprint(V2Contract):
             )
         if self.is_gating and not self.is_core:
             raise ValueError("a gating exercise must be a core exercise")
-        expected_grader = {
-            "numeric": "numeric",
-            "symbolic": "symbolic",
-            "unit": "unit",
-            "vector": "vector",
-            "set": "set",
-            "multipart": "multipart",
-            "proof": "advisory",
-            "explanation": "advisory",
-        }[self.answer_type]
+        if self.is_core and not self.is_gating:
+            raise ValueError("a core exercise must be gating")
+        expected_grader = _expected_grader_kind(self.answer_type)
         if self.grader.kind != expected_grader:
             raise ValueError("answer_type must match the grader kind")
         return self
+
+
+class ExerciseBankArtifact(V2Contract):
+    exercises: tuple[ExerciseBlueprint, ...] = Field(min_length=1, max_length=500)
 
 
 LearningEventKind: TypeAlias = Literal[
@@ -538,6 +636,7 @@ class CourseBundleManifest(V2Contract):
 
 __all__ = [
     "AdvisoryGraderSpec",
+    "AnswerType",
     "BundleFileManifest",
     "BundleRecordCount",
     "ConceptMastery",
@@ -545,6 +644,9 @@ __all__ = [
     "DifficultyVector",
     "DraftOperation",
     "DraftRevision",
+    "EvidenceCategory",
+    "EvidenceClassification",
+    "ExerciseBankArtifact",
     "ExerciseBlueprint",
     "FrozenLabSpec",
     "GradedPayload",
@@ -567,6 +669,8 @@ __all__ = [
     "ReviewQueueItem",
     "SetGraderSpec",
     "SymbolicGraderSpec",
+    "TransferDimension",
+    "TransferDimensionEvidence",
     "TransferTaskPayload",
     "TransferTaskSpec",
     "TutorResponse",

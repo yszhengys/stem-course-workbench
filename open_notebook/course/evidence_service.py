@@ -22,6 +22,7 @@ from open_notebook.exceptions import ConfigurationError, InvalidInputError
 
 from .locking import course_job_lock
 from .models import Course, CourseEvidenceAnchor
+from .v2_contracts import EvidenceCategory, EvidenceClassification
 
 EvidenceKind = Literal["pdf", "pptx"]
 SourceRole = Literal["PRIMARY", "SUPPLEMENT"]
@@ -59,6 +60,51 @@ class EvidenceService:
     MAX_PREVIEW_LINE_CHARS = 96
     MAX_PREVIEW_TEXT_CHARS = MAX_PREVIEW_LINES * MAX_PREVIEW_LINE_CHARS
     MAX_PREVIEW_BYTES = 64 * 1024
+    _ASSESSMENT_LABELS: tuple[tuple[EvidenceCategory, re.Pattern[str]], ...] = (
+        (
+            "prerequisite",
+            re.compile(r"\b(?:prerequisite|recall|review)\b|先修|复习", re.I),
+        ),
+        (
+            "worked_example",
+            re.compile(r"\b(?:worked[ -]?example|example)\b|例题|示例", re.I),
+        ),
+        ("answer", re.compile(r"\b(?:answer|solution)\b|答案|解答", re.I)),
+        (
+            "exercise",
+            re.compile(
+                r"\b(?:exercise|problem|practice|question)\b|练习|习题|问题", re.I
+            ),
+        ),
+        (
+            "theorem",
+            re.compile(
+                r"\b(?:theorem|lemma|proposition|corollary)\b|定理|引理|命题|推论", re.I
+            ),
+        ),
+        ("definition", re.compile(r"\bdefinition\b|定义", re.I)),
+        ("figure", re.compile(r"\b(?:figure|table|diagram|chart)\b|图|表", re.I)),
+    )
+    _SOURCE_NUMBER_SUFFIX = re.compile(
+        r"[\s:_#]*(?:no\.?|编号)?\s*([0-9]+(?:\.[0-9]+){0,5}[a-z]?)",
+        re.I,
+    )
+    _ANSWER_SOURCE_NUMBER_SUFFIX = re.compile(
+        r"[\s:_#]*(?:to\s+exercise\s+)?(?:no\.?|编号)?\s*"
+        r"([0-9]+(?:\.[0-9]+){0,5}[a-z]?)",
+        re.I,
+    )
+
+    @classmethod
+    def _number_after_label(
+        cls, category: EvidenceCategory, text: str, label: re.Match[str]
+    ) -> re.Match[str] | None:
+        pattern = (
+            cls._ANSWER_SOURCE_NUMBER_SUFFIX
+            if category == "answer"
+            else cls._SOURCE_NUMBER_SUFFIX
+        )
+        return pattern.match(text[label.end() :])
 
     def __init__(
         self,
@@ -76,6 +122,82 @@ class EvidenceService:
     @staticmethod
     def normalize_text(value: str) -> str:
         return re.sub(r"\s+", " ", value or "").strip()
+
+    @classmethod
+    def classify_assessment_anchor(
+        cls, anchor: CourseEvidenceAnchor
+    ) -> EvidenceClassification:
+        """Classify an anchor without trusting model-supplied labels."""
+
+        quote = cls.normalize_text(anchor.locator.quote)
+        block_key = cls.normalize_text(anchor.locator.block_key)
+        category: EvidenceCategory = "unclassified"
+        confidence = "low"
+        block_matches = [
+            (match.start(), candidate, match)
+            for candidate, pattern in cls._ASSESSMENT_LABELS
+            if (match := pattern.search(block_key)) is not None
+        ]
+        selected_match: re.Match[str] | None = None
+        selected_text = ""
+        if block_matches:
+            _, category, selected_match = min(block_matches, key=lambda item: item[0])
+            selected_text = block_key
+            confidence = "high"
+        quote_matches = [
+            (match.start(), candidate, match)
+            for candidate, pattern in cls._ASSESSMENT_LABELS
+            if (match := pattern.search(quote)) is not None
+        ]
+        if not block_matches:
+            if quote_matches:
+                first_position, category, selected_match = min(
+                    quote_matches, key=lambda item: item[0]
+                )
+                selected_text = quote
+                confidence = "high" if first_position == 0 else "medium"
+        number_match = (
+            cls._number_after_label(category, selected_text, selected_match)
+            if selected_match is not None
+            else None
+        )
+        if number_match is None and block_matches:
+            leading_quote_match = next(
+                (
+                    match
+                    for position, candidate, match in quote_matches
+                    if position == 0 and candidate == category
+                ),
+                None,
+            )
+            if leading_quote_match is not None:
+                number_match = cls._number_after_label(
+                    category, quote, leading_quote_match
+                )
+        return EvidenceClassification(
+            anchor_id=anchor.anchor_id,
+            category=category,
+            confidence=confidence,
+            source_number=number_match.group(1) if number_match else None,
+        )
+
+    @classmethod
+    def assessment_context(
+        cls,
+        anchor: CourseEvidenceAnchor,
+        classification: EvidenceClassification,
+    ) -> str:
+        if classification.anchor_id != anchor.anchor_id:
+            raise EvidenceInputError(
+                "Evidence classification does not match its anchor."
+            )
+        source_number = classification.source_number or "none"
+        quote = json.dumps(cls.normalize_text(anchor.locator.quote), ensure_ascii=False)
+        return (
+            f"[anchor_id={anchor.anchor_id} category={classification.category} "
+            f"confidence={classification.confidence} source_number={source_number} "
+            f"role={anchor.source_role}] {quote}"
+        )
 
     @classmethod
     def quote_sha256(cls, quote: str) -> str:
@@ -488,7 +610,7 @@ class EvidenceService:
             f'font-size="30" font-weight="700" fill="#0f172a">Slide {slide_index}</text>'
             '<text x="72" y="146" font-family="system-ui, sans-serif" '
             f'font-size="24" fill="#334155">{tspans}</text>'
-            '</svg>'
+            "</svg>"
         ).encode("utf-8")
         if len(svg) > cls.MAX_PREVIEW_BYTES:
             raise EvidenceInputError("Evidence preview exceeds its safe size limit.")
@@ -582,19 +704,16 @@ class EvidenceService:
         if hashlib.sha256(content).hexdigest()[:16] != filename_match.group(1):
             raise EvidenceInputError("Evidence preview identity hash does not match.")
         lowered = content.lower()
-        if (
-            not content.startswith(b'<svg xmlns="http://www.w3.org/2000/svg"')
-            or any(
-                token in lowered
-                for token in (
-                    b"<script",
-                    b"javascript:",
-                    b"<foreignobject",
-                    b" href=",
-                    b" xlink:href=",
-                    b" onload=",
-                    b" onclick=",
-                )
+        if not content.startswith(b'<svg xmlns="http://www.w3.org/2000/svg"') or any(
+            token in lowered
+            for token in (
+                b"<script",
+                b"javascript:",
+                b"<foreignobject",
+                b" href=",
+                b" xlink:href=",
+                b" onload=",
+                b" onclick=",
             )
         ):
             raise EvidenceInputError("Evidence preview content is not safe SVG.")

@@ -34,6 +34,12 @@ from .contracts import (
 from .evidence_service import EvidenceService
 from .model_adapters import CourseModelAdapter, build_adapter
 from .models import CourseEvidenceAnchor
+from .v2_contracts import (
+    EvidenceClassification,
+    ExerciseBankArtifact,
+    ExerciseBlueprint,
+    TransferTaskSpec,
+)
 
 UNIT_REGISTRY: UnitRegistry = UnitRegistry()
 COURSE_PROMPT_STAGES = {
@@ -42,6 +48,8 @@ COURSE_PROMPT_STAGES = {
     "practice_labs",
     "review",
     "escalation",
+    "exercise_bank",
+    "transfer_task",
 }
 ModelArtifactT = TypeVar("ModelArtifactT", bound=BaseModel)
 
@@ -155,7 +163,7 @@ class CourseGenerationService:
         def visit(value: Any, field_name: str | None = None) -> Any:
             if field_name == "anchor_id" and isinstance(value, str):
                 return canonical(value)
-            if field_name in {"anchor_ids", "citations"} and isinstance(value, list):
+            if field_name in {"anchor_ids", "citations", "source_anchor_ids"} and isinstance(value, list):
                 return [canonical(item) if isinstance(item, str) else item for item in value]
             if isinstance(value, dict):
                 return {key: visit(item, key) for key, item in value.items()}
@@ -175,6 +183,131 @@ class CourseGenerationService:
             separators=(",", ":"),
         )
         return f"Return one JSON object matching this schema exactly: {schema}"
+
+    async def generate_exercise_bank(
+        self,
+        *,
+        course_id: str,
+        course_version_id: str,
+        anchor_ids: list[str],
+        evidence: Iterable[str],
+        classifications: Iterable[EvidenceClassification],
+        outline: CourseOutlineArtifact,
+        model: ModelSelection,
+        prompt_version: str = "v2",
+    ) -> ExerciseBankArtifact:
+        if re.fullmatch(r"course_version:[^:]+", course_version_id) is None:
+            raise ValueError("course_version_id must be a Course version record ID")
+        if not anchor_ids or len(anchor_ids) != len(set(anchor_ids)):
+            raise ValueError("Exercise-bank anchor IDs must be non-empty and unique")
+        classified = tuple(classifications)
+        if tuple(item.anchor_id for item in classified) != tuple(anchor_ids):
+            raise ValueError("Evidence classifications must match selected anchors in order")
+        expected_chapters = {chapter.key for chapter in outline.chapters}
+        concept_anchors = {
+            concept.key: set(concept.anchor_ids) for concept in outline.concepts
+        }
+        allowed_concepts = {
+            chapter.key: set(chapter.objective_keys) for chapter in outline.chapters
+        }
+        allowed_anchors = {
+            chapter.key: set(chapter.anchor_ids).union(
+                *(concept_anchors.get(key, set()) for key in chapter.objective_keys)
+            )
+            for chapter in outline.chapters
+        }
+        outline_anchor_ids = set().union(*allowed_anchors.values())
+        if not set(anchor_ids).issubset(outline_anchor_ids):
+            raise ValueError("Selected evidence includes an anchor outside the outline")
+        request = GenerationRequest(
+            stage="exercise_bank",
+            course_id=course_id,
+            model=model,
+            anchor_ids=anchor_ids,
+            prompt_version=prompt_version,
+            schema_name="course_exercise_bank",
+        )
+        classification_json = "\n".join(
+            item.model_dump_json() for item in classified
+        )
+        adapter = self.adapter or build_adapter(model)
+        generated = await adapter.generate(
+            request,
+            ExerciseBankArtifact,
+            prompt=self.prompt_for(
+                "exercise_bank",
+                evidence,
+                "Build the assessment bank for immutable version "
+                f"{course_version_id}.\nValidated evidence classifications:\n"
+                f"{classification_json}\nTrusted outline context:\n"
+                f"{outline.model_dump_json()}",
+                format_instructions=self._format_instructions(ExerciseBankArtifact),
+            ),
+        )
+        canonical = self.canonicalize_anchor_references(generated, set(anchor_ids))
+        actual_chapters = {exercise.chapter_key for exercise in canonical.exercises}
+        unknown_chapters = actual_chapters - expected_chapters
+        if unknown_chapters:
+            raise ValueError("Exercise bank contains an unknown outline chapter")
+        if expected_chapters - actual_chapters:
+            raise ValueError("Exercise bank omits an outline chapter")
+        for exercise in canonical.exercises:
+            cited = set(exercise.source_anchor_ids)
+            if exercise.transfer_task is not None:
+                cited.update(exercise.transfer_task.anchor_ids)
+            if not cited.issubset(set(anchor_ids)):
+                raise ValueError("Exercise bank contains an unknown evidence anchor")
+            if not cited.issubset(allowed_anchors[exercise.chapter_key]):
+                raise ValueError("Exercise bank cites an anchor outside its chapter")
+            concepts = set(exercise.concept_keys)
+            if exercise.transfer_task is not None:
+                concepts.update(exercise.transfer_task.invariant_concept_keys)
+            if not concepts.issubset(allowed_concepts[exercise.chapter_key]):
+                raise ValueError("Exercise bank contains an unknown concept key")
+        return canonical
+
+    async def generate_transfer_task(
+        self,
+        *,
+        course_id: str,
+        chapter_key: str,
+        core: ExerciseBlueprint,
+        anchor_ids: list[str],
+        evidence: Iterable[str],
+        model: ModelSelection,
+        prompt_version: str = "v2",
+    ) -> TransferTaskSpec:
+        if core.chapter_key != chapter_key or not core.is_core:
+            raise ValueError("Transfer generation requires the matching core exercise")
+        if not anchor_ids or len(anchor_ids) != len(set(anchor_ids)):
+            raise ValueError("Transfer anchor IDs must be non-empty and unique")
+        if not set(core.source_anchor_ids).issubset(set(anchor_ids)):
+            raise ValueError("Core exercise contains an unknown evidence anchor")
+        request = GenerationRequest(
+            stage="transfer_task",
+            course_id=course_id,
+            chapter_key=chapter_key,
+            model=model,
+            anchor_ids=anchor_ids,
+            prompt_version=prompt_version,
+            schema_name="course_transfer_task",
+        )
+        adapter = self.adapter or build_adapter(model)
+        generated = await adapter.generate(
+            request,
+            TransferTaskSpec,
+            prompt=self.prompt_for(
+                "transfer_task",
+                evidence,
+                "Create one deep transfer for this core exercise:\n"
+                + core.model_dump_json(),
+                format_instructions=self._format_instructions(TransferTaskSpec),
+            ),
+        )
+        canonical = self.canonicalize_anchor_references(generated, set(anchor_ids))
+        if not set(canonical.anchor_ids).issubset(set(anchor_ids)):
+            raise ValueError("Transfer task contains an unknown evidence anchor")
+        return canonical
 
     async def generate_outline(
         self,

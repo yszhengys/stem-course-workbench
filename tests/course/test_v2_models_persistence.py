@@ -65,6 +65,7 @@ def exercise_blueprint() -> ExerciseBlueprint:
             prompt="Construct a function with the requested limiting behavior.",
             invariant_concept_keys=["limit"],
             dimensions=["inverse_or_constructive"],
+            answer_type="symbolic",
             difficulty=difficulty,
             grader=grader,
             anchor_ids=["anchor:one"],

@@ -50,6 +50,7 @@ def transfer() -> TransferTaskSpec:
         prompt="Construct a function from the requested limiting behavior.",
         invariant_concept_keys=["limit"],
         dimensions=["inverse_or_constructive"],
+        answer_type="symbolic",
         difficulty=difficulty(),
         grader=SymbolicGraderSpec(
             kind="symbolic", expected_expression="x", allowed_symbols=["x"]
