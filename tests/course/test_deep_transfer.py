@@ -1,11 +1,11 @@
 from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 
 from open_notebook.course.assessment_service import AssessmentService
 from open_notebook.course.contracts import ValidationFinding
 from open_notebook.course.v2_contracts import (
-    AdvisoryGraderSpec,
     AnswerType,
     DifficultyVector,
     ExerciseBlueprint,
@@ -57,12 +57,17 @@ def _answer_contract(dimension: TransferDimension) -> tuple[AnswerType, GraderSp
     if dimension == "constraints_frame_or_regime":
         return "set", SetGraderSpec(kind="set", expected_items=["no-solution-regime"])
     if dimension == "method_comparison":
-        return "explanation", AdvisoryGraderSpec(
-            kind="advisory", rubric="Compare both valid methods and assumptions."
+        return "set", SetGraderSpec(
+            kind="set",
+            expected_items=["elimination", "substitution", "same-solution"],
         )
     if dimension == "proof_counterexample_generalization":
-        return "proof", AdvisoryGraderSpec(
-            kind="advisory", rubric="Check the proof and boundary counterexample."
+        return "set", SetGraderSpec(
+            kind="set",
+            expected_items=[
+                "unique-if-nonzero-coefficient",
+                "counterexample-zero-coefficient",
+            ],
         )
     if dimension == "math_physics_context":
         return "unit", UnitGraderSpec(
@@ -156,18 +161,37 @@ def test_six_deep_transfer_families_are_accepted(
     source_structure: str,
     target_structure: str,
 ) -> None:
+    transfer = _transfer(
+        dimension,
+        prompt=prompt,
+        source_structure=source_structure,
+        target_structure=target_structure,
+    )
+    core = ExerciseBlueprint.model_validate(
+        {
+            **_core().model_dump(mode="json"),
+            "transfer_task": transfer.model_dump(mode="json"),
+        }
+    )
     findings = AssessmentService().validate_transfer(
-        _core(),
-        _transfer(
-            dimension,
-            prompt=prompt,
-            source_structure=source_structure,
-            target_structure=target_structure,
-        ),
+        core,
+        transfer,
         review_findings=[],
     )
 
+    assert core.transfer_task == transfer
     assert findings == []
+
+
+def test_core_transfer_prompts_require_objective_deterministic_grading() -> None:
+    for path in (
+        "prompts/course/transfer_task.jinja",
+        "prompts/course/exercise_bank.jinja",
+    ):
+        prompt = Path(path).read_text()
+        assert "objective" in prompt.lower()
+        assert "deterministic grader" in prompt.lower()
+        assert "advisory" in prompt.lower()
 
 
 @pytest.mark.parametrize(

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Annotated, Literal, TypeAlias, Union, cast
 
+from pint import UnitRegistry
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -23,6 +25,25 @@ from pydantic import (
 )
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema
+from sympy import (
+    Abs,
+    E,
+    Expr,
+    Pow,
+    Symbol,
+    acos,
+    asin,
+    atan,
+    cos,
+    exp,
+    log,
+    pi,
+    preorder_traversal,
+    sin,
+    sqrt,
+    sympify,
+    tan,
+)
 
 from .contracts import LabSpecVariant, _validate_generated_text
 
@@ -42,7 +63,93 @@ _SAFE_SYMBOLIC_EXPRESSION = re.compile(r"[A-Za-z0-9_+\-*/^()., \t]+")
 _SAFE_SYMBOLIC_FUNCTIONS = frozenset(
     {"abs", "acos", "asin", "atan", "cos", "exp", "log", "sin", "sqrt", "tan"}
 )
-_SAFE_SYMBOLIC_CONSTANTS = frozenset({"E", "I", "e", "oo", "pi"})
+_SAFE_SYMBOLIC_CONSTANTS = frozenset({"E", "pi"})
+_SAFE_UNIT_EXPRESSION = re.compile(r"[A-Za-z0-9_*/^()%° \-]+")
+_GRADER_UNIT_REGISTRY: UnitRegistry = UnitRegistry()
+_SYMPY_LOCALS = {
+    "E": E,
+    "pi": pi,
+    "abs": Abs,
+    "acos": acos,
+    "asin": asin,
+    "atan": atan,
+    "cos": cos,
+    "exp": exp,
+    "log": log,
+    "sin": sin,
+    "sqrt": sqrt,
+    "tan": tan,
+}
+_MAX_SYMBOLIC_NODES = 100
+_MAX_SYMBOLIC_POWER = 20.0
+
+
+def _parse_declared_symbolic_expression(
+    value: str, allowed_symbols: tuple[str, ...]
+) -> Expr:
+    expression = sympify(
+        value.replace("^", "**"),
+        locals={
+            **_SYMPY_LOCALS,
+            **{name: Symbol(name) for name in allowed_symbols},
+        },
+        evaluate=False,
+    )
+    if not isinstance(expression, Expr):
+        raise ValueError("symbolic value must be one expression")
+    return expression
+
+
+def _validate_symbolic_tree(expression: object) -> None:
+    node_count = 0
+    for node in preorder_traversal(expression):
+        node_count += 1
+        if node_count > _MAX_SYMBOLIC_NODES:
+            raise ValueError("symbolic grader expression is too complex")
+        if isinstance(node, Pow) and node.exp.is_number:
+            try:
+                exponent = float(node.exp.evalf())
+            except Exception as exc:
+                raise ValueError("symbolic grader exponent is invalid") from exc
+            if not math.isfinite(exponent) or abs(exponent) > _MAX_SYMBOLIC_POWER:
+                raise ValueError("symbolic grader exponent is outside safe bounds")
+
+
+def _validate_numeric_oracle(value: str) -> str:
+    _validate_generated_text(value)
+    clean = value.strip()
+    if (
+        not clean
+        or "__" in clean
+        or not _SAFE_SYMBOLIC_EXPRESSION.fullmatch(clean)
+        or re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\.|\.\s*[A-Za-z_]", clean)
+    ):
+        raise ValueError("numeric grader oracle is unsafe")
+    functions = set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", clean))
+    if functions - _SAFE_SYMBOLIC_FUNCTIONS:
+        raise ValueError("numeric grader oracle uses an unsafe function")
+    identifiers = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", clean))
+    if identifiers - functions - _SAFE_SYMBOLIC_CONSTANTS:
+        raise ValueError("numeric grader oracle must not contain symbols")
+    try:
+        expression = _parse_declared_symbolic_expression(clean, ())
+        _validate_symbolic_tree(expression)
+        if expression.free_symbols or not math.isfinite(float(expression.evalf())):
+            raise ValueError("numeric grader oracle must be finite")
+    except Exception as exc:
+        raise ValueError("numeric grader oracle is invalid") from exc
+    return value
+
+
+def _validate_unit_oracle(value: str) -> str:
+    clean = value.strip()
+    if not clean or "__" in clean or not _SAFE_UNIT_EXPRESSION.fullmatch(clean):
+        raise ValueError("grader unit is unsafe")
+    try:
+        _GRADER_UNIT_REGISTRY.Unit(clean)
+    except Exception as exc:
+        raise ValueError("grader unit is unknown or invalid") from exc
+    return value
 
 
 def _expected_grader_kind(answer_type: AnswerType) -> str:
@@ -112,6 +219,8 @@ class NumericGraderSpec(V2Contract):
     absolute_tolerance: FiniteFloat = Field(default=0.0, ge=0)
     relative_tolerance: FiniteFloat = Field(default=0.0, ge=0)
 
+    _valid_expected = field_validator("expected")(_validate_numeric_oracle)
+
 
 class SymbolicGraderSpec(V2Contract):
     kind: Literal["symbolic"]
@@ -128,9 +237,23 @@ class SymbolicGraderSpec(V2Contract):
             raise ValueError("symbolic grader expression is unsafe")
         return value
 
+    @field_validator("allowed_symbols")
+    @classmethod
+    def symbols_are_unique_and_not_reserved(
+        cls, values: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        reserved = _SAFE_SYMBOLIC_FUNCTIONS | _SAFE_SYMBOLIC_CONSTANTS
+        if len(set(values)) != len(values):
+            raise ValueError("symbolic grader symbols must be unique")
+        if set(values) & reserved:
+            raise ValueError("symbolic grader symbols use a reserved name")
+        return values
+
     @model_validator(mode="after")
     def symbols_and_functions_are_declared(self) -> "SymbolicGraderSpec":
-        if re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\.|\.\s*[A-Za-z_]", self.expected_expression):
+        if re.search(
+            r"[A-Za-z_][A-Za-z0-9_]*\s*\.|\.\s*[A-Za-z_]", self.expected_expression
+        ):
             raise ValueError("symbolic grader expression is unsafe")
         functions = set(
             re.findall(
@@ -146,6 +269,17 @@ class SymbolicGraderSpec(V2Contract):
         used_symbols = identifiers - functions - _SAFE_SYMBOLIC_CONSTANTS
         if used_symbols - set(self.allowed_symbols):
             raise ValueError("symbolic grader expression uses an undeclared symbol")
+        try:
+            expression = _parse_declared_symbolic_expression(
+                self.expected_expression,
+                self.allowed_symbols,
+            )
+            free_symbols = expression.free_symbols
+        except Exception as exc:
+            raise ValueError("symbolic grader expression is invalid") from exc
+        if {str(symbol) for symbol in free_symbols} - set(self.allowed_symbols):
+            raise ValueError("symbolic grader expression uses an undeclared symbol")
+        _validate_symbolic_tree(expression)
         return self
 
 
@@ -156,6 +290,9 @@ class UnitGraderSpec(V2Contract):
     absolute_tolerance: FiniteFloat = Field(default=0.0, ge=0)
     relative_tolerance: FiniteFloat = Field(default=0.0, ge=0)
 
+    _valid_expected = field_validator("expected_value")(_validate_numeric_oracle)
+    _valid_unit = field_validator("expected_unit")(_validate_unit_oracle)
+
 
 class VectorGraderSpec(V2Contract):
     kind: Literal["vector"]
@@ -164,11 +301,34 @@ class VectorGraderSpec(V2Contract):
     absolute_tolerance: FiniteFloat = Field(default=0.0, ge=0)
     relative_tolerance: FiniteFloat = Field(default=0.0, ge=0)
 
+    @field_validator("expected_components")
+    @classmethod
+    def components_are_valid_oracles(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        for value in values:
+            _validate_numeric_oracle(value)
+        return values
+
+    @field_validator("expected_unit")
+    @classmethod
+    def unit_is_valid_if_present(cls, value: str | None) -> str | None:
+        return _validate_unit_oracle(value) if value is not None else None
+
 
 class SetGraderSpec(V2Contract):
     kind: Literal["set"]
     expected_items: tuple[str, ...] = Field(max_length=200)
     order_matters: bool = False
+
+    @field_validator("expected_items")
+    @classmethod
+    def items_are_bounded_and_canonical(
+        cls, values: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        for value in values:
+            normalized = re.sub(r"\s+", " ", value).strip()
+            if not (1 <= len(normalized) <= 500) or value != normalized:
+                raise ValueError("set grader items must be bounded canonical text")
+        return values
 
 
 ObjectiveGraderSpec: TypeAlias = Annotated[
@@ -208,6 +368,61 @@ GraderSpec: TypeAlias = Annotated[
     ],
     Field(discriminator="kind"),
 ]
+
+GradeFeedbackCode: TypeAlias = Literal[
+    "correct", "incorrect", "invalid_answer", "advisory"
+]
+
+
+class GradeResult(V2Contract):
+    correct: bool | None
+    advisory: bool = False
+    grants_mastery: bool = False
+    feedback_code: GradeFeedbackCode
+    part_results: tuple["GradeResult", ...] = Field(
+        default_factory=tuple, max_length=20
+    )
+
+    @model_validator(mode="after")
+    def outcome_fields_are_consistent(self) -> "GradeResult":
+        if self.advisory:
+            if (
+                self.correct is not None
+                or self.grants_mastery
+                or self.feedback_code != "advisory"
+                or self.part_results
+            ):
+                raise ValueError("advisory grade results cannot grant mastery")
+            return self
+        if self.correct is None or self.grants_mastery != self.correct:
+            raise ValueError("objective grade result fields are inconsistent")
+        if self.feedback_code == "advisory":
+            raise ValueError("objective grade results cannot be advisory")
+        if self.correct and self.feedback_code != "correct":
+            raise ValueError("objective feedback contradicts the grade outcome")
+        if not self.correct and self.feedback_code not in {
+            "incorrect",
+            "invalid_answer",
+        }:
+            raise ValueError("objective feedback contradicts the grade outcome")
+        if self.part_results:
+            if any(part.advisory for part in self.part_results):
+                raise ValueError("objective part results cannot be advisory")
+            parts_correct = all(part.correct is True for part in self.part_results)
+            parts_invalid = any(
+                part.feedback_code == "invalid_answer" for part in self.part_results
+            )
+            expected_feedback = (
+                "correct"
+                if parts_correct
+                else "invalid_answer"
+                if parts_invalid
+                else "incorrect"
+            )
+            if self.correct != parts_correct or self.feedback_code != expected_feedback:
+                raise ValueError("multipart grade result contradicts its part results")
+        return self
+
 
 TransferDimension: TypeAlias = Literal[
     "representation",
@@ -308,6 +523,14 @@ class ExerciseBlueprint(V2Contract):
         expected_grader = _expected_grader_kind(self.answer_type)
         if self.grader.kind != expected_grader:
             raise ValueError("answer_type must match the grader kind")
+        if (self.is_core or self.is_source_level) and self.grader.kind == "advisory":
+            raise ValueError("mastery-eligible exercises require an objective grader")
+        if (
+            self.is_core
+            and self.transfer_task is not None
+            and self.transfer_task.grader.kind == "advisory"
+        ):
+            raise ValueError("a core transfer gate requires an objective grader")
         return self
 
 
@@ -333,23 +556,38 @@ class PositionPayload(V2Contract):
 
 
 class HintViewedPayload(V2Contract):
+    attempt_key: StableKey
     hint_index: int = Field(ge=1, le=4)
 
 
 class TransferTaskPayload(V2Contract):
-    transfer_task_key: StableKey
+    attempt_key: StableKey
+    transfer_task_key: StableKey | None = None
+
+
+ResponsePart: TypeAlias = Annotated[str, Field(min_length=1, max_length=4000)]
 
 
 class GradedPayload(V2Contract):
     answer_revealed: bool
     hints_used: int = Field(ge=0, le=4)
-    attempt_key: StableKey | None = None
-    response_parts: tuple[str, ...] = Field(default_factory=tuple, max_length=20)
+    attempt_key: StableKey
+    response_parts: tuple[ResponsePart, ...] = Field(min_length=1, max_length=20)
+
+
+class TransferCompletedPayload(V2Contract):
+    attempt_key: StableKey
+    source_attempt_key: StableKey
+    transfer_task_key: StableKey
+    response_parts: tuple[ResponsePart, ...] = Field(min_length=1, max_length=20)
 
 
 class ReviewCompletedPayload(V2Contract):
+    attempt_key: StableKey
     correct: bool
     answer_revealed: bool
+    hints_used: int = Field(ge=0, le=4)
+    response_parts: tuple[ResponsePart, ...] = Field(min_length=1, max_length=20)
 
 
 LearningEventPayload: TypeAlias = Union[
@@ -357,6 +595,7 @@ LearningEventPayload: TypeAlias = Union[
     HintViewedPayload,
     TransferTaskPayload,
     GradedPayload,
+    TransferCompletedPayload,
     ReviewCompletedPayload,
 ]
 
@@ -367,7 +606,7 @@ _EVENT_PAYLOAD_TYPES: dict[LearningEventKind, type[V2Contract]] = {
     "transfer_required": TransferTaskPayload,
     "graded_correct": GradedPayload,
     "graded_incorrect": GradedPayload,
-    "transfer_completed": TransferTaskPayload,
+    "transfer_completed": TransferCompletedPayload,
     "review_completed": ReviewCompletedPayload,
     "reading_position": PositionPayload,
 }
@@ -386,6 +625,13 @@ class LearningEvent(V2Contract):
     payload: LearningEventPayload
     occurred_at: datetime
 
+    @field_validator("occurred_at")
+    @classmethod
+    def timestamp_has_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("occurred_at must include a timezone")
+        return value.astimezone(timezone.utc)
+
     @model_validator(mode="after")
     def payload_matches_kind(self) -> "LearningEvent":
         if not isinstance(self.payload, _EVENT_PAYLOAD_TYPES[self.kind]):
@@ -398,6 +644,7 @@ class LearningEvent(V2Contract):
                 "graded_incorrect",
                 "transfer_required",
                 "transfer_completed",
+                "review_completed",
             }
         )
         concept_events = frozenset(
@@ -414,6 +661,10 @@ class LearningEvent(V2Contract):
             raise ValueError("exercise_key is required for this learning event")
         if self.kind in concept_events and self.concept_key is None:
             raise ValueError("concept_key is required for this learning event")
+        if self.kind in {"chapter_opened", "reading_position"} and (
+            self.concept_key is not None or self.exercise_key is not None
+        ):
+            raise ValueError("activity events cannot claim a concept or exercise")
         if (
             self.kind == "reading_position"
             and isinstance(self.payload, PositionPayload)
@@ -443,6 +694,15 @@ class ConceptMastery(V2Contract):
     last_event_at: datetime | None = None
     snapshot_hash: Sha256
 
+    @field_validator("review_due_at", "last_event_at")
+    @classmethod
+    def snapshot_times_are_canonical(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("mastery timestamps must include a timezone")
+        return value.astimezone(timezone.utc)
+
 
 class ReviewQueueItem(V2Contract):
     chapter_key: StableKey
@@ -450,6 +710,13 @@ class ReviewQueueItem(V2Contract):
     status: Literal["review_due"]
     due_at: datetime
     interval_days: Literal[1, 3, 7, 14, 30]
+
+    @field_validator("due_at")
+    @classmethod
+    def due_time_is_canonical(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("review due time must include a timezone")
+        return value.astimezone(timezone.utc)
 
 
 class TutorTurn(V2Contract):
@@ -649,6 +916,8 @@ __all__ = [
     "ExerciseBankArtifact",
     "ExerciseBlueprint",
     "FrozenLabSpec",
+    "GradeFeedbackCode",
+    "GradeResult",
     "GradedPayload",
     "GraderSpec",
     "HintViewedPayload",
@@ -665,12 +934,14 @@ __all__ = [
     "ReplaceLabOperation",
     "ReplaceTextOperation",
     "ReplaceTransferOperation",
+    "ResponsePart",
     "ReviewCompletedPayload",
     "ReviewQueueItem",
     "SetGraderSpec",
     "SymbolicGraderSpec",
     "TransferDimension",
     "TransferDimensionEvidence",
+    "TransferCompletedPayload",
     "TransferTaskPayload",
     "TransferTaskSpec",
     "TutorResponse",

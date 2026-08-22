@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+import subprocess
+import sys
+import threading
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Literal, TypeAlias
+
+from pint.errors import PintError
+from sympy import Pow, preorder_traversal
 
 from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.domain.notebook import Source
@@ -16,15 +24,24 @@ from open_notebook.exceptions import ConfigurationError, InvalidInputError
 
 from .contracts import CourseOutlineArtifact, ModelSelection, ValidationFinding
 from .evidence_service import EvidenceInputError, EvidenceService
-from .generation_service import CourseGenerationService
+from .generation_service import UNIT_REGISTRY, CourseGenerationService
 from .models import Course, CourseEvidenceAnchor, CourseVersion
 from .task_backend import CourseTaskBackend
 from .v2_contracts import (
     DifficultyVector,
     EvidenceClassification,
     ExerciseBlueprint,
+    GradeResult,
+    GraderSpec,
+    MultipartGraderSpec,
+    NumericGraderSpec,
+    SetGraderSpec,
+    SymbolicGraderSpec,
     TransferDimensionEvidence,
     TransferTaskSpec,
+    UnitGraderSpec,
+    VectorGraderSpec,
+    _parse_declared_symbolic_expression,
 )
 
 AssessmentAnchorLoader: TypeAlias = Callable[
@@ -42,6 +59,150 @@ FindingStatus: TypeAlias = Literal[
     "open", "uncertain", "resolved", "manual_check", "acknowledged"
 ]
 StructuralDepth: TypeAlias = Literal["deep", "superficial", "unknown"]
+_SAFE_ANSWER_EXPRESSION = re.compile(r"[A-Za-z0-9_+\-*/^()., \t]+")
+_SAFE_ANSWER_FUNCTIONS = frozenset(
+    {"abs", "acos", "asin", "atan", "cos", "exp", "log", "sin", "sqrt", "tan"}
+)
+_SAFE_ANSWER_CONSTANTS = frozenset({"E", "pi"})
+_SAFE_UNIT_EXPRESSION = re.compile(r"[A-Za-z0-9_*/^().%° \-]+")
+_MAX_SYMBOLIC_NODES = 100
+_MAX_SYMBOLIC_POWER = 20.0
+_SYMBOLIC_EQUIVALENCE_TIMEOUT_SECONDS = 1.5
+_MAX_SYMBOLIC_EQUIVALENCES_PER_BATCH = 512
+_SYMBOLIC_EQUIVALENCE_CACHE_SIZE = 1024
+_SYMBOLIC_CACHE_MISS = object()
+_SymbolicKey: TypeAlias = tuple[str, str, tuple[str, ...]]
+_SYMBOLIC_EQUIVALENCE_CACHE: OrderedDict[_SymbolicKey, bool | None] = OrderedDict()
+_SYMBOLIC_EQUIVALENCE_LOCK = threading.RLock()
+_SYMBOLIC_EQUIVALENCE_SCRIPT = r"""
+import json
+import signal
+import sys
+from sympy import Abs, E, Symbol, acos, asin, atan, cos, exp, log, pi, sin, sqrt, sympify, tan
+
+payload = json.load(sys.stdin)
+results = []
+
+def comparison_timeout(signum, frame):
+    raise TimeoutError("symbolic comparison timed out")
+
+signal.signal(signal.SIGALRM, comparison_timeout)
+for comparison in payload["comparisons"]:
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.5)
+        locals_map = {
+            "E": E,
+            "pi": pi,
+            "abs": Abs,
+            "acos": acos,
+            "asin": asin,
+            "atan": atan,
+            "cos": cos,
+            "exp": exp,
+            "log": log,
+            "sin": sin,
+            "sqrt": sqrt,
+            "tan": tan,
+            **{name: Symbol(name) for name in comparison["allowed_symbols"]},
+        }
+        actual = sympify(comparison["actual"], locals=locals_map, evaluate=False)
+        expected = sympify(comparison["expected"], locals=locals_map, evaluate=False)
+        results.append(bool((actual - expected).equals(0)))
+    except Exception:
+        results.append(None)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+json.dump(results, sys.stdout, separators=(",", ":"))
+"""
+
+
+def _symbolic_cache_get(key: _SymbolicKey) -> bool | None | object:
+    with _SYMBOLIC_EQUIVALENCE_LOCK:
+        value = _SYMBOLIC_EQUIVALENCE_CACHE.get(key, _SYMBOLIC_CACHE_MISS)
+        if value is not _SYMBOLIC_CACHE_MISS:
+            _SYMBOLIC_EQUIVALENCE_CACHE.move_to_end(key)
+        return value
+
+
+def _symbolic_cache_set(key: _SymbolicKey, value: bool | None) -> None:
+    with _SYMBOLIC_EQUIVALENCE_LOCK:
+        _SYMBOLIC_EQUIVALENCE_CACHE[key] = value
+        _SYMBOLIC_EQUIVALENCE_CACHE.move_to_end(key)
+        while len(_SYMBOLIC_EQUIVALENCE_CACHE) > _SYMBOLIC_EQUIVALENCE_CACHE_SIZE:
+            _SYMBOLIC_EQUIVALENCE_CACHE.popitem(last=False)
+
+
+def _run_symbolic_equivalence_batch(keys: Sequence[_SymbolicKey]) -> None:
+    payload = json.dumps(
+        {
+            "comparisons": [
+                {
+                    "actual": actual,
+                    "expected": expected,
+                    "allowed_symbols": allowed_symbols,
+                }
+                for actual, expected, allowed_symbols in keys
+            ]
+        },
+        separators=(",", ":"),
+    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", _SYMBOLIC_EQUIVALENCE_SCRIPT],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=max(
+                _SYMBOLIC_EQUIVALENCE_TIMEOUT_SECONDS,
+                min(35.0, 2.0 + 0.55 * len(keys)),
+            ),
+            check=False,
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("symbolic equivalence exceeded its time budget") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("symbolic equivalence worker was unavailable") from exc
+    try:
+        results = json.loads(completed.stdout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("symbolic equivalence worker failed") from exc
+    if (
+        completed.returncode != 0
+        or not isinstance(results, list)
+        or len(results) != len(keys)
+        or any(value is not None and not isinstance(value, bool) for value in results)
+    ):
+        raise ValueError("symbolic equivalence worker failed")
+    for key, value in zip(keys, results, strict=True):
+        _symbolic_cache_set(key, value)
+
+
+def _prime_symbolic_equivalences(keys: Iterable[_SymbolicKey]) -> None:
+    unique = tuple(dict.fromkeys(keys))
+    if len(unique) > _MAX_SYMBOLIC_EQUIVALENCES_PER_BATCH:
+        raise ValueError("symbolic replay exceeds the supported comparison limit")
+    with _SYMBOLIC_EQUIVALENCE_LOCK:
+        pending = [
+            key for key in unique if _symbolic_cache_get(key) is _SYMBOLIC_CACHE_MISS
+        ]
+        if pending:
+            _run_symbolic_equivalence_batch(pending)
+
+
+def _cached_symbolic_equivalence(
+    actual: str,
+    expected: str,
+    allowed_symbols: tuple[str, ...],
+) -> bool:
+    key = (actual, expected, allowed_symbols)
+    cached = _symbolic_cache_get(key)
+    if cached is _SYMBOLIC_CACHE_MISS:
+        _prime_symbolic_equivalences((key,))
+        cached = _symbolic_cache_get(key)
+    if not isinstance(cached, bool):
+        raise ValueError("symbolic equivalence worker failed")
+    return cached
 
 
 def dominates(candidate: DifficultyVector, baseline: DifficultyVector) -> bool:
@@ -84,6 +245,362 @@ class AssessmentService:
                 candidate.as_tuple(), baseline.as_tuple(), strict=True
             )
         )
+
+    @staticmethod
+    def _objective_grade(
+        correct: bool,
+        *,
+        invalid: bool = False,
+        part_results: Sequence[GradeResult] = (),
+    ) -> GradeResult:
+        return GradeResult(
+            correct=correct,
+            advisory=False,
+            grants_mastery=correct,
+            feedback_code=(
+                "correct" if correct else "invalid_answer" if invalid else "incorrect"
+            ),
+            part_results=tuple(part_results),
+        )
+
+    @classmethod
+    def _validate_symbolic_complexity(cls, expression: object) -> None:
+        node_count = 0
+        for node in preorder_traversal(expression):
+            node_count += 1
+            if node_count > _MAX_SYMBOLIC_NODES:
+                raise ValueError("symbolic answer is too complex")
+            if isinstance(node, Pow) and node.exp.is_number:
+                try:
+                    exponent = float(node.exp.evalf())
+                except Exception as exc:
+                    raise ValueError("symbolic answer exponent is invalid") from exc
+                if not math.isfinite(exponent) or abs(exponent) > _MAX_SYMBOLIC_POWER:
+                    raise ValueError("symbolic answer exponent is outside safe bounds")
+
+    @classmethod
+    def _safe_answer_expression(
+        cls, value: object, allowed_symbols: Iterable[str]
+    ) -> object:
+        if not isinstance(value, str) or not (1 <= len(value) <= 2000):
+            raise ValueError("symbolic answer must be a bounded string")
+        clean = value.strip()
+        if (
+            not clean
+            or "__" in clean
+            or not _SAFE_ANSWER_EXPRESSION.fullmatch(clean)
+            or re.search(r"[A-Za-z_][A-Za-z0-9_]*\s*\.|\.\s*[A-Za-z_]", clean)
+        ):
+            raise ValueError("symbolic answer is unsafe")
+        functions = set(re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", clean))
+        if functions - _SAFE_ANSWER_FUNCTIONS:
+            raise ValueError("symbolic answer uses an unsafe function")
+        identifiers = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", clean))
+        used_symbols = identifiers - functions - _SAFE_ANSWER_CONSTANTS
+        if used_symbols - set(allowed_symbols):
+            raise ValueError("symbolic answer uses an undeclared symbol")
+        expression = _parse_declared_symbolic_expression(
+            clean, tuple(sorted(set(allowed_symbols)))
+        )
+        cls._validate_symbolic_complexity(expression)
+        return expression
+
+    @staticmethod
+    def _isolated_symbolic_equivalence(
+        actual: object,
+        expected: object,
+        allowed_symbols: Iterable[str],
+    ) -> bool:
+        if actual == expected:
+            return True
+        return _cached_symbolic_equivalence(
+            str(actual),
+            str(expected),
+            tuple(sorted(set(allowed_symbols))),
+        )
+
+    @classmethod
+    def _numeric_value(cls, value: object) -> float:
+        if isinstance(value, bool):
+            raise ValueError("boolean is not a numeric answer")
+        if isinstance(value, int | float):
+            result = float(value)
+        else:
+            expression = cls._safe_answer_expression(value, ())
+            if getattr(expression, "free_symbols", None):
+                raise ValueError("numeric answer contains a symbol")
+            result = float(expression.evalf())  # type: ignore[attr-defined]
+        if not math.isfinite(result):
+            raise ValueError("numeric answer must be finite")
+        return result
+
+    @staticmethod
+    def _within_tolerance(
+        actual: float,
+        expected: float,
+        *,
+        absolute_tolerance: float,
+        relative_tolerance: float,
+    ) -> bool:
+        tolerance = absolute_tolerance + relative_tolerance * abs(expected)
+        return abs(actual - expected) <= tolerance
+
+    @staticmethod
+    def _safe_unit(value: object) -> str:
+        if (
+            not isinstance(value, str)
+            or not (1 <= len(value) <= 200)
+            or "__" in value
+            or not _SAFE_UNIT_EXPRESSION.fullmatch(value)
+            or "." in value
+        ):
+            raise ValueError("unit answer is unsafe")
+        try:
+            UNIT_REGISTRY.Unit(value)
+        except Exception as exc:
+            raise ValueError("unit answer is unknown or invalid") from exc
+        return value
+
+    @staticmethod
+    def _strict_mapping(
+        answer: object, required_keys: set[str]
+    ) -> Mapping[str, object]:
+        if not isinstance(answer, Mapping) or set(answer) != required_keys:
+            raise ValueError("answer object has an invalid shape")
+        return answer
+
+    @classmethod
+    def _symbolic_comparison_keys(
+        cls,
+        grader: GraderSpec,
+        answer: object,
+    ) -> tuple[_SymbolicKey, ...]:
+        if isinstance(grader, SymbolicGraderSpec):
+            actual = cls._safe_answer_expression(answer, grader.allowed_symbols)
+            expected = cls._safe_answer_expression(
+                grader.expected_expression, grader.allowed_symbols
+            )
+            if actual == expected:
+                return ()
+            return (
+                (
+                    str(actual),
+                    str(expected),
+                    tuple(sorted(set(grader.allowed_symbols))),
+                ),
+            )
+        if isinstance(grader, MultipartGraderSpec):
+            payload = cls._strict_mapping(answer, {"parts"})
+            parts = payload["parts"]
+            if (
+                not isinstance(parts, Sequence)
+                or isinstance(parts, str | bytes)
+                or len(parts) != len(grader.parts)
+            ):
+                raise ValueError("multipart answer has an invalid shape")
+            return tuple(
+                key
+                for part_grader, part_answer in zip(grader.parts, parts, strict=True)
+                for key in cls._symbolic_comparison_keys(part_grader, part_answer)
+            )
+        return ()
+
+    @classmethod
+    def prime_symbolic_grades(
+        cls,
+        grading_inputs: Iterable[tuple[GraderSpec, object]],
+    ) -> None:
+        """Batch all safe symbolic comparisons under one explicit replay budget."""
+
+        keys: list[_SymbolicKey] = []
+        for grader, answer in grading_inputs:
+            try:
+                keys.extend(cls._symbolic_comparison_keys(grader, answer))
+            except (ArithmeticError, PintError, TypeError, ValueError):
+                continue
+        _prime_symbolic_equivalences(keys)
+
+    @classmethod
+    def _grade_numeric(cls, grader: NumericGraderSpec, answer: object) -> GradeResult:
+        actual = cls._numeric_value(answer)
+        expected = cls._numeric_value(grader.expected)
+        return cls._objective_grade(
+            cls._within_tolerance(
+                actual,
+                expected,
+                absolute_tolerance=grader.absolute_tolerance,
+                relative_tolerance=grader.relative_tolerance,
+            )
+        )
+
+    @classmethod
+    def _grade_symbolic(cls, grader: SymbolicGraderSpec, answer: object) -> GradeResult:
+        actual = cls._safe_answer_expression(answer, grader.allowed_symbols)
+        expected = cls._safe_answer_expression(
+            grader.expected_expression, grader.allowed_symbols
+        )
+        return cls._objective_grade(
+            cls._isolated_symbolic_equivalence(actual, expected, grader.allowed_symbols)
+        )
+
+    @classmethod
+    def _grade_unit(cls, grader: UnitGraderSpec, answer: object) -> GradeResult:
+        payload = cls._strict_mapping(answer, {"value", "unit"})
+        unit = cls._safe_unit(payload["unit"])
+        actual = UNIT_REGISTRY.Quantity(cls._numeric_value(payload["value"]), unit)
+        converted = actual.to(grader.expected_unit)
+        expected = cls._numeric_value(grader.expected_value)
+        return cls._objective_grade(
+            cls._within_tolerance(
+                float(converted.magnitude),
+                expected,
+                absolute_tolerance=grader.absolute_tolerance,
+                relative_tolerance=grader.relative_tolerance,
+            )
+        )
+
+    @classmethod
+    def _grade_vector(cls, grader: VectorGraderSpec, answer: object) -> GradeResult:
+        required_keys = (
+            {"components", "unit"}
+            if grader.expected_unit is not None
+            else {"components"}
+        )
+        payload = cls._strict_mapping(answer, required_keys)
+        components = payload["components"]
+        if (
+            not isinstance(components, Sequence)
+            or isinstance(components, str | bytes)
+            or len(components) != len(grader.expected_components)
+        ):
+            raise ValueError("vector answer has an invalid shape")
+        actual_values = [cls._numeric_value(value) for value in components]
+        if grader.expected_unit is not None:
+            unit = cls._safe_unit(payload["unit"])
+            actual_values = [
+                float(
+                    UNIT_REGISTRY.Quantity(value, unit)
+                    .to(grader.expected_unit)
+                    .magnitude
+                )
+                for value in actual_values
+            ]
+        expected_values = [
+            cls._numeric_value(value) for value in grader.expected_components
+        ]
+        correct = all(
+            cls._within_tolerance(
+                actual,
+                expected,
+                absolute_tolerance=grader.absolute_tolerance,
+                relative_tolerance=grader.relative_tolerance,
+            )
+            for actual, expected in zip(actual_values, expected_values, strict=True)
+        )
+        return cls._objective_grade(correct)
+
+    @staticmethod
+    def _set_item(value: object) -> str:
+        if isinstance(value, bool) or not isinstance(value, str | int | float):
+            raise ValueError("set item must be text or numeric")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("set numeric item must be finite")
+        normalized = re.sub(r"\s+", " ", str(value)).strip()
+        if not (1 <= len(normalized) <= 500):
+            raise ValueError("set item is invalid")
+        return normalized
+
+    @classmethod
+    def _grade_set(cls, grader: SetGraderSpec, answer: object) -> GradeResult:
+        payload = cls._strict_mapping(answer, {"items"})
+        items = payload["items"]
+        if (
+            not isinstance(items, Sequence)
+            or isinstance(items, str | bytes)
+            or len(items) > 200
+        ):
+            raise ValueError("set answer has an invalid shape")
+        actual = tuple(cls._set_item(item) for item in items)
+        expected = tuple(cls._set_item(item) for item in grader.expected_items)
+        correct = (
+            actual == expected if grader.order_matters else set(actual) == set(expected)
+        )
+        return cls._objective_grade(correct)
+
+    @classmethod
+    def _grade_multipart(
+        cls, grader: MultipartGraderSpec, answer: object
+    ) -> GradeResult:
+        payload = cls._strict_mapping(answer, {"parts"})
+        parts = payload["parts"]
+        if (
+            not isinstance(parts, Sequence)
+            or isinstance(parts, str | bytes)
+            or len(parts) != len(grader.parts)
+        ):
+            raise ValueError("multipart answer has an invalid shape")
+        results = tuple(
+            cls._grade_spec(part_grader, part_answer)
+            for part_grader, part_answer in zip(grader.parts, parts, strict=True)
+        )
+        correct = all(result.correct is True for result in results)
+        invalid = any(result.feedback_code == "invalid_answer" for result in results)
+        return cls._objective_grade(correct, invalid=invalid, part_results=results)
+
+    @classmethod
+    def _grade_spec(cls, grader: GraderSpec, answer: object) -> GradeResult:
+        try:
+            if grader.kind == "numeric":
+                return cls._grade_numeric(grader, answer)
+            if grader.kind == "symbolic":
+                return cls._grade_symbolic(grader, answer)
+            if grader.kind == "unit":
+                return cls._grade_unit(grader, answer)
+            if grader.kind == "vector":
+                return cls._grade_vector(grader, answer)
+            if grader.kind == "set":
+                return cls._grade_set(grader, answer)
+            if grader.kind == "multipart":
+                return cls._grade_multipart(grader, answer)
+            return GradeResult(
+                correct=None,
+                advisory=True,
+                grants_mastery=False,
+                feedback_code="advisory",
+            )
+        except (ArithmeticError, PintError, TypeError, ValueError):
+            return cls._objective_grade(False, invalid=True)
+
+    @classmethod
+    def grade(cls, exercise: ExerciseBlueprint, answer: object) -> GradeResult:
+        """Grade one answer without model calls, code execution or hidden state."""
+
+        if not isinstance(exercise, ExerciseBlueprint):
+            raise TypeError("exercise must be a validated ExerciseBlueprint")
+        return cls._grade_spec(exercise.grader, answer)
+
+    @classmethod
+    def grade_transfer(cls, transfer: TransferTaskSpec, answer: object) -> GradeResult:
+        if not isinstance(transfer, TransferTaskSpec):
+            raise TypeError("transfer must be a validated TransferTaskSpec")
+        return cls._grade_spec(transfer.grader, answer)
+
+    @staticmethod
+    def decode_response(
+        grader: GraderSpec,
+        response_parts: Sequence[str],
+    ) -> object:
+        """Decode canonical JSON answer parts stored in an immutable event."""
+
+        if not response_parts:
+            raise ValueError("a graded response must contain an answer")
+        if isinstance(grader, MultipartGraderSpec) and len(response_parts) == len(
+            grader.parts
+        ):
+            return {"parts": [json.loads(part) for part in response_parts]}
+        if len(response_parts) != 1:
+            raise ValueError("response parts do not match the grader")
+        return json.loads(response_parts[0])
 
     @staticmethod
     def _finding(

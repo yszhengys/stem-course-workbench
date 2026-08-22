@@ -30,9 +30,7 @@ from open_notebook.course.v2_models import (
 
 
 def migration_sql(version: str) -> str:
-    return Path(
-        f"open_notebook/database/migrations/{version}.surrealql"
-    ).read_text()
+    return Path(f"open_notebook/database/migrations/{version}.surrealql").read_text()
 
 
 def exercise_blueprint() -> ExerciseBlueprint:
@@ -122,7 +120,6 @@ async def test_all_v2_models_persist_with_real_surreal_schema(monkeypatch) -> No
         course_version="course_version:one",
         chapter="chapter:one",
         chapter_key="limits",
-        concept_key="limit",
         event_key="event-1",
         kind="chapter_opened",
         payload=PositionPayload(block_key="section-1"),

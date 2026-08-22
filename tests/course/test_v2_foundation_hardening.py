@@ -91,7 +91,8 @@ def test_nested_contract_values_are_deeply_immutable_and_json_serializable() -> 
         payload={
             "answer_revealed": False,
             "hints_used": 0,
-            "response_parts": ["audit"],
+            "attempt_key": "attempt-1",
+            "response_parts": ['"audit"'],
         },
         occurred_at=datetime(2026, 8, 21, tzinfo=timezone.utc),
     )
@@ -101,7 +102,7 @@ def test_nested_contract_values_are_deeply_immutable_and_json_serializable() -> 
         event.payload.answer_revealed = True  # type: ignore[misc]
     with pytest.raises(AttributeError):
         cast(Any, event.payload.response_parts).append("changed")
-    assert event.model_dump(mode="json")["payload"]["response_parts"] == ["audit"]
+    assert event.model_dump(mode="json")["payload"]["response_parts"] == ['"audit"']
 
 
 def test_answer_type_must_match_grader_kind_and_text_is_safe() -> None:
@@ -152,7 +153,9 @@ def test_learning_event_payload_is_typed_by_kind() -> None:
         )
 
 
-def test_tutor_can_refuse_without_citations_but_cited_answer_cannot_be_user_turn() -> None:
+def test_tutor_can_refuse_without_citations_but_cited_answer_cannot_be_user_turn() -> (
+    None
+):
     refusal = TutorResponse(
         session_id="course_tutor_session:one",
         turn=TutorTurn(
@@ -219,7 +222,12 @@ async def test_learning_events_are_append_only() -> None:
         exercise_key="limits-core",
         event_key="event-1",
         kind="graded_correct",
-        payload={"answer_revealed": False, "hints_used": 0},
+        payload={
+            "answer_revealed": False,
+            "hints_used": 0,
+            "attempt_key": "attempt-1",
+            "response_parts": ["1"],
+        },
         occurred_at=datetime(2026, 8, 21, tzinfo=timezone.utc),
     )
 
@@ -236,7 +244,9 @@ def test_task_request_and_six_service_boundaries_are_explicit() -> None:
         arguments=[{"name": "course_id", "value": "course:one"}],
     )
     assert request.task == "exercise_bank"
-    assert get_type_hints(SurrealCommandTaskBackend.submit)["request"] is CourseTaskRequest
+    assert (
+        get_type_hints(SurrealCommandTaskBackend.submit)["request"] is CourseTaskRequest
+    )
     assert {
         AuthoringService.__module__,
         AssessmentService.__module__,

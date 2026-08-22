@@ -107,9 +107,7 @@ def test_objective_and_advisory_graders_are_discriminated() -> None:
     assert multipart.parts[0].kind == "numeric"
     assert advisory.grants_mastery is False
     with pytest.raises(ValidationError):
-        AdvisoryGraderSpec(
-            kind="advisory", rubric="Give a proof.", grants_mastery=True
-        )
+        AdvisoryGraderSpec(kind="advisory", rubric="Give a proof.", grants_mastery=True)
 
 
 def test_transfer_requires_invariant_concept_and_deep_dimension() -> None:
@@ -144,9 +142,11 @@ def test_exercise_blueprint_requires_grounded_textbook_core() -> None:
         prompt="Construct a counterexample under a changed boundary condition.",
         invariant_concept_keys=["limit"],
         dimensions=["proof_counterexample_generalization"],
-        answer_type="proof",
+        answer_type="symbolic",
         difficulty=difficulty(),
-        grader=AdvisoryGraderSpec(kind="advisory", rubric="Check the counterexample."),
+        grader=SymbolicGraderSpec(
+            kind="symbolic", expected_expression="x", allowed_symbols=["x"]
+        ),
         anchor_ids=["anchor:limit"],
     )
     blueprint = ExerciseBlueprint(
@@ -176,6 +176,46 @@ def test_exercise_blueprint_requires_grounded_textbook_core() -> None:
         )
 
 
+def test_core_and_mastery_eligible_exercises_require_objective_graders() -> None:
+    advisory_transfer = TransferTaskSpec(
+        key="limit-proof-transfer",
+        prompt="Prove the changed boundary case.",
+        invariant_concept_keys=["limit"],
+        dimensions=["proof_counterexample_generalization"],
+        answer_type="proof",
+        difficulty=difficulty(),
+        grader=AdvisoryGraderSpec(kind="advisory", rubric="Check the proof."),
+        anchor_ids=["anchor:limit"],
+    )
+    base = {
+        "key": "limits-core-objective",
+        "chapter_key": "limits",
+        "prompt": "Evaluate the source-grounded limit.",
+        "concept_keys": ["limit"],
+        "exercise_type": "worked_source",
+        "source_anchor_ids": ["anchor:limit"],
+        "difficulty": difficulty(),
+        "is_core": True,
+        "is_gating": True,
+        "is_source_level": True,
+    }
+
+    with pytest.raises(ValidationError, match="objective grader"):
+        ExerciseBlueprint(
+            **base,
+            answer_type="proof",
+            grader=AdvisoryGraderSpec(kind="advisory", rubric="Check the proof."),
+        )
+
+    with pytest.raises(ValidationError, match="transfer gate"):
+        ExerciseBlueprint(
+            **base,
+            answer_type="numeric",
+            grader=NumericGraderSpec(kind="numeric", expected="1"),
+            transfer_task=advisory_transfer,
+        )
+
+
 def test_learning_and_mastery_contracts_are_replayable() -> None:
     occurred_at = datetime(2026, 8, 21, tzinfo=timezone.utc)
     event = LearningEvent(
@@ -186,7 +226,12 @@ def test_learning_and_mastery_contracts_are_replayable() -> None:
         concept_key="limit",
         exercise_key="limits-core-1",
         kind="graded_correct",
-        payload={"answer_revealed": False, "hints_used": 0},
+        payload={
+            "answer_revealed": False,
+            "hints_used": 0,
+            "attempt_key": "attempt-001",
+            "response_parts": ["1"],
+        },
         occurred_at=occurred_at,
     )
     mastery = ConceptMastery(

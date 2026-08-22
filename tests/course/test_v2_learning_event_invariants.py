@@ -13,10 +13,21 @@ NOW = datetime(2026, 8, 21, tzinfo=timezone.utc)
     [
         (
             "graded_correct",
-            {"answer_revealed": False, "hints_used": 0},
+            {
+                "answer_revealed": False,
+                "hints_used": 0,
+                "attempt_key": "attempt-one",
+                "response_parts": ["1"],
+            },
         ),
-        ("hint_viewed", {"hint_index": 1}),
-        ("answer_revealed", {"transfer_task_key": "transfer-one"}),
+        ("hint_viewed", {"attempt_key": "attempt-one", "hint_index": 1}),
+        (
+            "answer_revealed",
+            {
+                "attempt_key": "attempt-one",
+                "transfer_task_key": "transfer-one",
+            },
+        ),
     ],
 )
 def test_exercise_events_require_an_exercise_key(
@@ -46,7 +57,12 @@ def test_mastery_events_require_a_concept_key() -> None:
             chapter_key="limits",
             exercise_key="limits-core",
             kind="graded_correct",
-            payload={"answer_revealed": False, "hints_used": 0},
+            payload={
+                "answer_revealed": False,
+                "hints_used": 0,
+                "attempt_key": "attempt-two",
+                "response_parts": ["1"],
+            },
             occurred_at=NOW,
         )
 
@@ -64,6 +80,20 @@ def test_reading_position_requires_a_stable_block_key() -> None:
         )
 
 
+def test_activity_events_cannot_claim_mastery_identity() -> None:
+    with pytest.raises(ValidationError, match="cannot claim"):
+        LearningEvent(
+            event_id="event-activity-concept",
+            course_id="course:one",
+            course_version_id="course_version:one",
+            chapter_key="limits",
+            concept_key="limit",
+            kind="reading_position",
+            payload={"block_key": "definition-one"},
+            occurred_at=NOW,
+        )
+
+
 def test_transfer_requirement_is_an_explicit_replayable_event() -> None:
     event = LearningEvent(
         event_id="event-four",
@@ -73,7 +103,10 @@ def test_transfer_requirement_is_an_explicit_replayable_event() -> None:
         concept_key="limit",
         exercise_key="limits-core",
         kind="transfer_required",
-        payload={"transfer_task_key": "transfer-one"},
+        payload={
+            "attempt_key": "attempt-four",
+            "transfer_task_key": "transfer-one",
+        },
         occurred_at=NOW,
     )
 
