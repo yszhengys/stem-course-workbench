@@ -36,10 +36,10 @@ def test_migration_25_is_additive_registered_and_preserves_migration_24_tables()
     migration = Path("open_notebook/database/migrations/25.surrealql").read_text()
     down = Path("open_notebook/database/migrations/25_down.surrealql").read_text()
 
-    assert len(manager.up_migrations) == 25
-    assert len(manager.down_migrations) == 25
-    assert "course_anchor_identity_unique" in manager.up_migrations[-1].sql
-    assert "course_evidence_anchor" in manager.down_migrations[-1].sql
+    assert len(manager.up_migrations) >= 25
+    assert len(manager.down_migrations) >= 25
+    assert "course_anchor_identity_unique" in manager.up_migrations[24].sql
+    assert "course_evidence_anchor" in manager.down_migrations[24].sql
     assert "course_outline_version" not in migration
     assert "course_chapter_version" not in migration
     for table in (

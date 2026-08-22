@@ -1,0 +1,578 @@
+"""Strict, deeply immutable contracts for the Course V2 learning loop."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from datetime import datetime
+from pathlib import PurePosixPath
+from typing import Annotated, Literal, TypeAlias, Union, cast
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    FiniteFloat,
+    GetJsonSchemaHandler,
+    RootModel,
+    TypeAdapter,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema
+
+from .contracts import LabSpecVariant, _validate_generated_text
+
+StableKey: TypeAlias = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,99}$")]
+Sha256: TypeAlias = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+class V2Contract(BaseModel):
+    """Public V2 data uses immutable models and tuple collections."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, from_attributes=True)
+
+
+class DifficultyVector(V2Contract):
+    """Auditable exercise difficulty dimensions; no opaque aggregate score."""
+
+    concept_count: int = Field(ge=0, le=20)
+    reasoning_steps: int = Field(ge=0, le=20)
+    symbolic_depth: int = Field(ge=0, le=20)
+    representation_shifts: int = Field(ge=0, le=20)
+    proof_burden: int = Field(ge=0, le=20)
+    physics_constraints: int = Field(ge=0, le=20)
+
+    def as_tuple(self) -> tuple[int, int, int, int, int, int]:
+        return (
+            self.concept_count,
+            self.reasoning_steps,
+            self.symbolic_depth,
+            self.representation_shifts,
+            self.proof_burden,
+            self.physics_constraints,
+        )
+
+
+class NumericGraderSpec(V2Contract):
+    kind: Literal["numeric"]
+    expected: str = Field(min_length=1, max_length=500)
+    absolute_tolerance: FiniteFloat = Field(default=0.0, ge=0)
+    relative_tolerance: FiniteFloat = Field(default=0.0, ge=0)
+
+
+class SymbolicGraderSpec(V2Contract):
+    kind: Literal["symbolic"]
+    expected_expression: str = Field(min_length=1, max_length=2000)
+    allowed_symbols: tuple[StableKey, ...] = Field(
+        default_factory=tuple, max_length=100
+    )
+
+
+class UnitGraderSpec(V2Contract):
+    kind: Literal["unit"]
+    expected_value: str = Field(min_length=1, max_length=500)
+    expected_unit: str = Field(min_length=1, max_length=200)
+    absolute_tolerance: FiniteFloat = Field(default=0.0, ge=0)
+    relative_tolerance: FiniteFloat = Field(default=0.0, ge=0)
+
+
+class VectorGraderSpec(V2Contract):
+    kind: Literal["vector"]
+    expected_components: tuple[str, ...] = Field(min_length=1, max_length=4)
+    expected_unit: str | None = Field(default=None, min_length=1, max_length=200)
+    absolute_tolerance: FiniteFloat = Field(default=0.0, ge=0)
+    relative_tolerance: FiniteFloat = Field(default=0.0, ge=0)
+
+
+class SetGraderSpec(V2Contract):
+    kind: Literal["set"]
+    expected_items: tuple[str, ...] = Field(max_length=200)
+    order_matters: bool = False
+
+
+ObjectiveGraderSpec: TypeAlias = Annotated[
+    Union[
+        NumericGraderSpec,
+        SymbolicGraderSpec,
+        UnitGraderSpec,
+        VectorGraderSpec,
+        SetGraderSpec,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+class MultipartGraderSpec(V2Contract):
+    kind: Literal["multipart"]
+    parts: tuple[ObjectiveGraderSpec, ...] = Field(min_length=2, max_length=20)
+
+
+class AdvisoryGraderSpec(V2Contract):
+    kind: Literal["advisory"]
+    rubric: str = Field(min_length=1, max_length=8000)
+    grants_mastery: Literal[False] = False
+
+    _safe_rubric = field_validator("rubric")(_validate_generated_text)
+
+
+GraderSpec: TypeAlias = Annotated[
+    Union[
+        NumericGraderSpec,
+        SymbolicGraderSpec,
+        UnitGraderSpec,
+        VectorGraderSpec,
+        SetGraderSpec,
+        MultipartGraderSpec,
+        AdvisoryGraderSpec,
+    ],
+    Field(discriminator="kind"),
+]
+
+TransferDimension: TypeAlias = Literal[
+    "representation",
+    "inverse_or_constructive",
+    "constraints_frame_or_regime",
+    "method_comparison",
+    "proof_counterexample_generalization",
+    "math_physics_context",
+]
+
+
+class TransferTaskSpec(V2Contract):
+    key: StableKey
+    prompt: str = Field(min_length=1, max_length=12000)
+    invariant_concept_keys: tuple[StableKey, ...] = Field(min_length=1, max_length=50)
+    dimensions: tuple[TransferDimension, ...] = Field(min_length=1, max_length=6)
+    difficulty: DifficultyVector
+    grader: GraderSpec
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+
+    _safe_prompt = field_validator("prompt")(_validate_generated_text)
+
+    @field_validator("invariant_concept_keys", "dimensions")
+    @classmethod
+    def values_are_unique(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("values must be unique")
+        return value
+
+
+class ExerciseBlueprint(V2Contract):
+    key: StableKey
+    chapter_key: StableKey
+    prompt: str = Field(min_length=1, max_length=12000)
+    concept_keys: tuple[StableKey, ...] = Field(min_length=1, max_length=50)
+    exercise_type: Literal[
+        "worked_source",
+        "source_practice",
+        "generated_core",
+        "generated_challenge",
+        "transfer",
+    ]
+    answer_type: Literal[
+        "numeric",
+        "symbolic",
+        "unit",
+        "vector",
+        "set",
+        "multipart",
+        "proof",
+        "explanation",
+    ]
+    source_anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    source_number: str | None = Field(default=None, min_length=1, max_length=100)
+    source_section: str | None = Field(default=None, min_length=1, max_length=300)
+    difficulty: DifficultyVector
+    grader: GraderSpec
+    is_core: bool = False
+    is_gating: bool = False
+    is_source_level: bool = False
+    transfer_task: TransferTaskSpec | None = None
+
+    _safe_prompt = field_validator("prompt")(_validate_generated_text)
+
+    @model_validator(mode="after")
+    def source_gate_and_grader_are_consistent(self) -> "ExerciseBlueprint":
+        if (self.is_core or self.is_source_level) and not self.source_anchor_ids:
+            raise ValueError(
+                "source_anchor_ids are required for core and source-level exercises"
+            )
+        if self.is_gating and not self.is_core:
+            raise ValueError("a gating exercise must be a core exercise")
+        expected_grader = {
+            "numeric": "numeric",
+            "symbolic": "symbolic",
+            "unit": "unit",
+            "vector": "vector",
+            "set": "set",
+            "multipart": "multipart",
+            "proof": "advisory",
+            "explanation": "advisory",
+        }[self.answer_type]
+        if self.grader.kind != expected_grader:
+            raise ValueError("answer_type must match the grader kind")
+        return self
+
+
+LearningEventKind: TypeAlias = Literal[
+    "chapter_opened",
+    "hint_viewed",
+    "answer_revealed",
+    "graded_correct",
+    "graded_incorrect",
+    "transfer_required",
+    "transfer_completed",
+    "review_completed",
+    "reading_position",
+]
+
+
+class PositionPayload(V2Contract):
+    block_key: StableKey | None = None
+
+
+class HintViewedPayload(V2Contract):
+    hint_index: int = Field(ge=1, le=4)
+
+
+class TransferTaskPayload(V2Contract):
+    transfer_task_key: StableKey
+
+
+class GradedPayload(V2Contract):
+    answer_revealed: bool
+    hints_used: int = Field(ge=0, le=4)
+    attempt_key: StableKey | None = None
+    response_parts: tuple[str, ...] = Field(default_factory=tuple, max_length=20)
+
+
+class ReviewCompletedPayload(V2Contract):
+    correct: bool
+    answer_revealed: bool
+
+
+LearningEventPayload: TypeAlias = Union[
+    PositionPayload,
+    HintViewedPayload,
+    TransferTaskPayload,
+    GradedPayload,
+    ReviewCompletedPayload,
+]
+
+_EVENT_PAYLOAD_TYPES: dict[LearningEventKind, type[V2Contract]] = {
+    "chapter_opened": PositionPayload,
+    "hint_viewed": HintViewedPayload,
+    "answer_revealed": TransferTaskPayload,
+    "transfer_required": TransferTaskPayload,
+    "graded_correct": GradedPayload,
+    "graded_incorrect": GradedPayload,
+    "transfer_completed": TransferTaskPayload,
+    "review_completed": ReviewCompletedPayload,
+    "reading_position": PositionPayload,
+}
+
+
+class LearningEvent(V2Contract):
+    """Internal event; HTTP request models add ownership from the route context."""
+
+    event_id: StableKey
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    course_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    chapter_key: StableKey
+    concept_key: StableKey | None = None
+    exercise_key: StableKey | None = None
+    kind: LearningEventKind
+    payload: LearningEventPayload
+    occurred_at: datetime
+
+    @model_validator(mode="after")
+    def payload_matches_kind(self) -> "LearningEvent":
+        if not isinstance(self.payload, _EVENT_PAYLOAD_TYPES[self.kind]):
+            raise ValueError("payload does not match the learning event kind")
+        exercise_events = frozenset(
+            {
+                "hint_viewed",
+                "answer_revealed",
+                "graded_correct",
+                "graded_incorrect",
+                "transfer_required",
+                "transfer_completed",
+            }
+        )
+        concept_events = frozenset(
+            {
+                "answer_revealed",
+                "graded_correct",
+                "graded_incorrect",
+                "transfer_required",
+                "transfer_completed",
+                "review_completed",
+            }
+        )
+        if self.kind in exercise_events and self.exercise_key is None:
+            raise ValueError("exercise_key is required for this learning event")
+        if self.kind in concept_events and self.concept_key is None:
+            raise ValueError("concept_key is required for this learning event")
+        if (
+            self.kind == "reading_position"
+            and isinstance(self.payload, PositionPayload)
+            and self.payload.block_key is None
+        ):
+            raise ValueError("block_key is required for a reading position")
+        return self
+
+
+MasteryStatus: TypeAlias = Literal[
+    "not_started", "learning", "practiced", "mastered", "review_due"
+]
+
+
+class ConceptMastery(V2Contract):
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    course_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    chapter_key: StableKey
+    concept_key: StableKey
+    status: MasteryStatus
+    successful_exercise_keys: tuple[StableKey, ...] = Field(
+        default_factory=tuple, max_length=200
+    )
+    unrevealed_success_count: int = Field(default=0, ge=0, le=200)
+    review_level: int = Field(default=0, ge=0, le=5)
+    review_due_at: datetime | None = None
+    last_event_at: datetime | None = None
+    snapshot_hash: Sha256
+
+
+class ReviewQueueItem(V2Contract):
+    chapter_key: StableKey
+    concept_key: StableKey
+    status: Literal["review_due"]
+    due_at: datetime
+    interval_days: Literal[1, 3, 7, 14, 30]
+
+
+class TutorTurn(V2Contract):
+    turn_no: int = Field(ge=1)
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=20000)
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    answer_revealed: bool = False
+
+    _safe_content = field_validator("content")(_validate_generated_text)
+
+
+class TutorResponse(V2Contract):
+    session_id: str = Field(pattern=r"^course_tutor_session:[^:]+$")
+    turn: TutorTurn
+    insufficient_evidence: bool
+
+    @model_validator(mode="after")
+    def response_is_an_assistant_claim_or_refusal(self) -> "TutorResponse":
+        if self.turn.role != "assistant":
+            raise ValueError("a tutor response must contain an assistant turn")
+        if not self.insufficient_evidence and not self.turn.anchor_ids:
+            raise ValueError("a factual tutor response requires evidence anchors")
+        return self
+
+
+class ReplaceTextOperation(V2Contract):
+    kind: Literal["replace_text"]
+    block_key: StableKey
+    text: str = Field(min_length=1, max_length=20000)
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+
+    _safe_text = field_validator("text")(_validate_generated_text)
+
+
+class ReplaceFormulaOperation(V2Contract):
+    kind: Literal["replace_formula"]
+    block_key: StableKey
+    latex: str = Field(min_length=1, max_length=4000)
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+
+    _safe_latex = field_validator("latex")(_validate_generated_text)
+
+
+class ReplaceExerciseOperation(V2Contract):
+    kind: Literal["replace_exercise"]
+    block_key: StableKey
+    exercise: ExerciseBlueprint
+
+
+class ReplaceTransferOperation(V2Contract):
+    kind: Literal["replace_transfer"]
+    block_key: StableKey
+    transfer_task: TransferTaskSpec
+
+
+_LAB_SPEC_ADAPTER: TypeAdapter[LabSpecVariant] = TypeAdapter(LabSpecVariant)
+
+
+def _inline_local_schema_refs(
+    value: object, definitions: Mapping[str, object]
+) -> object:
+    if isinstance(value, list):
+        return [_inline_local_schema_refs(item, definitions) for item in value]
+    if not isinstance(value, dict):
+        return value
+    reference = value.get("$ref")
+    if isinstance(reference, str) and reference.startswith("#/$defs/"):
+        name = reference.rsplit("/", 1)[-1]
+        return _inline_local_schema_refs(definitions[name], definitions)
+    return {
+        key: _inline_local_schema_refs(item, definitions)
+        for key, item in value.items()
+        if key != "$defs"
+    }
+
+
+class FrozenLabSpec(RootModel[str]):
+    """Canonical immutable snapshot of an already-safe declarative LabSpec."""
+
+    model_config = ConfigDict(frozen=True)
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        del cls, core_schema, handler
+        schema = _LAB_SPEC_ADAPTER.json_schema()
+        definitions = cast(Mapping[str, object], schema.get("$defs", {}))
+        resolved = cast(
+            dict[str, object], _inline_local_schema_refs(schema, definitions)
+        )
+        discriminator = resolved.get("discriminator")
+        if isinstance(discriminator, dict):
+            discriminator.pop("mapping", None)
+        return cast(JsonSchemaValue, resolved)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_and_canonicalize(cls, value: object) -> str:
+        if isinstance(value, cls):
+            return value.root
+        if isinstance(value, str):
+            raise ValueError("lab_spec must be an object")
+        lab = _LAB_SPEC_ADAPTER.validate_python(value)
+        return json.dumps(
+            lab.model_dump(mode="json", by_alias=True),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+
+    @model_serializer(mode="plain")
+    def serialize_lab(self) -> dict[str, object]:
+        payload = json.loads(self.root)
+        if not isinstance(payload, dict):
+            raise ValueError("lab_spec must serialize to an object")
+        return payload
+
+    def as_lab_spec(self) -> LabSpecVariant:
+        return _LAB_SPEC_ADAPTER.validate_python(json.loads(self.root))
+
+
+class ReplaceLabOperation(V2Contract):
+    kind: Literal["replace_lab"]
+    block_key: StableKey
+    lab_spec: FrozenLabSpec
+
+
+DraftOperation: TypeAlias = Annotated[
+    Union[
+        ReplaceTextOperation,
+        ReplaceFormulaOperation,
+        ReplaceExerciseOperation,
+        ReplaceTransferOperation,
+        ReplaceLabOperation,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+ValidationCheck: TypeAlias = Literal[
+    "formula", "unit", "numeric", "physics", "citation", "structure"
+]
+
+
+class DraftRevision(V2Contract):
+    revision_no: int = Field(ge=1)
+    parent_revision_no: int | None = Field(default=None, ge=1)
+    base_artifact_hash: Sha256
+    artifact_hash: Sha256
+    operation: DraftOperation
+    invalidated_checks: tuple[ValidationCheck, ...] = Field(max_length=6)
+    created_at: datetime
+
+
+class BundleFileManifest(V2Contract):
+    path: str = Field(min_length=1, max_length=500)
+    size_bytes: int = Field(ge=0, le=5_000_000_000)
+    sha256: Sha256
+
+    @field_validator("path")
+    @classmethod
+    def path_is_safe_and_relative(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts or "\\" in value:
+            raise ValueError("bundle path must be safe and relative")
+        return value
+
+
+class BundleRecordCount(V2Contract):
+    record_type: StableKey
+    count: int = Field(ge=0)
+
+
+class CourseBundleManifest(V2Contract):
+    schema_version: Literal[1]
+    app_version: str = Field(min_length=1, max_length=100)
+    course_title: str = Field(min_length=1, max_length=300)
+    exported_at: datetime
+    record_counts: tuple[BundleRecordCount, ...] = Field(max_length=100)
+    files: tuple[BundleFileManifest, ...] = Field(max_length=10000)
+
+
+__all__ = [
+    "AdvisoryGraderSpec",
+    "BundleFileManifest",
+    "BundleRecordCount",
+    "ConceptMastery",
+    "CourseBundleManifest",
+    "DifficultyVector",
+    "DraftOperation",
+    "DraftRevision",
+    "ExerciseBlueprint",
+    "FrozenLabSpec",
+    "GradedPayload",
+    "GraderSpec",
+    "HintViewedPayload",
+    "LearningEvent",
+    "LearningEventKind",
+    "LearningEventPayload",
+    "MasteryStatus",
+    "MultipartGraderSpec",
+    "NumericGraderSpec",
+    "ObjectiveGraderSpec",
+    "PositionPayload",
+    "ReplaceExerciseOperation",
+    "ReplaceFormulaOperation",
+    "ReplaceLabOperation",
+    "ReplaceTextOperation",
+    "ReplaceTransferOperation",
+    "ReviewCompletedPayload",
+    "ReviewQueueItem",
+    "SetGraderSpec",
+    "SymbolicGraderSpec",
+    "TransferTaskPayload",
+    "TransferTaskSpec",
+    "TutorResponse",
+    "TutorTurn",
+    "UnitGraderSpec",
+    "V2Contract",
+    "ValidationCheck",
+    "VectorGraderSpec",
+]

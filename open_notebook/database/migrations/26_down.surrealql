@@ -1,0 +1,46 @@
+-- Roll back only Course V2 records and restore migration 25's cascades.
+
+DEFINE EVENT OVERWRITE course_delete ON TABLE course WHEN ($after == NONE) THEN {
+    delete course_version where course == $before.id;
+    delete evidence where course == $before.id;
+    delete progress where course == $before.id;
+    delete course_note where course == $before.id;
+    delete course_evidence_anchor where course == $before.id;
+    delete course_generation_run where course == $before.id;
+    delete course_validation_finding where course == $before.id;
+};
+
+DEFINE EVENT OVERWRITE course_version_delete ON TABLE course_version WHEN ($after == NONE) THEN {
+    delete chapter where course_version == $before.id;
+    delete lab where course_version == $before.id;
+};
+
+REMOVE EVENT IF EXISTS course_tutor_session_delete ON TABLE course_tutor_session;
+
+REMOVE INDEX IF EXISTS course_export_course_idx ON TABLE course_export;
+REMOVE INDEX IF EXISTS course_draft_revision_version_idx ON TABLE course_draft_revision;
+REMOVE INDEX IF EXISTS course_draft_revision_course_idx ON TABLE course_draft_revision;
+REMOVE INDEX IF EXISTS course_tutor_turn_version_idx ON TABLE course_tutor_turn;
+REMOVE INDEX IF EXISTS course_tutor_turn_course_idx ON TABLE course_tutor_turn;
+REMOVE INDEX IF EXISTS course_tutor_session_version_idx ON TABLE course_tutor_session;
+REMOVE INDEX IF EXISTS course_tutor_session_course_idx ON TABLE course_tutor_session;
+REMOVE INDEX IF EXISTS course_concept_mastery_version_idx ON TABLE course_concept_mastery;
+REMOVE INDEX IF EXISTS course_concept_mastery_course_idx ON TABLE course_concept_mastery;
+REMOVE INDEX IF EXISTS course_learning_event_version_idx ON TABLE course_learning_event;
+REMOVE INDEX IF EXISTS course_learning_event_course_idx ON TABLE course_learning_event;
+REMOVE INDEX IF EXISTS course_exercise_version_idx ON TABLE course_exercise;
+REMOVE INDEX IF EXISTS course_exercise_course_idx ON TABLE course_exercise;
+
+REMOVE INDEX IF EXISTS course_draft_revision_identity_unique ON TABLE course_draft_revision;
+REMOVE INDEX IF EXISTS course_tutor_turn_identity_unique ON TABLE course_tutor_turn;
+REMOVE INDEX IF EXISTS course_mastery_identity_unique ON TABLE course_concept_mastery;
+REMOVE INDEX IF EXISTS course_learning_event_identity_unique ON TABLE course_learning_event;
+REMOVE INDEX IF EXISTS course_exercise_identity_unique ON TABLE course_exercise;
+
+REMOVE TABLE IF EXISTS course_export;
+REMOVE TABLE IF EXISTS course_draft_revision;
+REMOVE TABLE IF EXISTS course_tutor_turn;
+REMOVE TABLE IF EXISTS course_tutor_session;
+REMOVE TABLE IF EXISTS course_concept_mastery;
+REMOVE TABLE IF EXISTS course_learning_event;
+REMOVE TABLE IF EXISTS course_exercise;

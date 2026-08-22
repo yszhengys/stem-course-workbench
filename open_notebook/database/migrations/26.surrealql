@@ -1,0 +1,145 @@
+-- Migration 26: additive Course V2 learning-loop records.
+-- Migration 24/25 records remain authoritative and are never recreated here.
+
+DEFINE TABLE IF NOT EXISTS course_exercise SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_exercise TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_exercise TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE course_exercise TYPE record<chapter>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_exercise TYPE string;
+DEFINE FIELD IF NOT EXISTS exercise_key ON TABLE course_exercise TYPE string;
+DEFINE FIELD IF NOT EXISTS blueprint ON TABLE course_exercise FLEXIBLE TYPE object;
+DEFINE FIELD IF NOT EXISTS source_anchor_ids ON TABLE course_exercise TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS difficulty ON TABLE course_exercise FLEXIBLE TYPE object;
+DEFINE FIELD IF NOT EXISTS grader ON TABLE course_exercise FLEXIBLE TYPE object;
+DEFINE FIELD IF NOT EXISTS is_core ON TABLE course_exercise TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS is_gating ON TABLE course_exercise TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS is_source_level ON TABLE course_exercise TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS created ON course_exercise DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course_exercise DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS course_learning_event SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_learning_event TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_learning_event TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE course_learning_event TYPE record<chapter>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_learning_event TYPE string;
+DEFINE FIELD IF NOT EXISTS concept_key ON TABLE course_learning_event TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS exercise_key ON TABLE course_learning_event TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS event_key ON TABLE course_learning_event TYPE string;
+DEFINE FIELD IF NOT EXISTS kind ON TABLE course_learning_event TYPE string;
+DEFINE FIELD IF NOT EXISTS payload ON TABLE course_learning_event FLEXIBLE TYPE object DEFAULT {};
+DEFINE FIELD IF NOT EXISTS occurred_at ON TABLE course_learning_event TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created ON course_learning_event DEFAULT time::now() VALUE $before OR time::now();
+
+DEFINE TABLE IF NOT EXISTS course_concept_mastery SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_concept_mastery TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_concept_mastery TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_concept_mastery TYPE string;
+DEFINE FIELD IF NOT EXISTS concept_key ON TABLE course_concept_mastery TYPE string;
+DEFINE FIELD IF NOT EXISTS status ON TABLE course_concept_mastery TYPE string DEFAULT 'not_started';
+DEFINE FIELD IF NOT EXISTS successful_exercise_keys ON TABLE course_concept_mastery TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS unrevealed_success_count ON TABLE course_concept_mastery TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS review_level ON TABLE course_concept_mastery TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS review_due_at ON TABLE course_concept_mastery TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS last_event_at ON TABLE course_concept_mastery TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS snapshot_hash ON TABLE course_concept_mastery TYPE string;
+DEFINE FIELD IF NOT EXISTS created ON course_concept_mastery DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course_concept_mastery DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS course_tutor_session SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_tutor_session TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_tutor_session TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE course_tutor_session TYPE record<chapter>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_tutor_session TYPE string;
+DEFINE FIELD IF NOT EXISTS model_selection ON TABLE course_tutor_session FLEXIBLE TYPE object;
+DEFINE FIELD IF NOT EXISTS status ON TABLE course_tutor_session TYPE string DEFAULT 'active';
+DEFINE FIELD IF NOT EXISTS created ON course_tutor_session DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course_tutor_session DEFAULT time::now() VALUE time::now();
+
+DEFINE TABLE IF NOT EXISTS course_tutor_turn SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_tutor_turn TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_tutor_turn TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS session ON TABLE course_tutor_turn TYPE record<course_tutor_session>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_tutor_turn TYPE string;
+DEFINE FIELD IF NOT EXISTS turn_no ON TABLE course_tutor_turn TYPE int;
+DEFINE FIELD IF NOT EXISTS role ON TABLE course_tutor_turn TYPE string;
+DEFINE FIELD IF NOT EXISTS content ON TABLE course_tutor_turn TYPE string;
+DEFINE FIELD IF NOT EXISTS anchor_ids ON TABLE course_tutor_turn TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS answer_revealed ON TABLE course_tutor_turn TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS insufficient_evidence ON TABLE course_tutor_turn TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS created ON course_tutor_turn DEFAULT time::now() VALUE $before OR time::now();
+
+DEFINE TABLE IF NOT EXISTS course_draft_revision SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_draft_revision TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_draft_revision TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS chapter ON TABLE course_draft_revision TYPE record<chapter>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_draft_revision TYPE string;
+DEFINE FIELD IF NOT EXISTS revision_no ON TABLE course_draft_revision TYPE int;
+DEFINE FIELD IF NOT EXISTS parent_revision ON TABLE course_draft_revision TYPE option<record<course_draft_revision>>;
+DEFINE FIELD IF NOT EXISTS base_artifact_hash ON TABLE course_draft_revision TYPE string;
+DEFINE FIELD IF NOT EXISTS artifact_hash ON TABLE course_draft_revision TYPE string;
+DEFINE FIELD IF NOT EXISTS operation ON TABLE course_draft_revision FLEXIBLE TYPE object;
+DEFINE FIELD IF NOT EXISTS invalidated_checks ON TABLE course_draft_revision TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS status ON TABLE course_draft_revision TYPE string DEFAULT 'draft';
+DEFINE FIELD IF NOT EXISTS created ON course_draft_revision DEFAULT time::now() VALUE $before OR time::now();
+
+DEFINE TABLE IF NOT EXISTS course_export SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_export TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS status ON TABLE course_export TYPE string DEFAULT 'queued';
+DEFINE FIELD IF NOT EXISTS bundle_path ON TABLE course_export TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS manifest ON TABLE course_export FLEXIBLE TYPE option<object>;
+DEFINE FIELD IF NOT EXISTS error_message ON TABLE course_export TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS created ON course_export DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON course_export DEFAULT time::now() VALUE time::now();
+
+DEFINE INDEX IF NOT EXISTS course_exercise_identity_unique ON TABLE course_exercise FIELDS course_version, chapter_key, exercise_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS course_learning_event_identity_unique ON TABLE course_learning_event FIELDS course, event_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS course_mastery_identity_unique ON TABLE course_concept_mastery FIELDS course, course_version, chapter_key, concept_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS course_tutor_turn_identity_unique ON TABLE course_tutor_turn FIELDS session, turn_no UNIQUE;
+DEFINE INDEX IF NOT EXISTS course_draft_revision_identity_unique ON TABLE course_draft_revision FIELDS chapter, revision_no UNIQUE;
+
+DEFINE INDEX IF NOT EXISTS course_exercise_course_idx ON TABLE course_exercise FIELDS course;
+DEFINE INDEX IF NOT EXISTS course_exercise_version_idx ON TABLE course_exercise FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS course_learning_event_course_idx ON TABLE course_learning_event FIELDS course;
+DEFINE INDEX IF NOT EXISTS course_learning_event_version_idx ON TABLE course_learning_event FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS course_concept_mastery_course_idx ON TABLE course_concept_mastery FIELDS course;
+DEFINE INDEX IF NOT EXISTS course_concept_mastery_version_idx ON TABLE course_concept_mastery FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS course_tutor_session_course_idx ON TABLE course_tutor_session FIELDS course;
+DEFINE INDEX IF NOT EXISTS course_tutor_session_version_idx ON TABLE course_tutor_session FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS course_tutor_turn_course_idx ON TABLE course_tutor_turn FIELDS course;
+DEFINE INDEX IF NOT EXISTS course_tutor_turn_version_idx ON TABLE course_tutor_turn FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS course_draft_revision_course_idx ON TABLE course_draft_revision FIELDS course;
+DEFINE INDEX IF NOT EXISTS course_draft_revision_version_idx ON TABLE course_draft_revision FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS course_export_course_idx ON TABLE course_export FIELDS course;
+
+-- Extend both V1 aggregate cascades without changing their original children.
+DEFINE EVENT OVERWRITE course_delete ON TABLE course WHEN ($after == NONE) THEN {
+    delete course_version where course == $before.id;
+    delete evidence where course == $before.id;
+    delete progress where course == $before.id;
+    delete course_note where course == $before.id;
+    delete course_evidence_anchor where course == $before.id;
+    delete course_generation_run where course == $before.id;
+    delete course_validation_finding where course == $before.id;
+    delete course_exercise where course == $before.id;
+    delete course_learning_event where course == $before.id;
+    delete course_concept_mastery where course == $before.id;
+    delete course_tutor_turn where course == $before.id;
+    delete course_tutor_session where course == $before.id;
+    delete course_draft_revision where course == $before.id;
+    delete course_export where course == $before.id;
+};
+
+DEFINE EVENT OVERWRITE course_version_delete ON TABLE course_version WHEN ($after == NONE) THEN {
+    delete chapter where course_version == $before.id;
+    delete lab where course_version == $before.id;
+    delete course_exercise where course_version == $before.id;
+    delete course_learning_event where course_version == $before.id;
+    delete course_concept_mastery where course_version == $before.id;
+    delete course_tutor_turn where course_version == $before.id;
+    delete course_tutor_session where course_version == $before.id;
+    delete course_draft_revision where course_version == $before.id;
+};
+
+DEFINE EVENT OVERWRITE course_tutor_session_delete ON TABLE course_tutor_session WHEN ($after == NONE) THEN {
+    delete course_tutor_turn where session == $before.id;
+};
