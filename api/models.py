@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -10,12 +10,15 @@ from open_notebook.course.contracts import (
     SafeLabKey,
 )
 from open_notebook.course.v2_contracts import (
+    AnswerType,
     ConceptMastery,
+    DifficultyVector,
     GradeResult,
     LearningEvent,
     LearningEventPayload,
     ReviewQueueItem,
     StableKey,
+    TransferDimension,
 )
 
 
@@ -834,13 +837,12 @@ CourseClientLearningEventKind = Literal[
 class CourseLearningEventRequest(StrictCourseRequest):
     """Client-authored action; Course ownership is added by the server."""
 
-    event_key: StableKey
+    idempotency_key: StableKey
     chapter_key: StableKey
     concept_key: StableKey | None = None
     exercise_key: StableKey | None = None
     kind: CourseClientLearningEventKind
     payload: LearningEventPayload
-    occurred_at: datetime
 
     @model_validator(mode="after")
     def transition_shape_is_valid(self) -> "CourseLearningEventRequest":
@@ -853,7 +855,7 @@ class CourseLearningEventRequest(StrictCourseRequest):
                 "exercise events require concept_key and exercise_key stable keys"
             )
         LearningEvent(
-            event_id=self.event_key,
+            event_id="action-request",
             course_id="course:request",
             course_version_id="course_version:request",
             chapter_key=self.chapter_key,
@@ -861,7 +863,7 @@ class CourseLearningEventRequest(StrictCourseRequest):
             exercise_key=self.exercise_key,
             kind=self.kind,
             payload=self.payload,
-            occurred_at=self.occurred_at,
+            occurred_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
         )
         return self
 
@@ -901,6 +903,47 @@ class CourseExerciseGradeResponse(BaseModel):
     grade: GradeResult
     mastery: ConceptMastery | None = None
     event_key: StableKey | None = None
+
+
+class CourseTransferTaskResponse(BaseModel):
+    """Learner-safe transfer task with its deterministic grader withheld."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    key: StableKey
+    prompt: str
+    invariant_concept_keys: tuple[StableKey, ...]
+    dimensions: tuple[TransferDimension, ...]
+    answer_type: AnswerType
+    difficulty: DifficultyVector
+    anchor_ids: tuple[str, ...]
+
+
+class CourseExerciseResponse(BaseModel):
+    """Learner-safe exercise projection with every grading oracle removed."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    key: StableKey
+    chapter_key: StableKey
+    prompt: str
+    concept_keys: tuple[StableKey, ...]
+    exercise_type: Literal[
+        "worked_source",
+        "source_practice",
+        "generated_core",
+        "generated_challenge",
+        "transfer",
+    ]
+    answer_type: AnswerType
+    source_anchor_ids: tuple[str, ...]
+    source_number: str | None = None
+    source_section: str | None = None
+    difficulty: DifficultyVector
+    is_core: bool
+    is_gating: bool
+    is_source_level: bool
+    transfer: CourseTransferTaskResponse | None = None
 
 
 class CourseLearningChapterOverview(BaseModel):

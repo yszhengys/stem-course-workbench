@@ -27,6 +27,7 @@ from api.models import (
     CourseEvidenceBuildRequest,
     CourseExerciseGradeRequest,
     CourseExerciseGradeResponse,
+    CourseExerciseResponse,
     CourseFindingUpdate,
     CourseJobResponse,
     CourseLearningEventRequest,
@@ -43,11 +44,7 @@ from api.models import (
     LabCreate,
     ProgressUpdate,
 )
-from open_notebook.course.v2_contracts import (
-    ExerciseBlueprint,
-    ReviewQueueItem,
-    StableKey,
-)
+from open_notebook.course.v2_contracts import ReviewQueueItem, StableKey
 from open_notebook.domain.base import ObjectModel
 from open_notebook.exceptions import InvalidInputError, NotFoundError, OpenNotebookError
 
@@ -148,7 +145,7 @@ async def append_learning_event(
 
 @router.get(
     "/courses/{course_id}/exercises",
-    response_model=list[ExerciseBlueprint],
+    response_model=list[CourseExerciseResponse],
 )
 async def list_course_exercises(
     course_id: str,

@@ -40,8 +40,12 @@ from open_notebook.course.models import (
     Lab,
     Progress,
 )
-from open_notebook.course.v2_contracts import ConceptMastery
-from open_notebook.course.v2_models import CourseConceptMastery, CourseExercise
+from open_notebook.course.v2_contracts import ConceptMastery, LearningEvent
+from open_notebook.course.v2_models import (
+    CourseConceptMastery,
+    CourseExercise,
+    CourseLearningEvent,
+)
 from open_notebook.course.workflow_service import (
     CourseWorkflowService,
 )
@@ -520,6 +524,67 @@ class CourseService:
         return max(published, key=lambda version: version.version_no)
 
     @staticmethod
+    async def _confirm_current_published_version(
+        course_id: str,
+        expected_version_id: str,
+    ) -> None:
+        confirmed = await CourseService.get_current_published_version(course_id)
+        if confirmed.id is None or str(confirmed.id) != expected_version_id:
+            raise CourseConflictError(
+                "Current Course version changed during the read; retry"
+            )
+
+    @staticmethod
+    def _published_chapter_ids(
+        chapters: list[Chapter] | tuple[Chapter, ...],
+        version_id: str,
+    ) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for chapter in chapters:
+            if (
+                chapter.course_version != version_id
+                or chapter.status != sm.ChapterStatus.PUBLISHED
+            ):
+                continue
+            if chapter.id is None:
+                raise OpenNotebookError("Published Course chapter has no identity")
+            if chapter.chapter_key in result:
+                raise CourseConflictError(
+                    "Course has multiple published chapters with the same stable key"
+                )
+            result[chapter.chapter_key] = str(chapter.id)
+        return result
+
+    @staticmethod
+    async def confirm_current_published_scope(
+        course_id: str,
+        version_id: str,
+        expected_chapter_ids: dict[str, str],
+        *,
+        exact: bool,
+    ) -> None:
+        await CourseService._confirm_current_published_version(
+            course_id, version_id
+        )
+        current = await CourseVersion.chapters(version_id)
+        current_ids = CourseService._published_chapter_ids(current, version_id)
+        matches = (
+            current_ids == expected_chapter_ids
+            if exact
+            else all(
+                current_ids.get(key) == record_id
+                for key, record_id in expected_chapter_ids.items()
+            )
+        )
+        if not matches:
+            raise CourseConflictError(
+                "Published Course chapter scope changed during the read; retry"
+            )
+        await CourseService._confirm_current_published_version(
+            course_id, version_id
+        )
+
+    @staticmethod
     async def list_current_published_chapters(
         course_id: str,
     ) -> tuple[CourseVersion, tuple[Chapter, ...]]:
@@ -533,11 +598,15 @@ class CourseService:
             if chapter.course_version == str(version.id)
             and chapter.status == sm.ChapterStatus.PUBLISHED
         )
-        keys = [chapter.chapter_key for chapter in published]
-        if len(keys) != len(set(keys)):
-            raise CourseConflictError(
-                "Course has multiple published chapters with the same stable key"
-            )
+        chapter_ids = CourseService._published_chapter_ids(
+            published, str(version.id)
+        )
+        await CourseService.confirm_current_published_scope(
+            course_id,
+            str(version.id),
+            chapter_ids,
+            exact=True,
+        )
         return version, tuple(
             sorted(published, key=lambda chapter: (chapter.chapter_no, chapter.chapter_key))
         )
@@ -587,11 +656,9 @@ class CourseService:
                 "version": ensure_record_id(str(version.id)),
             },
         )
-        chapter_ids = {
-            chapter.chapter_key: str(chapter.id)
-            for chapter in chapters
-            if chapter.id is not None
-        }
+        chapter_ids = CourseService._published_chapter_ids(
+            chapters, str(version.id)
+        )
         records = tuple(
             CourseExercise(**row)
             for row in (rows if isinstance(rows, list) else [])
@@ -603,6 +670,12 @@ class CourseService:
             if record.course == course_id
             and record.course_version == str(version.id)
             and chapter_ids.get(record.chapter_key) == record.chapter
+        )
+        await CourseService.confirm_current_published_scope(
+            course_id,
+            str(version.id),
+            chapter_ids,
+            exact=chapter_key is None,
         )
         return version, tuple(
             sorted(
@@ -632,6 +705,38 @@ class CourseService:
         return matches[0]
 
     @staticmethod
+    async def get_learning_event(
+        course_id: str,
+        event_key: str,
+    ) -> LearningEvent | None:
+        rows = await repo_query(
+            """
+            SELECT * FROM course_learning_event
+            WHERE course = $course AND event_key = $event_key LIMIT 1;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "event_key": event_key,
+            },
+        )
+        if not isinstance(rows, list) or not rows:
+            return None
+        record = CourseLearningEvent(**rows[0])
+        if record.course != course_id:
+            raise InvalidInputError("Learning event is outside the Course scope.")
+        return LearningEvent(
+            event_id=record.event_key,
+            course_id=record.course,
+            course_version_id=record.course_version,
+            chapter_key=record.chapter_key,
+            concept_key=record.concept_key,
+            exercise_key=record.exercise_key,
+            kind=record.kind,
+            payload=record.payload,
+            occurred_at=record.occurred_at,
+        )
+
+    @staticmethod
     async def list_current_masteries(
         course_id: str,
     ) -> tuple[CourseVersion, tuple[ConceptMastery, ...]]:
@@ -650,7 +755,10 @@ class CourseService:
                 "version": ensure_record_id(str(version.id)),
             },
         )
-        chapter_keys = {chapter.chapter_key for chapter in chapters}
+        chapter_ids = CourseService._published_chapter_ids(
+            chapters, str(version.id)
+        )
+        chapter_keys = set(chapter_ids)
         records = tuple(
             CourseConceptMastery(**row)
             for row in (rows if isinstance(rows, list) else [])
@@ -674,6 +782,12 @@ class CourseService:
             if record.course == course_id
             and record.course_version == str(version.id)
             and record.chapter_key in chapter_keys
+        )
+        await CourseService.confirm_current_published_scope(
+            course_id,
+            str(version.id),
+            chapter_ids,
+            exact=True,
         )
         return version, tuple(
             sorted(
