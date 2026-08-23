@@ -7,6 +7,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -221,14 +222,29 @@ async def test_verified_bundle_is_written_atomically_with_fresh_relationships(
 
     result = await service.import_bundle(destination)
 
-    course = await database.query(
-        "SELECT * FROM ONLY $course;",
-        {"course": ensure_record_id(result.course_id)},
+    course = cast(
+        dict[str, Any],
+        await database.query(
+            "SELECT * FROM ONLY $course;",
+            {"course": ensure_record_id(result.course_id)},
+        ),
     )
-    notes = await database.query("SELECT * FROM course_note;")
-    events = await database.query("SELECT * FROM course_learning_event;")
-    references = await database.query("SELECT in, out FROM reference;")
-    sources = await database.query("SELECT * FROM source;")
+    notes = cast(
+        list[dict[str, Any]],
+        await database.query("SELECT * FROM course_note;"),
+    )
+    events = cast(
+        list[dict[str, Any]],
+        await database.query("SELECT * FROM course_learning_event;"),
+    )
+    references = cast(
+        list[dict[str, Any]],
+        await database.query("SELECT in, out FROM reference;"),
+    )
+    sources = cast(
+        list[dict[str, Any]],
+        await database.query("SELECT * FROM source;"),
+    )
     assert str(course["id"]) == result.course_id
     assert str(course["outline_version_id"]) != "course_version:original"
     assert str(notes[0]["course"]) == result.course_id

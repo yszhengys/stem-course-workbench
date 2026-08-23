@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -346,10 +347,16 @@ async def test_atomic_draft_commit_rejects_a_concurrent_revision(
             expected_revision=second_snapshot.revision_token,
         )
 
-    rows = await database.query(
-        "SELECT revision_no, artifact_hash FROM course_draft_revision;"
+    rows = cast(
+        list[dict[str, Any]],
+        await database.query(
+            "SELECT revision_no, artifact_hash FROM course_draft_revision;"
+        ),
     )
-    chapter = await database.query("SELECT artifact FROM ONLY chapter:one;")
+    chapter = cast(
+        dict[str, Any],
+        await database.query("SELECT artifact FROM ONLY chapter:one;"),
+    )
     assert len(rows) == 1
     assert rows[0]["revision_no"] == 1
     assert rows[0]["artifact_hash"] == saved.artifact_hash
@@ -452,6 +459,7 @@ def test_structured_draft_routes_are_strict_and_return_409_for_stale_tokens(
     assert saved.status_code == 200
     assert stale.status_code == 409
     apply.assert_awaited_once()
+    assert apply.await_args is not None
     request = apply.await_args.args[2]
     assert request.operation.kind == "replace_formula"
     assert request.model_dump().get("chapter_id") is None

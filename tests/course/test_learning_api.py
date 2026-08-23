@@ -293,6 +293,7 @@ def test_learning_read_routes_return_only_public_v2_contracts(
     )
     review_queue = AsyncMock(return_value=[])
     blueprint = _blueprint()
+    assert blueprint.transfer_task is not None
     exercises = AsyncMock(return_value=[{
         "key": blueprint.key,
         "chapter_key": blueprint.chapter_key,

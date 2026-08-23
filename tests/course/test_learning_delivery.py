@@ -308,6 +308,7 @@ async def test_learning_service_commits_reveal_and_transfer_as_one_batch(
 
     assert mastery.concept_key == "linear-equations"
     commit.assert_awaited_once()
+    assert commit.await_args is not None
     committed_events = commit.await_args.args[0]
     assert [event.kind for event in committed_events] == [
         "answer_revealed", "transfer_required"
@@ -383,6 +384,7 @@ async def test_hint_endpoint_releases_only_one_recorded_hint(
     assert response.hint_index == 1
     assert response.hint == "Identify the invariant relationship."
     assert "Represent both sides" not in response.model_dump_json()
+    assert append.await_args is not None
     request = append.await_args.args[1]
     assert request.kind == "hint_viewed"
     assert request.payload.hint_index == 1
@@ -431,6 +433,7 @@ async def test_reveal_records_transfer_gate_before_returning_answer(
     assert response.transfer.key == "core-1-transfer"
     assert "grader" not in response.model_dump_json()
     append_reveal_events.assert_awaited_once()
+    assert append_reveal_events.await_args is not None
     revealed, required = append_reveal_events.await_args.args
     assert revealed.kind == "answer_revealed"
     assert required is not None and required.kind == "transfer_required"
@@ -476,6 +479,7 @@ async def test_transfer_is_server_graded_and_only_success_appends_completion(
     correct = await service.grade_transfer("course:abc", "core-1", request)
     assert correct.grade.correct is True
     assert correct.mastery == _mastery()
+    assert append_event.await_args is not None
     event = append_event.await_args.args[0]
     assert event.kind == "transfer_completed"
     assert event.payload.source_attempt_key == "attempt-one"

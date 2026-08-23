@@ -1,0 +1,183 @@
+{
+  "fixture_version": 1,
+  "fixture_id": "synthetic-calculus-limits",
+  "subject": "math",
+  "topic": "limits",
+  "license": "CC0-1.0",
+  "generation_note": "Original synthetic fixture authored for deterministic Course V2 quality tests; it is not copied from a textbook.",
+  "source_title": "Synthetic Calculus Notes",
+  "source_evidence": [
+    {
+      "anchor_id": "anchor:calculus_basic",
+      "category": "exercise",
+      "source_number": "C-2",
+      "text": "Exercise C-2. Evaluate lim x→2 of (x²-4)/(x-2) and state why direct substitution initially fails."
+    },
+    {
+      "anchor_id": "anchor:calculus_advanced",
+      "category": "exercise",
+      "source_number": "C-12",
+      "text": "Exercise C-12. Determine the parameter values for which a piecewise function is differentiable at its join and justify both one-sided conditions."
+    },
+    {
+      "anchor_id": "anchor:calculus_answer",
+      "category": "answer",
+      "source_number": "C-2",
+      "text": "Answer C-2. Factor x²-4=(x-2)(x+2); for x≠2 the quotient is x+2, so the limit is 4."
+    }
+  ],
+  "worked_example": {
+    "prompt": "Evaluate lim x→3 of (x²-9)/(x-3).",
+    "steps": [
+      "Recognize the indeterminate 0/0 form after direct substitution.",
+      "Factor x²-9 as (x-3)(x+3).",
+      "Cancel only for x≠3 and evaluate the limiting expression x+3."
+    ],
+    "answer": "6"
+  },
+  "figure_description": "A plot of a line with an open circle at (2,4), showing that a limit can exist at a missing point.",
+  "exercises": [
+    {
+      "key": "calculus-source-basic",
+      "chapter_key": "limits",
+      "prompt": "Exercise C-2. Evaluate lim x→2 of (x²-4)/(x-2).",
+      "concept_keys": ["limits"],
+      "exercise_type": "source_practice",
+      "answer_type": "numeric",
+      "source_anchor_ids": ["anchor:calculus_basic"],
+      "source_number": "C-2",
+      "source_section": "Algebraic limits",
+      "difficulty": {
+        "concept_count": 1,
+        "reasoning_steps": 3,
+        "symbolic_depth": 2,
+        "representation_shifts": 0,
+        "proof_burden": 0,
+        "physics_constraints": 0
+      },
+      "grader": {
+        "kind": "numeric",
+        "expected": "4",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0
+      },
+      "is_source_level": true
+    },
+    {
+      "key": "calculus-source-advanced",
+      "chapter_key": "limits",
+      "prompt": "Exercise C-12. Find the parameter conditions that make a piecewise function differentiable at its join.",
+      "concept_keys": ["limits"],
+      "exercise_type": "source_practice",
+      "answer_type": "set",
+      "source_anchor_ids": ["anchor:calculus_advanced"],
+      "source_number": "C-12",
+      "source_section": "Continuity and differentiability",
+      "difficulty": {
+        "concept_count": 3,
+        "reasoning_steps": 7,
+        "symbolic_depth": 5,
+        "representation_shifts": 2,
+        "proof_burden": 2,
+        "physics_constraints": 0
+      },
+      "grader": {
+        "kind": "set",
+        "expected_items": ["left-value-equals-right-value", "left-slope-equals-right-slope"],
+        "order_matters": false
+      },
+      "is_source_level": true
+    },
+    {
+      "key": "calculus-core",
+      "chapter_key": "limits",
+      "prompt": "Evaluate lim x→2 of (x²-4)/(x-2), explain the removable discontinuity, and justify each algebraic step.",
+      "concept_keys": ["limits"],
+      "exercise_type": "generated_core",
+      "answer_type": "numeric",
+      "hints": [
+        "First identify why direct substitution gives an indeterminate form.",
+        "Look for a factor shared by numerator and denominator.",
+        "Simplify only on the punctured neighborhood where x is not 2.",
+        "Evaluate the simplified expression as x approaches 2."
+      ],
+      "source_anchor_ids": ["anchor:calculus_basic"],
+      "difficulty": {
+        "concept_count": 1,
+        "reasoning_steps": 4,
+        "symbolic_depth": 3,
+        "representation_shifts": 1,
+        "proof_burden": 0,
+        "physics_constraints": 0
+      },
+      "grader": {
+        "kind": "numeric",
+        "expected": "4",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0
+      },
+      "is_core": true,
+      "is_gating": true,
+      "transfer_task": {
+        "key": "calculus-core-transfer",
+        "prompt": "Read the approached y-value from a graph with a removable hole, then verify that value algebraically.",
+        "invariant_concept_keys": ["limits"],
+        "dimensions": ["representation"],
+        "change_evidence": [
+          {
+            "dimension": "representation",
+            "source_structure": "symbolic equation",
+            "target_structure": "graphical intersection",
+            "rationale": "The approached value is invariant while the evidence changes from algebraic simplification to a graph."
+          }
+        ],
+        "answer_type": "numeric",
+        "difficulty": {
+          "concept_count": 1,
+          "reasoning_steps": 5,
+          "symbolic_depth": 3,
+          "representation_shifts": 2,
+          "proof_burden": 0,
+          "physics_constraints": 0
+        },
+        "grader": {
+          "kind": "numeric",
+          "expected": "4",
+          "absolute_tolerance": 0,
+          "relative_tolerance": 0
+        },
+        "anchor_ids": ["anchor:calculus_basic"]
+      }
+    },
+    {
+      "key": "calculus-challenge",
+      "chapter_key": "limits",
+      "prompt": "Differentiate f(x)=x³ and give the symbolic derivative.",
+      "concept_keys": ["limits"],
+      "exercise_type": "generated_challenge",
+      "answer_type": "symbolic",
+      "difficulty": {
+        "concept_count": 2,
+        "reasoning_steps": 6,
+        "symbolic_depth": 4,
+        "representation_shifts": 2,
+        "proof_burden": 1,
+        "physics_constraints": 0
+      },
+      "grader": {
+        "kind": "symbolic",
+        "expected_expression": "3*x**2",
+        "allowed_symbols": ["x"]
+      }
+    }
+  ],
+  "correct_answers": {
+    "calculus-source-basic": "4",
+    "calculus-source-advanced": {
+      "items": ["left-value-equals-right-value", "left-slope-equals-right-slope"]
+    },
+    "calculus-core": "4",
+    "calculus-challenge": "3*x**2",
+    "calculus-core-transfer": "4"
+  }
+}

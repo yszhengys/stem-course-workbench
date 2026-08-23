@@ -257,6 +257,7 @@ async def test_grounded_response_persists_only_validated_turns() -> None:
     assert response.turn.anchor_ids == ("anchor:limit",)
     assert response.turn.answer_revealed is False
     append_turns.assert_awaited_once()
+    assert append_turns.await_args is not None
     user_turn, assistant_turn = append_turns.await_args.args
     assert (user_turn.turn_no, assistant_turn.turn_no) == (1, 2)
     assert user_turn.anchor_ids == ()
@@ -402,6 +403,7 @@ async def test_explicit_answer_reveal_commits_transfer_gate_atomically() -> None
 
     assert response.turn.answer_revealed is True
     append_reveal_events.assert_awaited_once()
+    assert append_reveal_events.await_args is not None
     revealed, required = append_reveal_events.await_args.args
     assert (revealed.kind, required.kind) == (
         "answer_revealed",
