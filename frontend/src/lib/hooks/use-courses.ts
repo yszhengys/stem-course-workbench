@@ -231,6 +231,21 @@ export function useCourseExercises(
   })
 }
 
+export function useCourseChapterDraft(
+  courseId: string,
+  chapterKey: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: QUERY_KEYS.courseChapterDraft(courseId, chapterKey),
+    queryFn: () => courseApi.getChapterDraft(courseId, chapterKey),
+    enabled: Boolean(courseId && chapterKey) && enabled,
+    retry: false,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  })
+}
+
 export function useCreateCourse() {
   const client = useQueryClient()
   const feedback = useMutationFeedback()
@@ -426,6 +441,52 @@ export function usePublishCourseChapter(courseId: string, chapterKey: string) {
       feedback.success()
     },
     onError: feedback.error,
+  })
+}
+
+export function useApplyCourseChapterDraftOperation(
+  courseId: string,
+  chapterKey: string,
+) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: (request: Parameters<typeof courseApi.applyChapterDraftOperation>[2]) =>
+      courseApi.applyChapterDraftOperation(courseId, chapterKey, request),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseChapterDraft(courseId, chapterKey) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseChapter(courseId, chapterKey) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseFindings(courseId, chapterKey) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseLabs(courseId, chapterKey) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseExercises(courseId, chapterKey) }),
+      ])
+      feedback.success()
+    },
+    onError: feedback.error,
+    retry: false,
+  })
+}
+
+export function useValidateCourseChapterDraft(
+  courseId: string,
+  chapterKey: string,
+) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: (request: Parameters<typeof courseApi.validateChapterDraft>[2]) =>
+      courseApi.validateChapterDraft(courseId, chapterKey, request),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseChapterDraft(courseId, chapterKey) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseChapter(courseId, chapterKey) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseFindings(courseId, chapterKey) }),
+      ])
+      feedback.success()
+    },
+    onError: feedback.error,
+    retry: false,
   })
 }
 

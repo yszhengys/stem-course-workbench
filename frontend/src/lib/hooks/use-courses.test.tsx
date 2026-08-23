@@ -10,10 +10,13 @@ import {
   useCourseLearningNotes,
   useCourseLearningOverview,
   useCourseLearningSources,
+  useCourseChapterDraft,
   useCourseTutorSessions,
   useCreateCourseTutorSession,
+  useApplyCourseChapterDraftOperation,
   useCreateCourseLearningNote,
   useSendCourseTutorMessage,
+  useValidateCourseChapterDraft,
 } from './use-courses'
 
 vi.mock('@/lib/api/course', () => ({
@@ -26,6 +29,9 @@ vi.mock('@/lib/api/course', () => ({
     listTutorSessions: vi.fn(),
     createTutorSession: vi.fn(),
     sendTutorMessage: vi.fn(),
+    getChapterDraft: vi.fn(),
+    applyChapterDraftOperation: vi.fn(),
+    validateChapterDraft: vi.fn(),
   },
 }))
 vi.mock('@/lib/hooks/use-toast', () => ({
@@ -57,6 +63,9 @@ describe('Course learner queries', () => {
     vi.mocked(courseApi.listTutorSessions).mockResolvedValue([])
     vi.mocked(courseApi.createTutorSession).mockResolvedValue({} as never)
     vi.mocked(courseApi.sendTutorMessage).mockResolvedValue({} as never)
+    vi.mocked(courseApi.getChapterDraft).mockResolvedValue({} as never)
+    vi.mocked(courseApi.applyChapterDraftOperation).mockResolvedValue({} as never)
+    vi.mocked(courseApi.validateChapterDraft).mockResolvedValue({} as never)
   })
 
   it('always revalidates learning overview on window focus', async () => {
@@ -200,5 +209,54 @@ describe('Course learner queries', () => {
     )
     await expect(missing.result.current.mutateAsync(request))
       .rejects.toThrow('Tutor session is required')
+  })
+
+  it('keeps a chapter draft revision in a fresh, focus-revalidated cache', async () => {
+    const { result } = renderHook(
+      () => useCourseChapterDraft('course:one', 'limits'),
+      { wrapper: wrapperFor(client) },
+    )
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(courseApi.getChapterDraft).toHaveBeenCalledWith('course:one', 'limits')
+    const options = client.getQueryCache().find({
+      queryKey: QUERY_KEYS.courseChapterDraft('course:one', 'limits'),
+    })?.options as { staleTime?: number; refetchOnWindowFocus?: boolean; retry?: boolean }
+    expect(options.staleTime).toBe(0)
+    expect(options.refetchOnWindowFocus).toBe(true)
+    expect(options.retry).toBe(false)
+  })
+
+  it('saves and validates the exact current draft revision', async () => {
+    const draftKey = QUERY_KEYS.courseChapterDraft('course:one', 'limits')
+    client.setQueryData(draftKey, {})
+    const apply = renderHook(
+      () => useApplyCourseChapterDraftOperation('course:one', 'limits'),
+      { wrapper: wrapperFor(client) },
+    )
+    const request = {
+      revision_token: 'a'.repeat(64),
+      operation: {
+        kind: 'replace_text' as const, block_key: 'definition',
+        text: 'Updated.', anchor_ids: ['anchor:one'],
+      },
+    }
+    await act(async () => { await apply.result.current.mutateAsync(request) })
+    expect(courseApi.applyChapterDraftOperation)
+      .toHaveBeenCalledWith('course:one', 'limits', request)
+    expect(client.getQueryState(draftKey)?.isInvalidated).toBe(true)
+
+    client.setQueryData(draftKey, {})
+    const validate = renderHook(
+      () => useValidateCourseChapterDraft('course:one', 'limits'),
+      { wrapper: wrapperFor(client) },
+    )
+    await act(async () => {
+      await validate.result.current.mutateAsync({ revision_token: 'b'.repeat(64) })
+    })
+    expect(courseApi.validateChapterDraft).toHaveBeenCalledWith(
+      'course:one', 'limits', { revision_token: 'b'.repeat(64) },
+    )
+    expect(client.getQueryState(draftKey)?.isInvalidated).toBe(true)
   })
 })

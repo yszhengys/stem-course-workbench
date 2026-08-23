@@ -4,6 +4,9 @@ import { apiClient } from '@/lib/api/client'
 import { SAFE_LAB_PROPOSAL_KEYS } from '@/lib/course/lab-proposals'
 import {
   BuildEvidenceRequest,
+  courseDraftOperationRequestSchema,
+  courseDraftResponseSchema,
+  courseDraftValidationResponseSchema,
   courseAttemptSchema,
   courseAttemptWithLabSchema,
   courseExerciseGradeResponseSchema,
@@ -38,6 +41,7 @@ import {
   CourseExerciseGradeRequest,
   CourseExerciseHintRequest,
   CourseExerciseRevealRequest,
+  CourseDraftOperationRequest,
   CourseLearningEventRequest,
   CourseLearnerNoteCreateRequest,
   CourseTransferGradeRequest,
@@ -283,6 +287,43 @@ export const courseApi = {
       payload,
     )
     return courseTutorMessageResponseSchema.parse(response.data)
+  },
+
+  async getChapterDraft(courseId: string, chapterKey: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/draft`,
+    )
+    return courseDraftResponseSchema.parse(response.data)
+  },
+
+  async applyChapterDraftOperation(
+    courseId: string,
+    chapterKey: string,
+    request: CourseDraftOperationRequest,
+  ) {
+    const parsed = courseDraftOperationRequestSchema.parse(request)
+    const response = await apiClient.patch(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/draft`,
+      {
+        revision_token: parsed.revision_token,
+        operation: parsed.operation,
+      },
+    )
+    return courseDraftResponseSchema.parse(response.data)
+  },
+
+  async validateChapterDraft(
+    courseId: string,
+    chapterKey: string,
+    request: { revision_token: string },
+  ) {
+    const parsed = z.object({ revision_token: z.string().regex(/^[0-9a-f]{64}$/) })
+      .strict().parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/draft/validate`,
+      { revision_token: parsed.revision_token },
+    )
+    return courseDraftValidationResponseSchema.parse(response.data)
   },
 
   async getReviewQueue(courseId: string) {

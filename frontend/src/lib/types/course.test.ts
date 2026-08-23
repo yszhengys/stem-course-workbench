@@ -10,6 +10,8 @@ import {
   courseExerciseRevealRequestSchema,
   courseExerciseRevealResponseSchema,
   courseExerciseSchema,
+  courseDraftOperationRequestSchema,
+  courseDraftResponseSchema,
   courseLearnerChapterResponseSchema,
   courseLearnerNoteCreateRequestSchema,
   courseLearnerNotesResponseSchema,
@@ -640,6 +642,35 @@ describe('learner-safe Course V2 schemas', () => {
     })).toThrow()
     expect(() => courseTutorMessageRequestSchema.parse({
       ...base, intent: 'reveal', exercise_key: 'limits-core',
+    })).toThrow()
+  })
+
+  it('strictly validates structured draft operations and revision snapshots', () => {
+    const operation = {
+      revision_token: 'a'.repeat(64),
+      operation: {
+        kind: 'replace_formula', block_key: 'speed', latex: 'v=d/t',
+        anchor_ids: ['anchor:one'],
+      },
+    }
+    expect(courseDraftOperationRequestSchema.parse(operation).operation.kind)
+      .toBe('replace_formula')
+    expect(() => courseDraftOperationRequestSchema.parse({
+      ...operation, chapter_id: 'chapter:foreign',
+    })).toThrow()
+    expect(() => courseDraftOperationRequestSchema.parse({
+      ...operation,
+      operation: { ...operation.operation, javascript: 'alert(1)' },
+    })).toThrow()
+
+    const response = {
+      chapter_key: 'limits', chapter_status: 'reviewing', editable: true,
+      revision_no: 1, revision_token: 'b'.repeat(64), revision_status: 'draft',
+      artifact_hash: 'c'.repeat(64), artifact: chapterPayload(), exercises: [],
+    }
+    expect(courseDraftResponseSchema.parse(response).revision_no).toBe(1)
+    expect(() => courseDraftResponseSchema.parse({
+      ...response, chapter_id: 'chapter:one',
     })).toThrow()
   })
 })

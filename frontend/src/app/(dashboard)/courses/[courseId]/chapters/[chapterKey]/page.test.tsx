@@ -38,6 +38,11 @@ vi.mock('@/components/layout/AppShell', () => ({
 vi.mock('@/components/course/ChapterPublicationGate', () => ({
   ChapterPublicationGate: () => <div />,
 }))
+vi.mock('@/components/course/authoring/StructuredDraftEditor', () => ({
+  StructuredDraftEditor: ({ courseId, chapterKey }: { courseId: string; chapterKey: string }) => (
+    <section>{`draft-editor:${courseId}:${chapterKey}`}</section>
+  ),
+}))
 vi.mock('@/components/course/CourseExercises', () => ({ CourseExercises: () => <div /> }))
 vi.mock('@/components/course/LabRenderer', () => ({ LabRenderer: () => <div /> }))
 vi.mock('@/components/ui/markdown-renderer', () => ({
@@ -149,6 +154,8 @@ describe('CourseChapterPage review models', () => {
 
   it('defaults three independent stages and submits Luna plus explicit Sol', async () => {
     render(<CourseChapterPage />)
+
+    expect(screen.getByText('draft-editor:course:one:limits')).toBeInTheDocument()
 
     await waitFor(() => {
       expect(document.querySelector('#course-content-model')).toHaveValue('codex_cli|gpt-5.6-sol')

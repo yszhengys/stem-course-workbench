@@ -16,6 +16,10 @@ from api.models import (
     CourseActivityEventRequest,
     CourseAnswerFormat,
     CourseConceptResponse,
+    CourseDraftOperationRequest,
+    CourseDraftResponse,
+    CourseDraftValidateRequest,
+    CourseDraftValidationResponse,
     CourseExerciseGradeRequest,
     CourseExerciseGradeResponse,
     CourseExerciseHintRequest,
@@ -45,12 +49,23 @@ from api.models import (
     CourseTutorSessionResponse,
 )
 from open_notebook.course.assessment_service import AssessmentService
+from open_notebook.course.authoring_service import (
+    AuthoringService,
+    DraftConflictError,
+    DraftImmutableError,
+    DraftScope,
+    DraftState,
+)
 from open_notebook.course.contracts import ChapterArtifact, CourseOutlineArtifact
 from open_notebook.course.learning_service import (
     REVIEW_INTERVAL_DAYS,
     LearningService,
 )
 from open_notebook.course.models import Chapter, CourseNote, CourseVersion
+from open_notebook.course.publication_service import (
+    DraftPublicationError,
+    PublicationService,
+)
 from open_notebook.course.tutor_service import (
     TutorEvidence,
     TutorGroundingError,
@@ -80,6 +95,7 @@ from open_notebook.course.v2_models import (
     CourseTutorSession,
     CourseTutorTurn,
 )
+from open_notebook.course.workflow_service import CourseWorkflowService
 from open_notebook.exceptions import InvalidInputError, OpenNotebookError
 
 
@@ -90,6 +106,8 @@ class CourseV2Service:
     learning_service: LearningService = field(default_factory=LearningService)
     assessment_service: type[AssessmentService] = AssessmentService
     tutor_service: TutorService | None = None
+    authoring_service: AuthoringService | None = None
+    publication_service: PublicationService | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     def _tutor(self) -> TutorService:
@@ -99,6 +117,18 @@ class CourseV2Service:
                 clock=self.clock,
             )
         return self.tutor_service
+
+    def _authoring(self) -> AuthoringService:
+        if self.authoring_service is None:
+            self.authoring_service = AuthoringService(clock=self.clock)
+        return self.authoring_service
+
+    def _publication(self) -> PublicationService:
+        if self.publication_service is None:
+            self.publication_service = PublicationService(
+                draft_loader=self._authoring().get_draft
+            )
+        return self.publication_service
 
     @staticmethod
     def _record_id(value: object, label: str) -> str:
@@ -786,6 +816,119 @@ class CourseV2Service:
             snapshot_token=scope.snapshot_token,
             response=response,
         )
+
+    async def _draft_scope(
+        self,
+        course_id: str,
+        chapter_key: str,
+    ) -> DraftScope:
+        course = await CourseService.get_course(course_id)
+        if course.outline_version_id is None:
+            raise CourseConflictError("Course has no current approved version")
+        version_id = course.outline_version_id
+        version = await CourseVersion.get(version_id)
+        if version.course != course_id:
+            raise CourseConflictError("Course version is outside the Course scope")
+        chapter = await CourseWorkflowService.resolve_current_chapter(
+            course_id=course_id,
+            version_id=version_id,
+            chapter_key=chapter_key,
+            chapters=await CourseVersion.chapters(version_id),
+        )
+        chapter_id = self._record_id(chapter.id, "Course chapter")
+        return DraftScope(
+            course_id=course_id,
+            course_version_id=version_id,
+            chapter_id=chapter_id,
+            chapter_key=chapter_key,
+            chapter_status=chapter.status,
+            version_status=version.status,
+            allowed_anchor_ids=(
+                await CourseService.list_owned_current_anchor_ids(course_id)
+            ),
+        )
+
+    @staticmethod
+    def _draft_response(draft: DraftState) -> CourseDraftResponse:
+        return CourseDraftResponse(
+            chapter_key=draft.scope.chapter_key,
+            chapter_status=draft.scope.chapter_status,
+            editable=draft.editable,
+            revision_no=draft.revision_no,
+            revision_token=draft.revision_token,
+            revision_status=draft.revision_status,
+            artifact_hash=draft.artifact_hash,
+            artifact=draft.artifact,
+            exercises=draft.exercises,
+        )
+
+    async def get_chapter_draft(
+        self,
+        course_id: str,
+        chapter_key: str,
+    ) -> CourseDraftResponse:
+        try:
+            draft = await self._authoring().get_draft(
+                await self._draft_scope(course_id, chapter_key)
+            )
+        except (DraftConflictError, DraftImmutableError) as exc:
+            raise CourseConflictError(str(exc)) from exc
+        return self._draft_response(draft)
+
+    async def apply_chapter_draft_operation(
+        self,
+        course_id: str,
+        chapter_key: str,
+        request: CourseDraftOperationRequest,
+    ) -> CourseDraftResponse:
+        try:
+            draft = await self._authoring().get_draft(
+                await self._draft_scope(course_id, chapter_key)
+            )
+            saved = await self._authoring().save_operation(
+                draft,
+                request.operation,
+                expected_revision=request.revision_token,
+            )
+        except (DraftConflictError, DraftImmutableError) as exc:
+            raise CourseConflictError(str(exc)) from exc
+        return self._draft_response(saved)
+
+    async def validate_chapter_draft(
+        self,
+        course_id: str,
+        chapter_key: str,
+        request: CourseDraftValidateRequest,
+    ) -> CourseDraftValidationResponse:
+        try:
+            draft = await self._authoring().get_draft(
+                await self._draft_scope(course_id, chapter_key)
+            )
+            result = await self._authoring().validate_current(
+                draft,
+                expected_revision=request.revision_token,
+            )
+            refreshed = await self._authoring().get_draft(draft.scope)
+        except (DraftConflictError, DraftImmutableError) as exc:
+            raise CourseConflictError(str(exc)) from exc
+        return CourseDraftValidationResponse(
+            draft=self._draft_response(refreshed),
+            valid=result.valid,
+            checked=result.checked,
+            findings=result.findings,
+        )
+
+    async def publish_current_chapter(
+        self,
+        course_id: str,
+        chapter_key: str,
+    ) -> Chapter:
+        scope = await self._draft_scope(course_id, chapter_key)
+        try:
+            await self._publication().assert_draft_ready(scope)
+        except (DraftConflictError, DraftPublicationError) as exc:
+            raise CourseConflictError(str(exc)) from exc
+        return await CourseService.publish_current_chapter(course_id, chapter_key)
 
     async def get_learning_overview(
         self, course_id: str

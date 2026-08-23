@@ -5,15 +5,19 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from open_notebook.course.contracts import (
+    ChapterArtifact,
     LabSpecVariant,
     ModelSelection,
     ProvenanceLabel,
     SafeLabKey,
+    ValidationFinding,
 )
 from open_notebook.course.v2_contracts import (
     AnswerType,
     ConceptMastery,
     DifficultyVector,
+    DraftOperation,
+    ExerciseBlueprint,
     GradeResult,
     LearningEvent,
     LearningEventPayload,
@@ -24,6 +28,7 @@ from open_notebook.course.v2_contracts import (
     TransferDimension,
     TutorResponse,
     TutorTurn,
+    ValidationCheck,
 )
 
 
@@ -1215,6 +1220,38 @@ class CourseTutorMessageResponse(BaseModel):
 
     snapshot_token: Sha256
     response: TutorResponse
+
+
+class CourseDraftOperationRequest(StrictCourseRequest):
+    revision_token: Sha256
+    operation: DraftOperation
+
+
+class CourseDraftValidateRequest(StrictCourseRequest):
+    revision_token: Sha256
+
+
+class CourseDraftResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_key: StableKey
+    chapter_status: str = Field(min_length=1, max_length=50)
+    editable: bool
+    revision_no: int = Field(ge=0)
+    revision_token: Sha256
+    revision_status: Literal["draft", "validated"] | None = None
+    artifact_hash: Sha256
+    artifact: ChapterArtifact
+    exercises: tuple[ExerciseBlueprint, ...] = Field(default_factory=tuple, max_length=500)
+
+
+class CourseDraftValidationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    draft: CourseDraftResponse
+    valid: bool
+    checked: tuple[ValidationCheck, ...] = Field(max_length=6)
+    findings: tuple[ValidationFinding, ...] = Field(default_factory=tuple, max_length=500)
 
 
 class CourseLearningChapterOverview(BaseModel):

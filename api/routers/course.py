@@ -25,6 +25,10 @@ from api.models import (
     CourseChapterGenerateRequest,
     CourseChapterReviewRequest,
     CourseCreate,
+    CourseDraftOperationRequest,
+    CourseDraftResponse,
+    CourseDraftValidateRequest,
+    CourseDraftValidationResponse,
     CourseEvidenceBuildRequest,
     CourseExerciseGradeRequest,
     CourseExerciseGradeResponse,
@@ -238,6 +242,48 @@ async def respond_to_tutor(
     return await _call(
         course_v2_service.respond_to_tutor(
             course_id, session_id, request
+        )
+    )
+
+
+@router.get(
+    "/courses/{course_id}/chapters/{chapter_key}/draft",
+    response_model=CourseDraftResponse,
+)
+async def get_chapter_draft(course_id: str, chapter_key: StableKey):
+    return await _call(
+        course_v2_service.get_chapter_draft(course_id, chapter_key)
+    )
+
+
+@router.patch(
+    "/courses/{course_id}/chapters/{chapter_key}/draft",
+    response_model=CourseDraftResponse,
+)
+async def apply_chapter_draft_operation(
+    course_id: str,
+    chapter_key: StableKey,
+    request: CourseDraftOperationRequest,
+):
+    return await _call(
+        course_v2_service.apply_chapter_draft_operation(
+            course_id, chapter_key, request
+        )
+    )
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/draft/validate",
+    response_model=CourseDraftValidationResponse,
+)
+async def validate_chapter_draft(
+    course_id: str,
+    chapter_key: StableKey,
+    request: CourseDraftValidateRequest,
+):
+    return await _call(
+        course_v2_service.validate_chapter_draft(
+            course_id, chapter_key, request
         )
     )
 

@@ -724,4 +724,50 @@ describe('courseApi', () => {
     )).rejects.toThrow()
     expect(apiClient.post).not.toHaveBeenCalled()
   })
+
+  it('uses exact stable-key structured draft routes and payloads', async () => {
+    const stop = new Error('stop after request capture')
+    vi.mocked(apiClient.get).mockRejectedValue(stop)
+    vi.mocked(apiClient.patch).mockRejectedValue(stop)
+    vi.mocked(apiClient.post).mockRejectedValue(stop)
+    const request = {
+      revision_token: 'a'.repeat(64),
+      operation: {
+        kind: 'replace_formula' as const, block_key: 'speed', latex: 'v=2*d/t',
+        anchor_ids: ['anchor:one'],
+      },
+    }
+
+    await expect(courseApi.getChapterDraft('course:one', 'limits/intro'))
+      .rejects.toBe(stop)
+    await expect(courseApi.applyChapterDraftOperation(
+      'course:one', 'limits/intro', request,
+    )).rejects.toBe(stop)
+    await expect(courseApi.validateChapterDraft('course:one', 'limits/intro', {
+      revision_token: 'a'.repeat(64),
+    })).rejects.toBe(stop)
+
+    expect(apiClient.get).toHaveBeenCalledWith(
+      '/courses/course%3Aone/chapters/limits%2Fintro/draft',
+    )
+    expect(apiClient.patch).toHaveBeenCalledWith(
+      '/courses/course%3Aone/chapters/limits%2Fintro/draft', request,
+    )
+    expect(apiClient.post).toHaveBeenCalledWith(
+      '/courses/course%3Aone/chapters/limits%2Fintro/draft/validate',
+      { revision_token: 'a'.repeat(64) },
+    )
+  })
+
+  it('rejects record IDs and executable fields injected into draft operations', async () => {
+    await expect(courseApi.applyChapterDraftOperation('course:one', 'limits', {
+      revision_token: 'a'.repeat(64),
+      operation: {
+        kind: 'replace_formula', block_key: 'speed', latex: 'v=d/t',
+        anchor_ids: ['anchor:one'], javascript: 'alert(1)',
+      },
+      chapter_id: 'chapter:foreign',
+    } as never)).rejects.toThrow()
+    expect(apiClient.patch).not.toHaveBeenCalled()
+  })
 })

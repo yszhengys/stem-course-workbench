@@ -683,6 +683,7 @@ class CourseWorkflowService:
         ]
         promoted_ids: set[str] = set()
         succeeded_run_ids: set[str] = set()
+        succeeded_generated_chapter_ids: set[str] = set()
         if generated:
             rows = await repo_query(
                 """
@@ -712,6 +713,11 @@ class CourseWorkflowService:
                 succeeded_run_ids.add(str(run.id))
                 replay_hash = artifact_replay_hash(run)
                 if run.chapter is None:
+                    succeeded_generated_chapter_ids.update(
+                        str(chapter.id)
+                        for chapter in generated
+                        if chapter.input_hash == replay_hash
+                    )
                     legacy_matches = [
                         chapter
                         for chapter in generated
@@ -725,9 +731,31 @@ class CourseWorkflowService:
                 chapter = generated_by_id.get(run.chapter)
                 if chapter is None or chapter.input_hash != replay_hash:
                     continue
+                succeeded_generated_chapter_ids.add(run.chapter)
                 expected = _artifact_hash({"output": chapter.artifact or {}})
                 if run.output_hash == expected:
                     promoted_ids.add(run.chapter)
+
+        unpromoted_generated_ids = ({
+            str(chapter.id) for chapter in generated
+        } - promoted_ids).intersection(succeeded_generated_chapter_ids)
+        if unpromoted_generated_ids:
+            revision_rows = await repo_query(
+                """
+                SELECT VALUE chapter FROM course_draft_revision
+                WHERE course = $course AND course_version = $version
+                  AND chapter_key = $chapter_key;
+                """,
+                {
+                    "course": ensure_record_id(course_id),
+                    "version": ensure_record_id(version_id),
+                    "chapter_key": chapter_key,
+                },
+            )
+            revision_chapter_ids = {str(value) for value in revision_rows}
+            promoted_ids.update(
+                unpromoted_generated_ids.intersection(revision_chapter_ids)
+            )
 
         eligible = [
             chapter

@@ -13,6 +13,10 @@ import httpx
 
 from open_notebook.ai.models import Model
 from open_notebook.course import state_machine as sm
+from open_notebook.course.authoring_service import (
+    DraftConflictError,
+    DraftScope,
+)
 from open_notebook.course.contracts import (
     ChapterArtifact,
     CourseOutlineArtifact,
@@ -39,6 +43,10 @@ from open_notebook.course.models import (
     CourseVersion,
     Lab,
     Progress,
+)
+from open_notebook.course.publication_service import (
+    DraftPublicationError,
+    PublicationService,
 )
 from open_notebook.course.v2_contracts import ConceptMastery, LearningEvent
 from open_notebook.course.v2_models import (
@@ -905,6 +913,33 @@ class CourseService:
         )
 
     @staticmethod
+    async def list_owned_current_anchor_ids(course_id: str) -> tuple[str, ...]:
+        """Return unique current Course anchors for server-side authoring scope."""
+
+        course = await CourseService.get_course(course_id)
+        rows = await repo_query(
+            """
+            SELECT * FROM course_evidence_anchor
+            WHERE course = $course AND is_current = true
+            ORDER BY anchor_id;
+            """,
+            {"course": ensure_record_id(course_id)},
+        )
+        anchors = tuple(
+            CourseEvidenceAnchor(**row)
+            for row in rows
+            if isinstance(row, dict)
+        )
+        if any(anchor.source not in course.source_ids for anchor in anchors):
+            raise CourseConflictError(
+                "Current evidence anchor is outside the Course Source scope"
+            )
+        anchor_ids = tuple(anchor.anchor_id for anchor in anchors)
+        if len(anchor_ids) != len(set(anchor_ids)):
+            raise CourseConflictError("Current evidence anchor identity is ambiguous")
+        return anchor_ids
+
+    @staticmethod
     async def get_evidence_preview(
         course_id: str, anchor_id: str
     ) -> EvidencePreviewAsset:
@@ -1201,6 +1236,20 @@ class CourseService:
             or chapter.validation_status != sm.ChapterValidationStatus.PASSED
         ):
             raise CourseConflictError("Chapter review and validation must pass")
+        try:
+            await PublicationService(revision_query=repo_query).assert_draft_ready(
+                DraftScope(
+                    course_id=course_id,
+                    course_version_id=version_id,
+                    chapter_id=chapter_id,
+                    chapter_key=chapter.chapter_key,
+                    chapter_status=chapter.status,
+                    version_status=version.status,
+                    allowed_anchor_ids=(),
+                )
+            )
+        except (DraftConflictError, DraftPublicationError) as exc:
+            raise CourseConflictError(str(exc)) from exc
         _, finding_records = (
             await CourseWorkflowService.authoritative_review_findings(
                 course_id=course_id,

@@ -1237,3 +1237,170 @@ export const courseTutorMessageResponseSchema = z.object({
   response: courseTutorResponseSchema,
 }).strict()
 export type CourseTutorMessageResponse = z.infer<typeof courseTutorMessageResponseSchema>
+
+const numericGraderSpecSchema = z.object({
+  kind: z.literal('numeric'),
+  expected: z.string().min(1).max(500),
+  absolute_tolerance: finiteNumber.nonnegative(),
+  relative_tolerance: finiteNumber.nonnegative(),
+}).strict()
+
+const symbolicGraderSpecSchema = z.object({
+  kind: z.literal('symbolic'),
+  expected_expression: z.string().min(1).max(2000),
+  allowed_symbols: z.array(stableCourseKeySchema).max(100),
+}).strict()
+
+const unitGraderSpecSchema = z.object({
+  kind: z.literal('unit'),
+  expected_value: z.string().min(1).max(500),
+  expected_unit: z.string().min(1).max(200),
+  absolute_tolerance: finiteNumber.nonnegative(),
+  relative_tolerance: finiteNumber.nonnegative(),
+}).strict()
+
+const vectorGraderSpecSchema = z.object({
+  kind: z.literal('vector'),
+  expected_components: z.array(z.string().min(1).max(500)).min(1).max(4),
+  expected_unit: z.string().min(1).max(200).nullable(),
+  absolute_tolerance: finiteNumber.nonnegative(),
+  relative_tolerance: finiteNumber.nonnegative(),
+}).strict()
+
+const setGraderSpecSchema = z.object({
+  kind: z.literal('set'),
+  expected_items: z.array(z.string().min(1).max(500)).max(200),
+  order_matters: z.boolean(),
+}).strict()
+
+const objectiveGraderSpecSchema = z.discriminatedUnion('kind', [
+  numericGraderSpecSchema,
+  symbolicGraderSpecSchema,
+  unitGraderSpecSchema,
+  vectorGraderSpecSchema,
+  setGraderSpecSchema,
+])
+
+const multipartGraderSpecSchema = z.object({
+  kind: z.literal('multipart'),
+  parts: z.array(objectiveGraderSpecSchema).min(2).max(20),
+}).strict()
+
+const advisoryGraderSpecSchema = z.object({
+  kind: z.literal('advisory'),
+  rubric: z.string().min(1).max(8000),
+  grants_mastery: z.literal(false),
+}).strict()
+
+export const graderSpecSchema = z.discriminatedUnion('kind', [
+  numericGraderSpecSchema,
+  symbolicGraderSpecSchema,
+  unitGraderSpecSchema,
+  vectorGraderSpecSchema,
+  setGraderSpecSchema,
+  multipartGraderSpecSchema,
+  advisoryGraderSpecSchema,
+])
+
+const transferDimensionEvidenceSchema = z.object({
+  dimension: transferDimensionSchema,
+  source_structure: z.string().min(1).max(2000),
+  target_structure: z.string().min(1).max(2000),
+  rationale: z.string().min(1).max(4000),
+}).strict()
+
+export const transferTaskSpecSchema = z.object({
+  key: stableCourseKeySchema,
+  prompt: z.string().min(1).max(12_000),
+  invariant_concept_keys: z.array(stableCourseKeySchema).min(1).max(50),
+  dimensions: z.array(transferDimensionSchema).min(1).max(6),
+  change_evidence: z.array(transferDimensionEvidenceSchema).max(6),
+  answer_type: answerTypeSchema,
+  difficulty: difficultyVectorSchema,
+  grader: graderSpecSchema,
+  anchor_ids: z.array(z.string().min(1)).max(100),
+}).strict()
+export type TransferTaskSpec = z.infer<typeof transferTaskSpecSchema>
+
+export const exerciseBlueprintSchema = z.object({
+  key: stableCourseKeySchema,
+  chapter_key: stableCourseKeySchema,
+  prompt: z.string().min(1).max(12_000),
+  concept_keys: z.array(stableCourseKeySchema).min(1).max(50),
+  exercise_type: z.enum([
+    'worked_source', 'source_practice', 'generated_core',
+    'generated_challenge', 'transfer',
+  ]),
+  answer_type: answerTypeSchema,
+  hints: z.array(z.string().min(1).max(2000)).max(4),
+  source_anchor_ids: z.array(z.string().min(1)).max(100),
+  source_number: z.string().min(1).max(100).nullable(),
+  source_section: z.string().min(1).max(300).nullable(),
+  difficulty: difficultyVectorSchema,
+  grader: graderSpecSchema,
+  is_core: z.boolean(),
+  is_gating: z.boolean(),
+  is_source_level: z.boolean(),
+  transfer_task: transferTaskSpecSchema.nullable(),
+}).strict().superRefine((value, context) => {
+  if (value.is_core !== value.is_gating) {
+    context.addIssue({ code: 'custom', path: ['is_gating'], message: 'Core and gating flags must match' })
+  }
+  if ((value.is_core || value.is_source_level) && value.source_anchor_ids.length === 0) {
+    context.addIssue({ code: 'custom', path: ['source_anchor_ids'], message: 'Source-level exercise needs evidence' })
+  }
+})
+export type ExerciseBlueprint = z.infer<typeof exerciseBlueprintSchema>
+
+export const draftOperationSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('replace_text'), block_key: stableCourseKeySchema,
+    text: z.string().min(1).max(20_000), anchor_ids: z.array(z.string().min(1)).max(100),
+  }).strict(),
+  z.object({
+    kind: z.literal('replace_formula'), block_key: stableCourseKeySchema,
+    latex: z.string().min(1).max(4000), anchor_ids: z.array(z.string().min(1)).max(100),
+  }).strict(),
+  z.object({
+    kind: z.literal('replace_exercise'), block_key: stableCourseKeySchema,
+    exercise: exerciseBlueprintSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal('replace_transfer'), block_key: stableCourseKeySchema,
+    transfer_task: transferTaskSpecSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal('replace_lab'), block_key: stableCourseKeySchema,
+    lab_spec: labSpecSchema,
+  }).strict(),
+])
+export type DraftOperation = z.infer<typeof draftOperationSchema>
+
+export const courseDraftOperationRequestSchema = z.object({
+  revision_token: sha256Schema,
+  operation: draftOperationSchema,
+}).strict()
+export type CourseDraftOperationRequest = z.input<typeof courseDraftOperationRequestSchema>
+
+export const courseDraftResponseSchema = z.object({
+  chapter_key: stableCourseKeySchema,
+  chapter_status: z.string().min(1).max(50),
+  editable: z.boolean(),
+  revision_no: z.number().int().nonnegative(),
+  revision_token: sha256Schema,
+  revision_status: z.enum(['draft', 'validated']).nullable(),
+  artifact_hash: sha256Schema,
+  artifact: chapterArtifactSchema,
+  exercises: z.array(exerciseBlueprintSchema).max(500),
+}).strict()
+export type CourseDraft = z.infer<typeof courseDraftResponseSchema>
+
+export const courseDraftValidationResponseSchema = z.object({
+  draft: courseDraftResponseSchema,
+  valid: z.boolean(),
+  checked: z.array(z.enum([
+    'formula', 'unit', 'numeric', 'physics', 'citation', 'structure',
+  ])).max(6),
+  findings: z.array(validationFindingSchema).max(500),
+}).strict()
+export type CourseDraftValidationResponse = z.infer<typeof courseDraftValidationResponseSchema>

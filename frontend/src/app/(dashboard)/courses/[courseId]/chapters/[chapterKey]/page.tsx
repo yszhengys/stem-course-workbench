@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation'
 import { ArrowLeft, Beaker, BookCheck, FileWarning, NotebookPen } from 'lucide-react'
 
 import { AppShell } from '@/components/layout/AppShell'
+import { StructuredDraftEditor } from '@/components/course/authoring/StructuredDraftEditor'
 import { ChapterPublicationGate } from '@/components/course/ChapterPublicationGate'
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
 import { CourseModelPicker } from '@/components/course/CourseModelPicker'
@@ -324,6 +325,8 @@ export default function CourseChapterPage() {
             </Alert>
           ) : (
             <>
+              <StructuredDraftEditor courseId={courseId} chapterKey={chapterKey} />
+
               <Card>
                 <CardHeader><CardTitle>{t('course.chapterContent')}</CardTitle></CardHeader>
                 <CardContent className="space-y-8">
