@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import PurePath
 from typing import Any, Awaitable, TypeVar
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, Response
 
 from api.course_command_service import CourseCommandService, CourseJobSubmission
@@ -21,6 +22,7 @@ from api.models import (
     ChapterPublish,
     ChapterUpdate,
     CourseActivityEventRequest,
+    CourseBundleImportResponse,
     CourseChapterAttemptCreate,
     CourseChapterGenerateRequest,
     CourseChapterReviewRequest,
@@ -37,6 +39,8 @@ from api.models import (
     CourseExerciseResponse,
     CourseExerciseRevealRequest,
     CourseExerciseRevealResponse,
+    CourseExportCreateRequest,
+    CourseExportResponse,
     CourseFindingUpdate,
     CourseJobResponse,
     CourseLearnerChapterResponse,
@@ -76,6 +80,7 @@ LAB_TYPES = {
     "geometry",
     "kinematics",
 }
+COURSE_BUNDLE_MAX_UPLOAD_BYTES = 256 * 1024 * 1024
 
 
 def _body(model: ObjectModel) -> dict[str, Any]:
@@ -115,6 +120,69 @@ async def _call(operation: Awaitable[ResultT]) -> ResultT:
 async def create_course(request: CourseCreate):
     course = await _call(CourseService.create_course(**request.model_dump()))
     return _body(course)
+
+
+@router.post(
+    "/courses/imports",
+    response_model=CourseBundleImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_course_bundle(bundle: UploadFile = File(...)):
+    filename = bundle.filename or ""
+    if PurePath(filename).suffix.lower() != ".stemcourse":
+        raise HTTPException(
+            status_code=422,
+            detail="Course bundle filename must end in .stemcourse.",
+        )
+    payload = await bundle.read(COURSE_BUNDLE_MAX_UPLOAD_BYTES + 1)
+    await bundle.close()
+    if len(payload) > COURSE_BUNDLE_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Course bundle is too large.")
+    return await _call(course_v2_service.import_course_bundle(payload))
+
+
+@router.post(
+    "/courses/{course_id}/exports",
+    response_model=CourseExportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_course_export(
+    course_id: str,
+    request: CourseExportCreateRequest,
+):
+    return await _call(
+        course_v2_service.create_course_export(
+            course_id,
+            include_originals=request.include_originals,
+        )
+    )
+
+
+@router.get(
+    "/courses/{course_id}/exports/{export_id}",
+    response_model=CourseExportResponse,
+)
+async def get_course_export(course_id: str, export_id: str):
+    return await _call(
+        course_v2_service.get_course_export(course_id, export_id)
+    )
+
+
+@router.get("/courses/{course_id}/exports/{export_id}/download")
+async def download_course_export(course_id: str, export_id: str):
+    bundle_path = await _call(
+        course_v2_service.get_course_export_path(course_id, export_id)
+    )
+    return FileResponse(
+        path=bundle_path,
+        filename=f"{export_id.partition(':')[2]}.stemcourse",
+        media_type="application/zip",
+        content_disposition_type="attachment",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/courses")

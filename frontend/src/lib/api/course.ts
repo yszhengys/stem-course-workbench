@@ -7,6 +7,8 @@ import {
   courseDraftOperationRequestSchema,
   courseDraftResponseSchema,
   courseDraftValidationResponseSchema,
+  courseBundleImportResponseSchema,
+  courseExportResponseSchema,
   courseAttemptSchema,
   courseAttemptWithLabSchema,
   courseExerciseGradeResponseSchema,
@@ -98,6 +100,43 @@ export const courseApi = {
     if (request.notebook_id !== undefined) payload.notebook_id = request.notebook_id
     const response = await apiClient.post('/courses', payload)
     return courseSchema.parse(response.data)
+  },
+
+  async createExport(courseId: string, includeOriginals: boolean) {
+    const response = await apiClient.post(`/courses/${pathId(courseId)}/exports`, {
+      include_originals: includeOriginals,
+    })
+    return courseExportResponseSchema.parse(response.data)
+  },
+
+  async getExport(courseId: string, exportId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/exports/${pathId(exportId)}`,
+    )
+    return courseExportResponseSchema.parse(response.data)
+  },
+
+  async downloadExport(courseId: string, exportId: string, filename: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/exports/${pathId(exportId)}/download`,
+      { responseType: 'blob' },
+    )
+    const objectUrl = URL.createObjectURL(response.data as Blob)
+    const anchor = document.createElement('a')
+    try {
+      anchor.href = objectUrl
+      anchor.download = filename
+      anchor.click()
+    } finally {
+      URL.revokeObjectURL(objectUrl)
+    }
+  },
+
+  async importBundle(bundle: File) {
+    const form = new FormData()
+    form.append('bundle', bundle)
+    const response = await apiClient.post('/courses/imports', form)
+    return courseBundleImportResponseSchema.parse(response.data)
   },
 
   async listEligibleSources(courseId: string) {

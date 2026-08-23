@@ -15,6 +15,7 @@ from open_notebook.course.contracts import (
 from open_notebook.course.v2_contracts import (
     AnswerType,
     ConceptMastery,
+    CourseBundleManifest,
     DifficultyVector,
     DraftOperation,
     ExerciseBlueprint,
@@ -1252,6 +1253,36 @@ class CourseDraftValidationResponse(BaseModel):
     valid: bool
     checked: tuple[ValidationCheck, ...] = Field(max_length=6)
     findings: tuple[ValidationFinding, ...] = Field(default_factory=tuple, max_length=500)
+
+
+class CourseExportCreateRequest(StrictCourseRequest):
+    include_originals: bool = False
+
+
+class CourseExportResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    export_id: str = Field(pattern=r"^course_export:[^:]+$")
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    download_ready: bool
+    manifest: CourseBundleManifest | None = None
+    error_message: str | None = None
+
+
+class CourseBundleImportResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    course_title: str = Field(min_length=1, max_length=300)
+    record_counts: Dict[StableKey, int]
+
+    @field_validator("record_counts")
+    @classmethod
+    def counts_are_bounded(cls, value: Dict[str, int]) -> Dict[str, int]:
+        if len(value) > 100 or any(count < 0 for count in value.values()):
+            raise ValueError("record counts are invalid")
+        return value
 
 
 class CourseLearningChapterOverview(BaseModel):

@@ -259,6 +259,53 @@ export function useCreateCourse() {
   })
 }
 
+export function useCreateCourseExport() {
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: ({
+      courseId,
+      includeOriginals,
+    }: {
+      courseId: string
+      includeOriginals: boolean
+    }) => courseApi.createExport(courseId, includeOriginals),
+    onSuccess: feedback.success,
+    onError: feedback.error,
+    retry: false,
+  })
+}
+
+export function useDownloadCourseExport() {
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: ({
+      courseId,
+      exportId,
+      filename,
+    }: {
+      courseId: string
+      exportId: string
+      filename: string
+    }) => courseApi.downloadExport(courseId, exportId, filename),
+    onError: feedback.error,
+    retry: false,
+  })
+}
+
+export function useImportCourseBundle() {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: (bundle: File) => courseApi.importBundle(bundle),
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: QUERY_KEYS.courses })
+      feedback.success()
+    },
+    onError: feedback.error,
+    retry: false,
+  })
+}
+
 export function useAssociateCourseSource(courseId: string) {
   const client = useQueryClient()
   const feedback = useMutationFeedback()

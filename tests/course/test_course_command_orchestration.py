@@ -3272,6 +3272,8 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
             stored_run.output_hash = str(variables["output_hash"])
             link_refreshes.append(str(variables["chapter_key"]))
             return []
+        if "FROM course_draft_revision" in statement:
+            return []
         if "course_validation_finding" in statement:
             return []
         if statement.lstrip().startswith("UPDATE course_note"):

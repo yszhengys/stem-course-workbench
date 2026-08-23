@@ -1404,3 +1404,37 @@ export const courseDraftValidationResponseSchema = z.object({
   findings: z.array(validationFindingSchema).max(500),
 }).strict()
 export type CourseDraftValidationResponse = z.infer<typeof courseDraftValidationResponseSchema>
+
+export const courseBundleManifestSchema = z.object({
+  schema_version: z.literal(1),
+  app_version: z.string().min(1).max(100),
+  course_title: z.string().min(1).max(300),
+  exported_at: z.string().datetime({ offset: true }),
+  record_counts: z.array(z.object({
+    record_type: stableCourseKeySchema,
+    count: z.number().int().nonnegative(),
+  }).strict()).max(100),
+  files: z.array(z.object({
+    path: z.string().min(1).max(500),
+    size_bytes: z.number().int().nonnegative(),
+    sha256: sha256Schema,
+  }).strict()).max(10_000),
+}).strict()
+export type CourseBundleManifest = z.infer<typeof courseBundleManifestSchema>
+
+export const courseExportResponseSchema = z.object({
+  export_id: typedRecordId('course_export'),
+  course_id: courseRecordId,
+  status: z.enum(['queued', 'running', 'succeeded', 'failed', 'cancelled']),
+  download_ready: z.boolean(),
+  manifest: courseBundleManifestSchema.nullable(),
+  error_message: z.string().nullable(),
+}).strict()
+export type CourseExportResponse = z.infer<typeof courseExportResponseSchema>
+
+export const courseBundleImportResponseSchema = z.object({
+  course_id: courseRecordId,
+  course_title: z.string().min(1).max(300),
+  record_counts: z.record(stableCourseKeySchema, z.number().int().nonnegative()),
+}).strict()
+export type CourseBundleImportResponse = z.infer<typeof courseBundleImportResponseSchema>

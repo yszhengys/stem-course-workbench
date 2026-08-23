@@ -770,4 +770,54 @@ describe('courseApi', () => {
     } as never)).rejects.toThrow()
     expect(apiClient.patch).not.toHaveBeenCalled()
   })
+
+  it('uses allowlisted course portability payloads and multipart import', async () => {
+    vi.mocked(apiClient.post)
+      .mockResolvedValueOnce({
+        data: {
+          export_id: 'course_export:one',
+          course_id: 'course:one',
+          status: 'succeeded',
+          download_ready: true,
+          manifest: null,
+          error_message: null,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          course_id: 'course:imported',
+          course_title: 'Imported course',
+          record_counts: { course: 1 },
+        },
+      })
+
+    await courseApi.createExport('course:one', true)
+    const bundle = new File(['verified'], 'course.stemcourse')
+    await courseApi.importBundle(bundle)
+
+    expect(apiClient.post).toHaveBeenNthCalledWith(
+      1,
+      '/courses/course%3Aone/exports',
+      { include_originals: true },
+    )
+    const form = vi.mocked(apiClient.post).mock.calls[1][1]
+    expect(form).toBeInstanceOf(FormData)
+    expect((form as FormData).get('bundle')).toBe(bundle)
+  })
+
+  it('rejects an export response that leaks its server bundle path', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({
+      data: {
+        export_id: 'course_export:one',
+        course_id: 'course:one',
+        status: 'succeeded',
+        download_ready: true,
+        manifest: null,
+        error_message: null,
+        bundle_path: '/private/course.stemcourse',
+      },
+    })
+
+    await expect(courseApi.createExport('course:one', false)).rejects.toThrow()
+  })
 })

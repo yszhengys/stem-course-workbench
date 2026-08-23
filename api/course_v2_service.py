@@ -9,12 +9,14 @@ import re
 import secrets
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
 from api.course_service import CourseConflictError, CourseService
 from api.models import (
     CourseActivityEventRequest,
     CourseAnswerFormat,
+    CourseBundleImportResponse,
     CourseConceptResponse,
     CourseDraftOperationRequest,
     CourseDraftResponse,
@@ -27,6 +29,7 @@ from api.models import (
     CourseExerciseResponse,
     CourseExerciseRevealRequest,
     CourseExerciseRevealResponse,
+    CourseExportResponse,
     CourseLearnerChapterArtifact,
     CourseLearnerChapterResponse,
     CourseLearnerChapterSection,
@@ -62,6 +65,7 @@ from open_notebook.course.learning_service import (
     LearningService,
 )
 from open_notebook.course.models import Chapter, CourseNote, CourseVersion
+from open_notebook.course.portability_service import PortabilityService
 from open_notebook.course.publication_service import (
     DraftPublicationError,
     PublicationService,
@@ -92,6 +96,7 @@ from open_notebook.course.v2_contracts import (
 )
 from open_notebook.course.v2_models import (
     CourseExercise,
+    CourseExport,
     CourseTutorSession,
     CourseTutorTurn,
 )
@@ -108,6 +113,7 @@ class CourseV2Service:
     tutor_service: TutorService | None = None
     authoring_service: AuthoringService | None = None
     publication_service: PublicationService | None = None
+    portability_service: PortabilityService | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     def _tutor(self) -> TutorService:
@@ -129,6 +135,64 @@ class CourseV2Service:
                 draft_loader=self._authoring().get_draft
             )
         return self.publication_service
+
+    def _portability(self) -> PortabilityService:
+        if self.portability_service is None:
+            self.portability_service = PortabilityService()
+        return self.portability_service
+
+    @staticmethod
+    def _export_response(export: CourseExport) -> CourseExportResponse:
+        if export.id is None:
+            raise OpenNotebookError("Course export is invalid")
+        return CourseExportResponse(
+            export_id=str(export.id),
+            course_id=export.course,
+            status=export.status,
+            download_ready=bool(
+                export.status == "succeeded" and export.bundle_path
+            ),
+            manifest=export.manifest,
+            error_message=export.error_message,
+        )
+
+    async def create_course_export(
+        self,
+        course_id: str,
+        *,
+        include_originals: bool,
+    ) -> CourseExportResponse:
+        export = await self._portability().create_export(
+            course_id,
+            include_originals=include_originals,
+        )
+        return self._export_response(export)
+
+    async def get_course_export(
+        self,
+        course_id: str,
+        export_id: str,
+    ) -> CourseExportResponse:
+        export = await self._portability().get_export(course_id, export_id)
+        return self._export_response(export)
+
+    async def get_course_export_path(
+        self,
+        course_id: str,
+        export_id: str,
+    ) -> Path:
+        return await self._portability().get_export_path(course_id, export_id)
+
+    async def import_course_bundle(
+        self,
+        payload: bytes,
+    ) -> CourseBundleImportResponse:
+        result = await self._portability().import_bundle_bytes(payload)
+        return CourseBundleImportResponse(
+            course_id=result.course_id,
+            course_title=result.course_title,
+            record_counts=dict(result.record_counts),
+        )
 
     @staticmethod
     def _record_id(value: object, label: str) -> str:

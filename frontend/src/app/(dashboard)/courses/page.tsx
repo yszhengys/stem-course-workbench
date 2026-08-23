@@ -5,6 +5,7 @@ import { BookOpen, Hammer, Plus } from 'lucide-react'
 
 import { AppShell } from '@/components/layout/AppShell'
 import { CoursePageEmpty, CoursePageError, CoursePageLoading } from '@/components/course/CoursePageState'
+import { CoursePortability } from '@/components/course/CoursePortability'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -71,6 +72,9 @@ export default function CoursesPage() {
               <Button asChild><Link href="/courses/new">{t('course.createFirst')}</Link></Button>
             } />
           )}
+          {!courses.isLoading && !courses.isError ? (
+            <CoursePortability courses={courses.data ?? []} />
+          ) : null}
         </div>
       </div>
     </AppShell>
