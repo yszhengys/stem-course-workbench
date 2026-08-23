@@ -739,6 +739,60 @@ class TutorTurn(V2Contract):
     _safe_content = field_validator("content")(_validate_generated_text)
 
 
+class TutorClaim(V2Contract):
+    """One factual statement and the exact evidence anchors supporting it."""
+
+    content: str = Field(min_length=1, max_length=4000)
+    anchor_ids: tuple[str, ...] = Field(min_length=1, max_length=20)
+
+    _safe_content = field_validator("content")(_validate_generated_text)
+
+    @field_validator("anchor_ids")
+    @classmethod
+    def anchors_are_unique(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)):
+            raise ValueError("tutor claim anchor IDs must be unique")
+        return values
+
+
+class TutorModelArtifact(V2Contract):
+    """Structured model output validated before it can become a tutor turn."""
+
+    response_kind: Literal[
+        "explanation", "diagnosis", "hint", "answer", "refusal"
+    ]
+    claims: tuple[TutorClaim, ...] = Field(default_factory=tuple, max_length=30)
+    insufficient_evidence: bool = False
+    refusal_message: str | None = Field(default=None, min_length=1, max_length=4000)
+    answer_revealed: bool = False
+
+    @field_validator("refusal_message")
+    @classmethod
+    def refusal_is_safe(cls, value: str | None) -> str | None:
+        return _validate_generated_text(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def refusal_and_answer_flags_are_consistent(self) -> "TutorModelArtifact":
+        if self.insufficient_evidence:
+            if (
+                self.response_kind != "refusal"
+                or self.claims
+                or self.refusal_message is None
+                or self.answer_revealed
+            ):
+                raise ValueError(
+                    "insufficient tutor evidence requires a claim-free refusal"
+                )
+            return self
+        if self.response_kind == "refusal" or self.refusal_message is not None:
+            raise ValueError("a grounded tutor response cannot be a refusal")
+        if not self.claims:
+            raise ValueError("a grounded tutor response requires cited claims")
+        if self.answer_revealed != (self.response_kind == "answer"):
+            raise ValueError("answer_revealed must match the answer response kind")
+        return self
+
+
 class TutorResponse(V2Contract):
     session_id: str = Field(pattern=r"^course_tutor_session:[^:]+$")
     turn: TutorTurn
@@ -954,6 +1008,8 @@ __all__ = [
     "TransferCompletedPayload",
     "TransferTaskPayload",
     "TransferTaskSpec",
+    "TutorClaim",
+    "TutorModelArtifact",
     "TutorResponse",
     "TutorTurn",
     "UnitGraderSpec",

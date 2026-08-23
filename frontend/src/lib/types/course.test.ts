@@ -18,6 +18,9 @@ import {
   courseLearningOverviewSchema,
   courseOutlineArtifactSchema,
   courseTransferGradeRequestSchema,
+  courseTutorMessageRequestSchema,
+  courseTutorMessageResponseSchema,
+  courseTutorSessionSchema,
   gradeResultSchema,
   learningEventSchema,
 } from './course'
@@ -585,6 +588,58 @@ describe('learner-safe Course V2 schemas', () => {
       kind: 'hint_viewed',
       payload: { block_key: 'definition' },
       occurred_at: '2026-08-22T08:00:00Z',
+    })).toThrow()
+  })
+
+  it('strictly validates version-bound tutor sessions and responses', () => {
+    const session = {
+      session_id: 'course_tutor_session:one',
+      course_version_id: 'course_version:published',
+      chapter_key: 'limits',
+      model: {
+        adapter: 'open_notebook', model: 'model:teacher', reasoning_effort: null,
+      },
+      status: 'active',
+      turns: [{
+        turn_no: 1, role: 'assistant', content: 'Use the limit law [1].',
+        anchor_ids: ['anchor:one'], answer_revealed: false,
+      }],
+      created: '2026-08-22T08:00:00Z',
+    }
+    const response = {
+      snapshot_token: 'a'.repeat(64),
+      response: {
+        session_id: 'course_tutor_session:one',
+        turn: session.turns[0],
+        insufficient_evidence: false,
+      },
+    }
+
+    expect(courseTutorSessionSchema.parse(session).status).toBe('active')
+    expect(courseTutorMessageResponseSchema.parse(response).response.turn.anchor_ids)
+      .toEqual(['anchor:one'])
+    expect(() => courseTutorSessionSchema.parse({
+      ...session, grader: { oracle_answer: 4 },
+    })).toThrow()
+    expect(() => courseTutorMessageResponseSchema.parse({
+      ...response, debug_prompt: 'hidden system prompt',
+    })).toThrow()
+  })
+
+  it('never accepts client-selected evidence or reveal scope for other intents', () => {
+    const base = {
+      snapshot_token: 'a'.repeat(64), content: 'Explain this step.', intent: 'explain',
+    }
+    expect(courseTutorMessageRequestSchema.parse(base).intent).toBe('explain')
+    expect(() => courseTutorMessageRequestSchema.parse({
+      ...base, anchor_ids: ['anchor:foreign'],
+    })).toThrow()
+    expect(() => courseTutorMessageRequestSchema.parse({
+      ...base, exercise_key: 'limits-core', concept_key: 'limit-laws',
+      attempt_key: 'attempt-one',
+    })).toThrow()
+    expect(() => courseTutorMessageRequestSchema.parse({
+      ...base, intent: 'reveal', exercise_key: 'limits-core',
     })).toThrow()
   })
 })

@@ -158,6 +158,7 @@ class GenerationRequest(CourseContract):
         "escalation",
         "exercise_bank",
         "transfer_task",
+        "tutor",
     ]
     course_id: str = Field(min_length=1)
     chapter_key: str | None = Field(default=None, max_length=100)

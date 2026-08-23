@@ -39,6 +39,10 @@ from api.models import (
     CourseLearningOverviewResponse,
     CourseTransferGradeRequest,
     CourseTransferTaskResponse,
+    CourseTutorMessageRequest,
+    CourseTutorMessageResponse,
+    CourseTutorSessionCreateRequest,
+    CourseTutorSessionResponse,
 )
 from open_notebook.course.assessment_service import AssessmentService
 from open_notebook.course.contracts import ChapterArtifact, CourseOutlineArtifact
@@ -47,6 +51,12 @@ from open_notebook.course.learning_service import (
     LearningService,
 )
 from open_notebook.course.models import Chapter, CourseNote, CourseVersion
+from open_notebook.course.tutor_service import (
+    TutorEvidence,
+    TutorGroundingError,
+    TutorScope,
+    TutorService,
+)
 from open_notebook.course.v2_contracts import (
     AdvisoryGraderSpec,
     AnswerType,
@@ -61,10 +71,15 @@ from open_notebook.course.v2_contracts import (
     SymbolicGraderSpec,
     TransferCompletedPayload,
     TransferTaskSpec,
+    TutorTurn,
     UnitGraderSpec,
     VectorGraderSpec,
 )
-from open_notebook.course.v2_models import CourseExercise
+from open_notebook.course.v2_models import (
+    CourseExercise,
+    CourseTutorSession,
+    CourseTutorTurn,
+)
 from open_notebook.exceptions import InvalidInputError, OpenNotebookError
 
 
@@ -74,7 +89,16 @@ class CourseV2Service:
 
     learning_service: LearningService = field(default_factory=LearningService)
     assessment_service: type[AssessmentService] = AssessmentService
+    tutor_service: TutorService | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+
+    def _tutor(self) -> TutorService:
+        if self.tutor_service is None:
+            self.tutor_service = TutorService(
+                learning_service=self.learning_service,
+                clock=self.clock,
+            )
+        return self.tutor_service
 
     @staticmethod
     def _record_id(value: object, label: str) -> str:
@@ -599,6 +623,169 @@ class CourseV2Service:
             await note.delete()
             raise
         return self._learner_note_response(note)
+
+    async def _tutor_scope(
+        self,
+        course_id: str,
+        chapter_key: str,
+    ) -> tuple[CourseVersion, Chapter, TutorScope]:
+        version, chapter, version_id = await self._scope(course_id, chapter_key)
+        learner_artifact = self._learner_artifact(chapter, chapter_key)
+        scope = TutorScope(
+            course_id=course_id,
+            course_version_id=version_id,
+            chapter_id=self._record_id(chapter.id, "Published Course chapter"),
+            chapter_key=chapter_key,
+            snapshot_token=self._chapter_snapshot_token(
+                course_id, version, chapter
+            ),
+            allowed_anchor_ids=self._learner_anchor_ids(learner_artifact),
+        )
+        return version, chapter, scope
+
+    @staticmethod
+    def _public_tutor_turn(record: CourseTutorTurn) -> TutorTurn:
+        return TutorTurn(
+            turn_no=record.turn_no,
+            role=record.role,
+            content=record.content,
+            anchor_ids=record.anchor_ids,
+            answer_revealed=record.answer_revealed,
+        )
+
+    async def _tutor_session_response(
+        self,
+        session: CourseTutorSession,
+        *,
+        turns: tuple[CourseTutorTurn, ...] | None = None,
+    ) -> CourseTutorSessionResponse:
+        session_id = self._record_id(session.id, "Course tutor session")
+        records = (
+            turns
+            if turns is not None
+            else await self._tutor().list_turns(session.course, session_id)
+        )
+        return CourseTutorSessionResponse(
+            session_id=session_id,
+            course_version_id=session.course_version,
+            chapter_key=session.chapter_key,
+            model=session.model_selection,
+            status=session.status,
+            turns=tuple(self._public_tutor_turn(record) for record in records),
+            created=session.created,
+        )
+
+    async def create_tutor_session(
+        self,
+        course_id: str,
+        request: CourseTutorSessionCreateRequest,
+    ) -> CourseTutorSessionResponse:
+        _version, chapter, scope = await self._tutor_scope(
+            course_id, request.chapter_key
+        )
+        self._require_snapshot(scope.snapshot_token, request.snapshot_token)
+        session = await self._tutor().create_session(scope, request.model)
+        try:
+            await CourseService.confirm_current_published_scope(
+                course_id,
+                scope.course_version_id,
+                {scope.chapter_key: scope.chapter_id},
+                exact=False,
+            )
+        except Exception:
+            await session.delete()
+            raise
+        return await self._tutor_session_response(session, turns=())
+
+    async def list_tutor_sessions(
+        self,
+        course_id: str,
+    ) -> tuple[CourseTutorSessionResponse, ...]:
+        version, _chapters = await CourseService.list_current_published_chapters(
+            course_id
+        )
+        version_id = self._record_id(version.id, "Published Course version")
+        sessions = await self._tutor().list_sessions(
+            course_id, current_version_id=version_id
+        )
+        return tuple(
+            [await self._tutor_session_response(session) for session in sessions]
+        )
+
+    async def _tutor_evidence(
+        self,
+        course_id: str,
+        scope: TutorScope,
+    ) -> tuple[TutorEvidence, ...]:
+        async def resolve(anchor_id: str) -> TutorEvidence:
+            anchor, _evidence, _source, _source_hash = (
+                await CourseService._owned_evidence_asset(course_id, anchor_id)
+            )
+            return TutorEvidence(
+                anchor_id=anchor.anchor_id,
+                quote=anchor.locator.quote,
+                source_role=(
+                    "SUPPLEMENT"
+                    if anchor.source_role == "SUPPLEMENT"
+                    else "PRIMARY"
+                ),
+            )
+
+        return tuple(
+            await asyncio.gather(
+                *(resolve(anchor_id) for anchor_id in scope.allowed_anchor_ids)
+            )
+        )
+
+    async def respond_to_tutor(
+        self,
+        course_id: str,
+        session_id: str,
+        request: CourseTutorMessageRequest,
+    ) -> CourseTutorMessageResponse:
+        session = await self._tutor().get_session(session_id)
+        if session.course != course_id:
+            raise TutorGroundingError(
+                "Tutor session is outside the Course scope."
+            )
+        _version, _chapter, scope = await self._tutor_scope(
+            course_id, session.chapter_key
+        )
+        if session.course_version != scope.course_version_id:
+            raise CourseConflictError(
+                "Tutor session belongs to an older published version and is read-only."
+            )
+        self._require_snapshot(scope.snapshot_token, request.snapshot_token)
+        evidence = await self._tutor_evidence(course_id, scope)
+        exercise = (
+            await CourseService.get_current_exercise(
+                course_id,
+                scope.chapter_key,
+                request.exercise_key,
+            )
+            if request.exercise_key is not None
+            else None
+        )
+        response = await self._tutor().respond(
+            scope=scope,
+            session_id=session_id,
+            content=request.content,
+            intent=request.intent,
+            evidence=evidence,
+            exercise=exercise,
+            concept_key=request.concept_key,
+            attempt_key=request.attempt_key,
+        )
+        await CourseService.confirm_current_published_scope(
+            course_id,
+            scope.course_version_id,
+            {scope.chapter_key: scope.chapter_id},
+            exact=False,
+        )
+        return CourseTutorMessageResponse(
+            snapshot_token=scope.snapshot_token,
+            response=response,
+        )
 
     async def get_learning_overview(
         self, course_id: str

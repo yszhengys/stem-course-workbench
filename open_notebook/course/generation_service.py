@@ -50,6 +50,7 @@ COURSE_PROMPT_STAGES = {
     "escalation",
     "exercise_bank",
     "transfer_task",
+    "tutor",
 }
 ModelArtifactT = TypeVar("ModelArtifactT", bound=BaseModel)
 

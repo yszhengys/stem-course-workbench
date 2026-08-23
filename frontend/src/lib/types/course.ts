@@ -1172,3 +1172,68 @@ export const courseLearnerNoteCreateRequestSchema = z.object({
   content: z.string().min(1).max(20_000),
 }).strict()
 export type CourseLearnerNoteCreateRequest = z.input<typeof courseLearnerNoteCreateRequestSchema>
+
+export const courseTutorTurnSchema = z.object({
+  turn_no: z.number().int().positive(),
+  role: z.enum(['user', 'assistant']),
+  content: z.string().min(1).max(20_000),
+  anchor_ids: z.array(z.string().min(1)).max(100),
+  answer_revealed: z.boolean(),
+}).strict()
+export type CourseTutorTurn = z.infer<typeof courseTutorTurnSchema>
+
+export const courseTutorResponseSchema = z.object({
+  session_id: z.string().regex(/^course_tutor_session:[^:]+$/),
+  turn: courseTutorTurnSchema,
+  insufficient_evidence: z.boolean(),
+}).strict()
+
+export const courseTutorSessionCreateRequestSchema = z.object({
+  snapshot_token: sha256Schema,
+  chapter_key: stableCourseKeySchema,
+  model: modelSelectionSchema,
+}).strict()
+export type CourseTutorSessionCreateRequest = z.input<typeof courseTutorSessionCreateRequestSchema>
+
+export const courseTutorSessionSchema = z.object({
+  session_id: z.string().regex(/^course_tutor_session:[^:]+$/),
+  course_version_id: courseVersionRecordId,
+  chapter_key: stableCourseKeySchema,
+  model: modelSelectionSchema,
+  status: z.enum(['active', 'closed', 'stale']),
+  turns: z.array(courseTutorTurnSchema).max(2000),
+  created: z.string().datetime({ offset: true }).nullable(),
+}).strict()
+export type CourseTutorSession = z.infer<typeof courseTutorSessionSchema>
+
+export const courseTutorMessageRequestSchema = z.object({
+  snapshot_token: sha256Schema,
+  content: z.string().min(1).max(20_000),
+  intent: z.enum(['explain', 'diagnose', 'hint', 'reveal']),
+  exercise_key: stableCourseKeySchema.optional(),
+  concept_key: stableCourseKeySchema.optional(),
+  attempt_key: stableCourseKeySchema.optional(),
+}).strict().superRefine((value, context) => {
+  const revealValues = [value.exercise_key, value.concept_key, value.attempt_key]
+  if (value.intent === 'reveal' && revealValues.some((item) => item === undefined)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['intent'],
+      message: 'Reveal requires exercise, concept, and attempt keys',
+    })
+  }
+  if (value.intent !== 'reveal' && revealValues.some((item) => item !== undefined)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['intent'],
+      message: 'Exercise scope is accepted only for reveal',
+    })
+  }
+})
+export type CourseTutorMessageRequest = z.input<typeof courseTutorMessageRequestSchema>
+
+export const courseTutorMessageResponseSchema = z.object({
+  snapshot_token: sha256Schema,
+  response: courseTutorResponseSchema,
+}).strict()
+export type CourseTutorMessageResponse = z.infer<typeof courseTutorMessageResponseSchema>

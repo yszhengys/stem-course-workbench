@@ -22,6 +22,8 @@ from open_notebook.course.v2_contracts import (
     Sha256,
     StableKey,
     TransferDimension,
+    TutorResponse,
+    TutorTurn,
 )
 
 
@@ -1162,6 +1164,57 @@ class CourseLearnerNoteCreateRequest(StrictCourseRequest):
     snapshot_token: Sha256
     block_key: StableKey
     content: str = Field(min_length=1, max_length=20_000)
+
+
+class CourseTutorSessionCreateRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    chapter_key: StableKey
+    model: ModelSelection
+
+
+class CourseTutorSessionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(pattern=r"^course_tutor_session:[^:]+$")
+    course_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    chapter_key: StableKey
+    model: ModelSelection
+    status: Literal["active", "closed", "stale"]
+    turns: tuple[TutorTurn, ...] = Field(default_factory=tuple, max_length=2000)
+    created: datetime | None = None
+
+
+class CourseTutorMessageRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    content: str = Field(min_length=1, max_length=20_000)
+    intent: Literal["explain", "diagnose", "hint", "reveal"]
+    exercise_key: StableKey | None = None
+    concept_key: StableKey | None = None
+    attempt_key: StableKey | None = None
+
+    @model_validator(mode="after")
+    def reveal_scope_is_explicit(self) -> "CourseTutorMessageRequest":
+        reveal_values = (
+            self.exercise_key,
+            self.concept_key,
+            self.attempt_key,
+        )
+        if self.intent == "reveal" and any(value is None for value in reveal_values):
+            raise ValueError(
+                "reveal requires exercise_key, concept_key, and attempt_key"
+            )
+        if self.intent != "reveal" and any(value is not None for value in reveal_values):
+            raise ValueError(
+                "exercise and attempt identities are accepted only for reveal"
+            )
+        return self
+
+
+class CourseTutorMessageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_token: Sha256
+    response: TutorResponse
 
 
 class CourseLearningChapterOverview(BaseModel):

@@ -49,6 +49,10 @@ from api.models import (
     CourseRetrievalRequest,
     CourseSourceAssociation,
     CourseTransferGradeRequest,
+    CourseTutorMessageRequest,
+    CourseTutorMessageResponse,
+    CourseTutorSessionCreateRequest,
+    CourseTutorSessionResponse,
     CourseUpdate,
     CourseVersionCreate,
     LabCreate,
@@ -196,6 +200,44 @@ async def create_learning_note(
     return await _call(
         course_v2_service.create_learning_note(
             course_id, chapter_key, request
+        )
+    )
+
+
+@router.post(
+    "/courses/{course_id}/tutor/sessions",
+    response_model=CourseTutorSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_tutor_session(
+    course_id: str,
+    request: CourseTutorSessionCreateRequest,
+):
+    return await _call(
+        course_v2_service.create_tutor_session(course_id, request)
+    )
+
+
+@router.get(
+    "/courses/{course_id}/tutor/sessions",
+    response_model=list[CourseTutorSessionResponse],
+)
+async def list_tutor_sessions(course_id: str):
+    return await _call(course_v2_service.list_tutor_sessions(course_id))
+
+
+@router.post(
+    "/courses/{course_id}/tutor/sessions/{session_id}/messages",
+    response_model=CourseTutorMessageResponse,
+)
+async def respond_to_tutor(
+    course_id: str,
+    session_id: str,
+    request: CourseTutorMessageRequest,
+):
+    return await _call(
+        course_v2_service.respond_to_tutor(
+            course_id, session_id, request
         )
     )
 

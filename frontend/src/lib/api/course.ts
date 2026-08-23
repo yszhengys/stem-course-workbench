@@ -29,6 +29,10 @@ import {
   courseSchema,
   courseVersionSchema,
   courseTransferGradeRequestSchema,
+  courseTutorMessageRequestSchema,
+  courseTutorMessageResponseSchema,
+  courseTutorSessionCreateRequestSchema,
+  courseTutorSessionSchema,
   CreateCourseRequest,
   CreateCourseAttemptRequest,
   CourseExerciseGradeRequest,
@@ -37,6 +41,8 @@ import {
   CourseLearningEventRequest,
   CourseLearnerNoteCreateRequest,
   CourseTransferGradeRequest,
+  CourseTutorMessageRequest,
+  CourseTutorSessionCreateRequest,
   eligibleCourseSourceSchema,
   evidenceAnchorSchema,
   GenerateChapterRequest,
@@ -233,6 +239,50 @@ export const courseApi = {
       },
     )
     return courseLearnerNoteSchema.parse(response.data)
+  },
+
+  async listTutorSessions(courseId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/tutor/sessions`,
+    )
+    return z.array(courseTutorSessionSchema).parse(response.data)
+  },
+
+  async createTutorSession(
+    courseId: string,
+    request: CourseTutorSessionCreateRequest,
+  ) {
+    const parsed = courseTutorSessionCreateRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/tutor/sessions`,
+      {
+        snapshot_token: parsed.snapshot_token,
+        chapter_key: parsed.chapter_key,
+        model: modelPayload(parsed.model),
+      },
+    )
+    return courseTutorSessionSchema.parse(response.data)
+  },
+
+  async sendTutorMessage(
+    courseId: string,
+    sessionId: string,
+    request: CourseTutorMessageRequest,
+  ) {
+    const parsed = courseTutorMessageRequestSchema.parse(request)
+    const payload: CourseTutorMessageRequest = {
+      snapshot_token: parsed.snapshot_token,
+      content: parsed.content,
+      intent: parsed.intent,
+    }
+    if (parsed.exercise_key !== undefined) payload.exercise_key = parsed.exercise_key
+    if (parsed.concept_key !== undefined) payload.concept_key = parsed.concept_key
+    if (parsed.attempt_key !== undefined) payload.attempt_key = parsed.attempt_key
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/tutor/sessions/${pathId(sessionId)}/messages`,
+      payload,
+    )
+    return courseTutorMessageResponseSchema.parse(response.data)
   },
 
   async getReviewQueue(courseId: string) {

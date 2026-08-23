@@ -11,6 +11,8 @@ import type {
   CourseExerciseRevealRequest,
   CourseLearningEventRequest,
   CourseTransferGradeRequest,
+  CourseTutorMessageRequest,
+  CourseTutorSessionCreateRequest,
   CreateCourseRequest,
   CreateCourseAttemptRequest,
   GenerateChapterRequest,
@@ -186,6 +188,17 @@ export function useCourseLearningNotes(
     queryKey: QUERY_KEYS.courseLearningNotes(courseId, chapterKey),
     queryFn: () => courseApi.getLearningNotes(courseId, chapterKey),
     enabled: Boolean(courseId && chapterKey) && enabled,
+    retry: false,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  })
+}
+
+export function useCourseTutorSessions(courseId: string) {
+  return useQuery({
+    queryKey: QUERY_KEYS.courseTutorSessions(courseId),
+    queryFn: () => courseApi.listTutorSessions(courseId),
+    enabled: Boolean(courseId),
     retry: false,
     staleTime: 0,
     refetchOnWindowFocus: true,
@@ -531,6 +544,46 @@ export function useCreateCourseLearningNote(courseId: string, chapterKey: string
         queryKey: QUERY_KEYS.courseLearningNotes(courseId, chapterKey),
       })
       feedback.success()
+    },
+    onError: feedback.error,
+    retry: false,
+  })
+}
+
+export function useCreateCourseTutorSession(courseId: string) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: (request: CourseTutorSessionCreateRequest) =>
+      courseApi.createTutorSession(courseId, request),
+    onSuccess: async () => {
+      await client.invalidateQueries({
+        queryKey: QUERY_KEYS.courseTutorSessions(courseId),
+      })
+      feedback.success()
+    },
+    onError: feedback.error,
+    retry: false,
+  })
+}
+
+export function useSendCourseTutorMessage(
+  courseId: string,
+  sessionId: string | undefined,
+) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: (request: CourseTutorMessageRequest) => {
+      if (!sessionId) throw new Error('Tutor session is required')
+      return courseApi.sendTutorMessage(courseId, sessionId, request)
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseTutorSessions(courseId) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseLearningOverview(courseId) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseReviewQueue(courseId) }),
+      ])
     },
     onError: feedback.error,
     retry: false,

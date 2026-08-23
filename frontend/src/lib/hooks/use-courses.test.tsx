@@ -10,7 +10,10 @@ import {
   useCourseLearningNotes,
   useCourseLearningOverview,
   useCourseLearningSources,
+  useCourseTutorSessions,
+  useCreateCourseTutorSession,
   useCreateCourseLearningNote,
+  useSendCourseTutorMessage,
 } from './use-courses'
 
 vi.mock('@/lib/api/course', () => ({
@@ -20,6 +23,9 @@ vi.mock('@/lib/api/course', () => ({
     getLearningOverview: vi.fn(),
     getLearningSources: vi.fn(),
     createLearningNote: vi.fn(),
+    listTutorSessions: vi.fn(),
+    createTutorSession: vi.fn(),
+    sendTutorMessage: vi.fn(),
   },
 }))
 vi.mock('@/lib/hooks/use-toast', () => ({
@@ -48,6 +54,9 @@ describe('Course learner queries', () => {
     vi.mocked(courseApi.getLearningSources).mockResolvedValue({} as never)
     vi.mocked(courseApi.getLearningNotes).mockResolvedValue({} as never)
     vi.mocked(courseApi.createLearningNote).mockResolvedValue({} as never)
+    vi.mocked(courseApi.listTutorSessions).mockResolvedValue([])
+    vi.mocked(courseApi.createTutorSession).mockResolvedValue({} as never)
+    vi.mocked(courseApi.sendTutorMessage).mockResolvedValue({} as never)
   })
 
   it('always revalidates learning overview on window focus', async () => {
@@ -129,5 +138,67 @@ describe('Course learner queries', () => {
     expect(courseApi.createLearningNote).toHaveBeenCalledWith('course:one', 'limits', {
       snapshot_token: 'a'.repeat(64), block_key: 'definition', content: 'Remember.',
     })
+  })
+
+  it('always revalidates version-bound tutor sessions', async () => {
+    const { result } = renderHook(
+      () => useCourseTutorSessions('course:one'),
+      { wrapper: wrapperFor(client) },
+    )
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+
+    expect(courseApi.listTutorSessions).toHaveBeenCalledWith('course:one')
+    const options = client.getQueryCache().find({
+      queryKey: QUERY_KEYS.courseTutorSessions('course:one'),
+    })?.options as { staleTime?: number; refetchOnWindowFocus?: boolean; retry?: boolean }
+    expect(options.staleTime).toBe(0)
+    expect(options.refetchOnWindowFocus).toBe(true)
+    expect(options.retry).toBe(false)
+  })
+
+  it('creates a tutor session with an explicit model and refreshes its cache', async () => {
+    client.setQueryData(QUERY_KEYS.courseTutorSessions('course:one'), [])
+    const { result } = renderHook(
+      () => useCreateCourseTutorSession('course:one'),
+      { wrapper: wrapperFor(client) },
+    )
+    const request = {
+      snapshot_token: 'a'.repeat(64), chapter_key: 'limits',
+      model: { adapter: 'open_notebook' as const, model: 'model:teacher', reasoning_effort: null },
+    }
+    await act(async () => { await result.current.mutateAsync(request) })
+
+    expect(courseApi.createTutorSession).toHaveBeenCalledWith('course:one', request)
+    expect(client.getQueryState(QUERY_KEYS.courseTutorSessions('course:one'))?.isInvalidated)
+      .toBe(true)
+  })
+
+  it('refreshes learning state after a tutor response and requires a session', async () => {
+    const keys = [
+      QUERY_KEYS.courseTutorSessions('course:one'),
+      QUERY_KEYS.courseLearningOverview('course:one'),
+      QUERY_KEYS.courseReviewQueue('course:one'),
+    ]
+    keys.forEach((key) => client.setQueryData(key, {}))
+    const { result } = renderHook(
+      () => useSendCourseTutorMessage('course:one', 'course_tutor_session:one'),
+      { wrapper: wrapperFor(client) },
+    )
+    const request = {
+      snapshot_token: 'a'.repeat(64), content: 'Explain this step.', intent: 'explain' as const,
+    }
+    await act(async () => { await result.current.mutateAsync(request) })
+
+    expect(courseApi.sendTutorMessage).toHaveBeenCalledWith(
+      'course:one', 'course_tutor_session:one', request,
+    )
+    keys.forEach((key) => expect(client.getQueryState(key)?.isInvalidated).toBe(true))
+
+    const missing = renderHook(
+      () => useSendCourseTutorMessage('course:one', undefined),
+      { wrapper: wrapperFor(client) },
+    )
+    await expect(missing.result.current.mutateAsync(request))
+      .rejects.toThrow('Tutor session is required')
   })
 })

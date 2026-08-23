@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation'
 import { ArrowLeft, Hammer } from 'lucide-react'
 
 import { ChapterReader } from '@/components/course/learning/ChapterReader'
+import { ChapterTutor } from '@/components/course/learning/ChapterTutor'
 import { ChapterNotes } from '@/components/course/learning/ChapterNotes'
 import { ExerciseRunner } from '@/components/course/learning/ExerciseRunner'
 import { LearnerSources } from '@/components/course/learning/LearnerSources'
@@ -247,6 +248,15 @@ export default function CourseLearnChapterPage() {
               )
             })}
           </section>
+
+          <ChapterTutor
+            courseId={courseId}
+            courseVersionId={chapter.data.course_version_id}
+            chapterKey={chapterKey}
+            snapshotToken={chapter.data.snapshot_token}
+            exercises={exercises.data ?? []}
+            concepts={overview.data.concepts}
+          />
 
           {notes.isLoading ? <CourseInlineLoading /> : notes.isError ? (
             <CourseInlineError onRetry={() => void notes.refetch()} />

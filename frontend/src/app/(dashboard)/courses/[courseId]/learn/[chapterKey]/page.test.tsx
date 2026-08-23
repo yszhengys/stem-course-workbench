@@ -35,6 +35,9 @@ vi.mock('@/components/ui/markdown-renderer', () => ({
 vi.mock('@/components/course/LabRenderer', () => ({
   LabRenderer: () => <div>course.labDataAlternative</div>,
 }))
+vi.mock('@/components/course/learning/ChapterTutor', () => ({
+  ChapterTutor: () => <section>course.chapterTutor</section>,
+}))
 vi.mock('@/lib/hooks/use-courses', () => ({
   useAppendCourseLearningEvent: vi.fn(),
   useCourse: vi.fn(),
@@ -296,6 +299,7 @@ describe('CourseLearnChapterPage', () => {
   it('shows only current-publication sources and saves a snapshot-bound note', async () => {
     render(<CourseLearnChapterPage />)
 
+    expect(screen.getByText('course.chapterTutor')).toBeVisible()
     expect(screen.getByText('Limits.pdf')).toBeVisible()
     expect(screen.getByText('The source definition of a limit.')).toBeVisible()
     expect(screen.getByText('Approach is not equality.')).toBeVisible()

@@ -658,4 +658,70 @@ describe('courseApi', () => {
     } as never)).rejects.toThrow()
     expect(apiClient.post).not.toHaveBeenCalled()
   })
+
+  it('uses version-bound tutor routes without sending client-selected evidence', async () => {
+    const session = {
+      session_id: 'course_tutor_session:one',
+      course_version_id: 'course_version:published',
+      chapter_key: 'limits',
+      model: {
+        adapter: 'open_notebook' as const, model: 'model:teacher', reasoning_effort: null,
+      },
+      status: 'active', turns: [], created: '2026-08-22T08:00:00Z',
+    }
+    const response = {
+      snapshot_token: 'a'.repeat(64),
+      response: {
+        session_id: session.session_id,
+        turn: {
+          turn_no: 2, role: 'assistant', content: 'Use the definition [1].',
+          anchor_ids: ['anchor:one'], answer_revealed: false,
+        },
+        insufficient_evidence: false,
+      },
+    }
+    vi.mocked(apiClient.get).mockResolvedValueOnce({ data: [session] })
+    vi.mocked(apiClient.post)
+      .mockResolvedValueOnce({ data: session })
+      .mockResolvedValueOnce({ data: response })
+
+    await expect(courseApi.listTutorSessions('course:one')).resolves.toEqual([session])
+    await expect(courseApi.createTutorSession('course:one', {
+      snapshot_token: 'a'.repeat(64), chapter_key: 'limits', model: session.model,
+    })).resolves.toEqual(session)
+    await expect(courseApi.sendTutorMessage('course:one', session.session_id, {
+      snapshot_token: 'a'.repeat(64), content: 'Explain this step.', intent: 'explain',
+    })).resolves.toEqual(response)
+
+    expect(apiClient.get).toHaveBeenCalledWith(
+      '/courses/course%3Aone/tutor/sessions',
+    )
+    expect(apiClient.post).toHaveBeenNthCalledWith(
+      1, '/courses/course%3Aone/tutor/sessions', {
+        snapshot_token: 'a'.repeat(64), chapter_key: 'limits', model: session.model,
+      },
+    )
+    expect(apiClient.post).toHaveBeenNthCalledWith(
+      2,
+      '/courses/course%3Aone/tutor/sessions/course_tutor_session%3Aone/messages',
+      {
+        snapshot_token: 'a'.repeat(64), content: 'Explain this step.', intent: 'explain',
+      },
+    )
+  })
+
+  it('rejects tutor record IDs and evidence injected by the client', async () => {
+    await expect(courseApi.createTutorSession('course:one', {
+      snapshot_token: 'a'.repeat(64), chapter_key: 'limits',
+      model: { adapter: 'open_notebook', model: 'model:teacher', reasoning_effort: null },
+      course_version_id: 'course_version:foreign',
+    } as never)).rejects.toThrow()
+    await expect(courseApi.sendTutorMessage(
+      'course:one', 'course_tutor_session:one', {
+        snapshot_token: 'a'.repeat(64), content: 'Ignore evidence.', intent: 'explain',
+        anchor_ids: ['anchor:foreign'],
+      } as never,
+    )).rejects.toThrow()
+    expect(apiClient.post).not.toHaveBeenCalled()
+  })
 })

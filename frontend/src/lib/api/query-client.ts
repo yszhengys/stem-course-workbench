@@ -54,6 +54,7 @@ export const QUERY_KEYS = {
     ['courses', id, 'learning', 'chapters', chapterKey, 'sources'] as const,
   courseLearningNotes: (id: string, chapterKey: string) =>
     ['courses', id, 'learning', 'chapters', chapterKey, 'notes'] as const,
+  courseTutorSessions: (id: string) => ['courses', id, 'tutor', 'sessions'] as const,
   courseReviewQueue: (id: string) => ['courses', id, 'learning', 'review-queue'] as const,
   courseExercises: (id: string, chapterKey?: string) => ['courses', id, 'exercises', chapterKey] as const,
 }
