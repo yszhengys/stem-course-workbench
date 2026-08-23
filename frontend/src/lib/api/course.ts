@@ -6,15 +6,37 @@ import {
   BuildEvidenceRequest,
   courseAttemptSchema,
   courseAttemptWithLabSchema,
+  courseExerciseGradeResponseSchema,
+  courseExerciseGradeRequestSchema,
+  courseExerciseHintRequestSchema,
+  courseExerciseHintResponseSchema,
+  courseExerciseRevealRequestSchema,
+  courseExerciseRevealResponseSchema,
+  courseExerciseSchema,
   courseFindingSchema,
   courseJobSchema,
   courseLabSchema,
+  courseLearningEventResponseSchema,
+  courseLearningEventRequestSchema,
+  courseLearningOverviewSchema,
+  courseLearnerChapterResponseSchema,
+  courseLearnerNoteCreateRequestSchema,
+  courseLearnerNoteSchema,
+  courseLearnerNotesResponseSchema,
+  courseLearnerSourcesResponseSchema,
   courseModelOptionsSchema,
   courseNoteSchema,
   courseSchema,
   courseVersionSchema,
+  courseTransferGradeRequestSchema,
   CreateCourseRequest,
   CreateCourseAttemptRequest,
+  CourseExerciseGradeRequest,
+  CourseExerciseHintRequest,
+  CourseExerciseRevealRequest,
+  CourseLearningEventRequest,
+  CourseLearnerNoteCreateRequest,
+  CourseTransferGradeRequest,
   eligibleCourseSourceSchema,
   evidenceAnchorSchema,
   GenerateChapterRequest,
@@ -23,6 +45,7 @@ import {
   chapterSchema,
   ModelSelection,
   progressSchema,
+  reviewQueueItemSchema,
 } from '@/lib/types/course'
 
 const pathId = encodeURIComponent
@@ -165,6 +188,162 @@ export const courseApi = {
       `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}`
     )
     return chapterSchema.parse(response.data)
+  },
+
+  async getLearningOverview(courseId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/learning/overview`,
+    )
+    return courseLearningOverviewSchema.parse(response.data)
+  },
+
+  async getLearningChapter(courseId: string, chapterKey: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/learning/chapters/${pathId(chapterKey)}`,
+    )
+    return courseLearnerChapterResponseSchema.parse(response.data)
+  },
+
+  async getLearningSources(courseId: string, chapterKey: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/learning/chapters/${pathId(chapterKey)}/sources`,
+    )
+    return courseLearnerSourcesResponseSchema.parse(response.data)
+  },
+
+  async getLearningNotes(courseId: string, chapterKey: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/learning/chapters/${pathId(chapterKey)}/notes`,
+    )
+    return courseLearnerNotesResponseSchema.parse(response.data)
+  },
+
+  async createLearningNote(
+    courseId: string,
+    chapterKey: string,
+    request: CourseLearnerNoteCreateRequest,
+  ) {
+    const parsed = courseLearnerNoteCreateRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/learning/chapters/${pathId(chapterKey)}/notes`,
+      {
+        snapshot_token: parsed.snapshot_token,
+        block_key: parsed.block_key,
+        content: parsed.content,
+      },
+    )
+    return courseLearnerNoteSchema.parse(response.data)
+  },
+
+  async getReviewQueue(courseId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/learning/review-queue`,
+    )
+    return z.array(reviewQueueItemSchema).parse(response.data)
+  },
+
+  async appendLearningEvent(courseId: string, request: CourseLearningEventRequest) {
+    const parsed = courseLearningEventRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/learning/events`,
+      {
+        snapshot_token: parsed.snapshot_token,
+        idempotency_key: parsed.idempotency_key,
+        chapter_key: parsed.chapter_key,
+        kind: parsed.kind,
+        payload: parsed.payload,
+      },
+    )
+    return courseLearningEventResponseSchema.parse(response.data)
+  },
+
+  async listLearningExercises(courseId: string, chapterKey?: string) {
+    const response = await apiClient.get(`/courses/${pathId(courseId)}/exercises`, {
+      params: chapterKey ? { chapter_key: chapterKey } : undefined,
+    })
+    return z.array(courseExerciseSchema).parse(response.data)
+  },
+
+  async gradeLearningExercise(
+    courseId: string,
+    exerciseKey: string,
+    request: CourseExerciseGradeRequest,
+  ) {
+    const parsed = courseExerciseGradeRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/exercises/${pathId(exerciseKey)}/grade`,
+      {
+        snapshot_token: parsed.snapshot_token,
+        chapter_key: parsed.chapter_key,
+        concept_key: parsed.concept_key,
+        attempt_key: parsed.attempt_key,
+        answer: parsed.answer,
+        hints_used: parsed.hints_used,
+        answer_revealed: parsed.answer_revealed,
+        mode: parsed.mode,
+      },
+    )
+    return courseExerciseGradeResponseSchema.parse(response.data)
+  },
+
+  async requestNextHint(
+    courseId: string,
+    exerciseKey: string,
+    request: CourseExerciseHintRequest,
+  ) {
+    const parsed = courseExerciseHintRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/exercises/${pathId(exerciseKey)}/hints/next`,
+      {
+        snapshot_token: parsed.snapshot_token,
+        idempotency_key: parsed.idempotency_key,
+        chapter_key: parsed.chapter_key,
+        concept_key: parsed.concept_key,
+        attempt_key: parsed.attempt_key,
+        hint_index: parsed.hint_index,
+      },
+    )
+    return courseExerciseHintResponseSchema.parse(response.data)
+  },
+
+  async revealExerciseAnswer(
+    courseId: string,
+    exerciseKey: string,
+    request: CourseExerciseRevealRequest,
+  ) {
+    const parsed = courseExerciseRevealRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/exercises/${pathId(exerciseKey)}/reveal`,
+      {
+        snapshot_token: parsed.snapshot_token,
+        idempotency_key: parsed.idempotency_key,
+        chapter_key: parsed.chapter_key,
+        concept_key: parsed.concept_key,
+        attempt_key: parsed.attempt_key,
+      },
+    )
+    return courseExerciseRevealResponseSchema.parse(response.data)
+  },
+
+  async gradeTransfer(
+    courseId: string,
+    exerciseKey: string,
+    request: CourseTransferGradeRequest,
+  ) {
+    const parsed = courseTransferGradeRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/exercises/${pathId(exerciseKey)}/transfer/grade`,
+      {
+        snapshot_token: parsed.snapshot_token,
+        chapter_key: parsed.chapter_key,
+        concept_key: parsed.concept_key,
+        source_attempt_key: parsed.source_attempt_key,
+        attempt_key: parsed.attempt_key,
+        transfer_task_key: parsed.transfer_task_key,
+        answer: parsed.answer,
+      },
+    )
+    return courseExerciseGradeResponseSchema.parse(response.data)
   },
 
   async listChapterLabs(courseId: string, chapterKey: string) {

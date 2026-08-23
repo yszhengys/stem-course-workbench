@@ -498,6 +498,7 @@ class ExerciseBlueprint(V2Contract):
         "transfer",
     ]
     answer_type: AnswerType
+    hints: tuple[str, ...] = Field(default_factory=tuple, max_length=4)
     source_anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
     source_number: str | None = Field(default=None, min_length=1, max_length=100)
     source_section: str | None = Field(default=None, min_length=1, max_length=300)
@@ -509,6 +510,15 @@ class ExerciseBlueprint(V2Contract):
     transfer_task: TransferTaskSpec | None = None
 
     _safe_prompt = field_validator("prompt")(_validate_generated_text)
+
+    @field_validator("hints")
+    @classmethod
+    def hints_are_bounded_content(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        for value in values:
+            if not 1 <= len(value) <= 2000:
+                raise ValueError("exercise hints must be bounded")
+            _validate_generated_text(value)
+        return values
 
     @model_validator(mode="after")
     def source_gate_and_grader_are_consistent(self) -> "ExerciseBlueprint":

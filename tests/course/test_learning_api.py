@@ -27,6 +27,7 @@ from open_notebook.course.v2_models import CourseExercise
 from open_notebook.exceptions import InvalidInputError, NotFoundError
 
 NOW = datetime(2026, 8, 21, 9, 0, tzinfo=timezone.utc)
+SNAPSHOT = "b" * 64
 
 
 @pytest.fixture
@@ -128,6 +129,21 @@ def _scope() -> tuple[CourseVersion, Chapter]:
     )
 
 
+def _exercise_snapshot(
+    service: CourseV2Service,
+    exercise: CourseExercise | None = None,
+) -> str:
+    version, _chapter = _scope()
+    return service._exercise_snapshot_token(
+        "course:abc", version, exercise or _exercise()
+    )
+
+
+def _chapter_snapshot(service: CourseV2Service) -> str:
+    version, chapter = _scope()
+    return service._chapter_snapshot_token("course:abc", version, chapter)
+
+
 def _mastery() -> ConceptMastery:
     return ConceptMastery(
         course_id="course:abc",
@@ -206,6 +222,7 @@ def test_grade_route_calls_facade_with_only_stable_scope(
             },
             "mastery": _mastery().model_dump(mode="json"),
             "event_key": "grade-event-1",
+            "snapshot_token": SNAPSHOT,
         }
     )
     monkeypatch.setattr(course_v2_service, "grade_exercise", grade)
@@ -213,6 +230,7 @@ def test_grade_route_calls_facade_with_only_stable_scope(
     response = client.post(
         "/api/courses/course:abc/exercises/core-1/grade",
         json={
+            "snapshot_token": SNAPSHOT,
             "chapter_key": "linear",
             "concept_key": "linear-equations",
             "attempt_key": "attempt-1",
@@ -274,7 +292,34 @@ def test_learning_read_routes_return_only_public_v2_contracts(
         }
     )
     review_queue = AsyncMock(return_value=[])
-    exercises = AsyncMock(return_value=[_blueprint()])
+    blueprint = _blueprint()
+    exercises = AsyncMock(return_value=[{
+        "key": blueprint.key,
+        "chapter_key": blueprint.chapter_key,
+        "prompt": blueprint.prompt,
+        "concept_keys": blueprint.concept_keys,
+        "exercise_type": blueprint.exercise_type,
+        "answer_type": blueprint.answer_type,
+        "answer_format": {"kind": "numeric"},
+        "snapshot_token": SNAPSHOT,
+        "source_anchor_ids": blueprint.source_anchor_ids,
+        "source_number": blueprint.source_number,
+        "source_section": blueprint.source_section,
+        "difficulty": blueprint.difficulty,
+        "is_core": blueprint.is_core,
+        "is_gating": blueprint.is_gating,
+        "is_source_level": blueprint.is_source_level,
+        "transfer": {
+            "key": "core-1-transfer",
+            "prompt": "Apply the invariant in a changed representation.",
+            "invariant_concept_keys": ["linear-equations"],
+            "dimensions": ["representation"],
+            "answer_type": "numeric",
+            "answer_format": {"kind": "numeric"},
+            "difficulty": blueprint.transfer_task.difficulty,
+            "anchor_ids": ["anchor:linear"],
+        },
+    }])
     monkeypatch.setattr(course_v2_service, "get_learning_overview", overview)
     monkeypatch.setattr(course_v2_service, "get_review_queue", review_queue)
     monkeypatch.setattr(course_v2_service, "list_exercises", exercises)
@@ -303,6 +348,172 @@ def test_learning_read_routes_return_only_public_v2_contracts(
     exercises.assert_awaited_once_with("course:abc", "linear")
 
 
+def test_learner_chapter_network_response_contains_no_build_or_grader_secrets(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chapter = AsyncMock(return_value={
+        "course_id": "course:abc",
+        "course_version_id": "course_version:published",
+        "chapter_key": "linear",
+        "chapter_no": 1,
+        "title": "Linear equations",
+        "status": "published",
+        "snapshot_token": SNAPSHOT,
+        "artifact": {
+            "purpose": "Learn balance.",
+            "prerequisites": [],
+            "objectives": ["Solve one equation."],
+            "sections": [{
+                "block_key": "definition",
+                "title": "Definition",
+                "markdown": "Keep both sides balanced.",
+                "anchor_ids": ["anchor:linear"],
+                "provenance": "adapted",
+            }],
+            "definitions": [],
+            "formulas": [],
+            "worked_examples": [],
+            "misconceptions": [],
+            "pitfalls": [],
+            "quick_reference": [],
+            "citations": ["anchor:linear"],
+        },
+    })
+    monkeypatch.setattr(course_v2_service, "get_learning_chapter", chapter)
+
+    response = client.get(
+        "/api/courses/course:abc/learning/chapters/linear"
+    )
+
+    assert response.status_code == 200
+    encoded = response.text.lower()
+    for forbidden in (
+        "exercises", "grader", "oracle", "secret hint", "attributions",
+        "physics_checks",
+    ):
+        assert forbidden not in encoded
+
+
+def test_learner_source_and_note_routes_use_published_snapshot_contracts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources = AsyncMock(return_value={
+        "snapshot_token": SNAPSHOT,
+        "sources": [{
+            "anchor_id": "anchor:linear",
+            "filename": "linear.pdf",
+            "kind": "pdf_page",
+            "index": 2,
+            "quote": "Keep both sides balanced.",
+            "source_role": "PRIMARY",
+            "bbox": [0.1, 0.2, 0.8, 0.9],
+        }],
+    })
+    notes = AsyncMock(return_value={
+        "snapshot_token": SNAPSHOT,
+        "notes": [{
+            "note_id": "course_note:one",
+            "block_key": "definition",
+            "content": "Balance means applying the same operation.",
+            "orphan_status": "active",
+            "created": NOW.isoformat(),
+        }],
+    })
+    create_note = AsyncMock(return_value={
+        "note_id": "course_note:two",
+        "block_key": "definition",
+        "content": "My exact-version note.",
+        "orphan_status": "active",
+        "created": NOW.isoformat(),
+    })
+    monkeypatch.setattr(course_v2_service, "list_learning_sources", sources)
+    monkeypatch.setattr(course_v2_service, "list_learning_notes", notes)
+    monkeypatch.setattr(course_v2_service, "create_learning_note", create_note)
+
+    source_response = client.get(
+        "/api/courses/course:abc/learning/chapters/linear/sources"
+    )
+    notes_response = client.get(
+        "/api/courses/course:abc/learning/chapters/linear/notes"
+    )
+    created_response = client.post(
+        "/api/courses/course:abc/learning/chapters/linear/notes",
+        json={
+            "snapshot_token": SNAPSHOT,
+            "block_key": "definition",
+            "content": "My exact-version note.",
+        },
+    )
+
+    assert source_response.status_code == 200
+    assert source_response.json()["sources"][0] == {
+        "anchor_id": "anchor:linear",
+        "filename": "linear.pdf",
+        "kind": "pdf_page",
+        "index": 2,
+        "quote": "Keep both sides balanced.",
+        "source_role": "PRIMARY",
+        "bbox": [0.1, 0.2, 0.8, 0.9],
+    }
+    assert "source_id" not in source_response.text
+    assert "path" not in source_response.text
+    assert notes_response.status_code == 200
+    assert notes_response.json()["notes"][0]["block_key"] == "definition"
+    assert created_response.status_code == 201
+    create_call = create_note.await_args
+    assert create_call is not None
+    assert create_call.args[:2] == ("course:abc", "linear")
+    assert create_call.args[2].snapshot_token == SNAPSHOT
+    assert create_call.args[2].block_key == "definition"
+
+
+def test_learning_note_snapshot_switch_returns_409(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_note = AsyncMock(side_effect=CourseConflictError(
+        "The published learning snapshot changed; reload before continuing."
+    ))
+    monkeypatch.setattr(course_v2_service, "create_learning_note", create_note)
+
+    response = client.post(
+        "/api/courses/course:abc/learning/chapters/linear/notes",
+        json={
+            "snapshot_token": SNAPSHOT,
+            "block_key": "definition",
+            "content": "Never attach this to a different version.",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "snapshot changed" in response.json()["detail"]
+
+
+def test_publication_switch_returns_409_before_grading(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    grade = AsyncMock(side_effect=CourseConflictError(
+        "The published learning snapshot changed; reload before continuing."
+    ))
+    monkeypatch.setattr(course_v2_service, "grade_exercise", grade)
+
+    response = client.post(
+        "/api/courses/course:abc/exercises/core-1/grade",
+        json={
+            "snapshot_token": SNAPSHOT,
+            "chapter_key": "linear",
+            "concept_key": "linear-equations",
+            "attempt_key": "attempt-1",
+            "answer": "4",
+            "hints_used": 0,
+            "answer_revealed": False,
+            "mode": "practice",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "snapshot changed" in response.json()["detail"]
+
+
 def test_learning_event_route_passes_server_scope_to_facade(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -322,11 +533,12 @@ def test_learning_event_route_passes_server_scope_to_facade(
             "mastery": None,
         }
     )
-    monkeypatch.setattr(course_v2_service, "append_learning_event", append)
+    monkeypatch.setattr(course_v2_service, "append_activity_event", append)
 
     response = client.post(
         "/api/courses/course:abc/learning/events",
         json={
+            "snapshot_token": SNAPSHOT,
             "idempotency_key": "open-1",
             "chapter_key": "linear",
             "kind": "chapter_opened",
@@ -376,6 +588,7 @@ async def test_grade_resolves_scope_and_server_authors_outcome(
         "course:abc",
         "core-1",
         CourseExerciseGradeRequest(
+            snapshot_token=_exercise_snapshot(service),
             chapter_key="linear",
             concept_key="linear-equations",
             attempt_key="attempt-1",
@@ -430,6 +643,7 @@ async def test_grade_retry_reuses_server_event_and_rejects_changed_answer(
     )
     monkeypatch.setattr(CourseService, "get_learning_event", get_event)
     request = CourseExerciseGradeRequest(
+        snapshot_token=_exercise_snapshot(service),
         chapter_key="linear",
         concept_key="linear-equations",
         attempt_key="attempt-retry",
@@ -478,6 +692,9 @@ async def test_advisory_grade_never_writes_mastery_event(
         "course:abc",
         "core-1",
         CourseExerciseGradeRequest(
+            snapshot_token=_exercise_snapshot(
+                service, _exercise(advisory=True)
+            ),
             chapter_key="linear",
             concept_key="linear-equations",
             attempt_key="attempt-1",
@@ -517,6 +734,7 @@ async def test_foreign_exercise_is_rejected_before_event_write(
             "course:abc",
             "core-1",
             CourseExerciseGradeRequest(
+                snapshot_token=SNAPSHOT,
                 chapter_key="linear",
                 concept_key="linear-equations",
                 attempt_key="attempt-1",
@@ -554,6 +772,7 @@ async def test_activity_event_uses_activity_pipeline_without_mastery(
     result = await service.append_learning_event(
         "course:abc",
         CourseLearningEventRequest(
+            snapshot_token=_chapter_snapshot(service),
             idempotency_key="position-1",
             chapter_key="linear",
             kind="reading_position",
@@ -598,6 +817,7 @@ async def test_action_retry_reuses_server_identity_and_timestamp(
     )
     monkeypatch.setattr(CourseService, "get_learning_event", get_event)
     request = CourseLearningEventRequest(
+        snapshot_token=_chapter_snapshot(service),
         idempotency_key="position-retry",
         chapter_key="linear",
         kind="reading_position",

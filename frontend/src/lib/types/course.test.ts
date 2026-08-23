@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest'
 
-import { chapterArtifactSchema, courseOutlineArtifactSchema } from './course'
+import {
+  chapterArtifactSchema,
+  courseAnswerFormatSchema,
+  courseExerciseGradeResponseSchema,
+  courseExerciseGradeRequestSchema,
+  courseExerciseHintRequestSchema,
+  courseExerciseHintResponseSchema,
+  courseExerciseRevealRequestSchema,
+  courseExerciseRevealResponseSchema,
+  courseExerciseSchema,
+  courseLearnerChapterResponseSchema,
+  courseLearnerNoteCreateRequestSchema,
+  courseLearnerNotesResponseSchema,
+  courseLearnerSourcesResponseSchema,
+  courseLearningEventRequestSchema,
+  courseLearningOverviewSchema,
+  courseOutlineArtifactSchema,
+  courseTransferGradeRequestSchema,
+  gradeResultSchema,
+  learningEventSchema,
+} from './course'
 
 const attribution = (provenance: string, anchorIds: string[] = []) => ({
   provenance,
@@ -104,7 +124,8 @@ describe('chapterArtifactSchema provenance contract', () => {
 
   it('rejects nested objects that omit provenance', () => {
     const payload = chapterPayload()
-    const { provenance: _provenance, ...formula } = payload.formulas[0]
+    const formula = { ...payload.formulas[0] }
+    delete (formula as { provenance?: string }).provenance
     payload.formulas = [formula as typeof payload.formulas[0]]
 
     expect(() => chapterArtifactSchema.parse(payload)).toThrow()
@@ -207,5 +228,363 @@ describe('chapterArtifactSchema physics contract', () => {
     payload.physics_checks = [physicsCheck]
 
     expect(() => chapterArtifactSchema.parse(payload)).toThrow()
+  })
+})
+
+const difficultyVector = {
+  concept_count: 1,
+  reasoning_steps: 2,
+  symbolic_depth: 1,
+  representation_shifts: 0,
+  proof_burden: 0,
+  physics_constraints: 0,
+}
+
+const learnerExercise = () => ({
+  key: 'limits-core',
+  chapter_key: 'limits',
+  prompt: 'Evaluate the limit.',
+  concept_keys: ['limit-laws'],
+  exercise_type: 'generated_core',
+  answer_type: 'numeric',
+  answer_format: {
+    kind: 'numeric', component_count: null, unit_required: false, parts: [],
+  },
+  snapshot_token: 'a'.repeat(64),
+  source_anchor_ids: ['anchor:limits'],
+  source_number: '4.1',
+  source_section: 'Limits',
+  difficulty: difficultyVector,
+  is_core: true,
+  is_gating: true,
+  is_source_level: true,
+  transfer: {
+    key: 'limits-transfer',
+    prompt: 'Apply the same invariant to a graph.',
+    invariant_concept_keys: ['limit-laws'],
+    dimensions: ['representation'],
+    answer_type: 'numeric',
+    answer_format: {
+      kind: 'numeric', component_count: null, unit_required: false, parts: [],
+    },
+    difficulty: { ...difficultyVector, representation_shifts: 1 },
+    anchor_ids: ['anchor:limits'],
+  },
+})
+
+describe('learner-safe Course V2 schemas', () => {
+  it('accepts learner exercise metadata but rejects hidden grading material', () => {
+    expect(courseExerciseSchema.parse(learnerExercise()).key).toBe('limits-core')
+
+    expect(() => courseExerciseSchema.parse({
+      ...learnerExercise(),
+      grader: { kind: 'numeric', oracle_answer: 4 },
+    })).toThrow()
+    expect(() => courseExerciseSchema.parse({
+      ...learnerExercise(),
+      transfer: {
+        ...learnerExercise().transfer,
+        change_evidence: 'Do not expose the generation rationale.',
+        grader: { kind: 'numeric', oracle_answer: 4 },
+      },
+    })).toThrow()
+  })
+
+  it('requires current-version record IDs and strict learning overview fields', () => {
+    const overview = {
+      course_id: 'course:abc',
+      course_version_id: 'course_version:published',
+      chapters: [{
+        chapter_key: 'limits',
+        chapter_no: 1,
+        title: 'Limits',
+        snapshot_token: 'a'.repeat(64),
+        latest_position: null,
+      }],
+      concepts: [{ key: 'limit-laws', label: 'Limit laws' }],
+      masteries: [],
+      review_queue: [],
+    }
+
+    expect(courseLearningOverviewSchema.parse(overview).course_version_id)
+      .toBe('course_version:published')
+    expect(() => courseLearningOverviewSchema.parse({
+      ...overview,
+      internal_snapshot: 'forbidden',
+    })).toThrow()
+    expect(() => courseLearningOverviewSchema.parse({
+      ...overview,
+      course_version_id: 'published',
+    })).toThrow()
+    expect(() => courseLearningOverviewSchema.parse({
+      ...overview,
+      course_id: 'notebook:abc',
+    })).toThrow()
+    expect(() => courseLearningOverviewSchema.parse({
+      ...overview,
+      course_version_id: 'chapter:published',
+    })).toThrow()
+  })
+
+  it('parses recursive grade feedback without accepting an answer oracle', () => {
+    const response = {
+      grade: {
+        correct: true,
+        advisory: false,
+        grants_mastery: true,
+        feedback_code: 'correct',
+        part_results: [{
+          correct: true,
+          advisory: false,
+          grants_mastery: true,
+          feedback_code: 'correct',
+          part_results: [],
+        }],
+      },
+      mastery: null,
+      event_key: 'grade-limits-one',
+      snapshot_token: 'a'.repeat(64),
+    }
+
+    expect(courseExerciseGradeResponseSchema.parse(response).grade.part_results)
+      .toHaveLength(1)
+    expect(() => courseExerciseGradeResponseSchema.parse({
+      ...response,
+      oracle_answer: 4,
+    })).toThrow()
+  })
+
+  it('rejects contradictory recursive grade outcomes', () => {
+    expect(() => gradeResultSchema.parse({
+      correct: true,
+      advisory: false,
+      grants_mastery: false,
+      feedback_code: 'correct',
+      part_results: [],
+    })).toThrow()
+    expect(() => gradeResultSchema.parse({
+      correct: true,
+      advisory: false,
+      grants_mastery: true,
+      feedback_code: 'correct',
+      part_results: [{
+        correct: false,
+        advisory: false,
+        grants_mastery: false,
+        feedback_code: 'incorrect',
+        part_results: [],
+      }],
+    })).toThrow()
+  })
+
+  it.each([
+    { kind: 'numeric', component_count: null, unit_required: false, parts: [] },
+    { kind: 'symbolic', component_count: null, unit_required: false, parts: [] },
+    { kind: 'unit', component_count: null, unit_required: true, parts: [] },
+    { kind: 'vector', component_count: 3, unit_required: true, parts: [] },
+    { kind: 'set', component_count: null, unit_required: false, parts: [] },
+    {
+      kind: 'multipart', component_count: null, unit_required: false,
+      parts: [
+        { kind: 'numeric', component_count: null, unit_required: false, parts: [] },
+        { kind: 'unit', component_count: null, unit_required: true, parts: [] },
+      ],
+    },
+    { kind: 'proof', component_count: null, unit_required: false, parts: [] },
+    { kind: 'explanation', component_count: null, unit_required: false, parts: [] },
+  ])('accepts the learner-safe $kind answer shape', (answerFormat) => {
+    expect(courseAnswerFormatSchema.parse(answerFormat).kind).toBe(answerFormat.kind)
+  })
+
+  it('rejects answer-shape metadata that leaks or contradicts its kind', () => {
+    expect(() => courseAnswerFormatSchema.parse({
+      kind: 'numeric', component_count: null, unit_required: false, parts: [],
+      expected_value: 4,
+    })).toThrow()
+    expect(() => courseAnswerFormatSchema.parse({
+      kind: 'vector', component_count: null, unit_required: false, parts: [],
+    })).toThrow()
+    expect(() => courseAnswerFormatSchema.parse({
+      kind: 'numeric', component_count: 2, unit_required: false, parts: [],
+    })).toThrow()
+  })
+
+  it('parses a learner chapter projection and rejects every author-only field', () => {
+    const response = {
+      course_id: 'course:abc',
+      course_version_id: 'course_version:published',
+      chapter_key: 'limits',
+      chapter_no: 1,
+      title: 'Limits',
+      status: 'published',
+      snapshot_token: 'a'.repeat(64),
+      artifact: {
+        purpose: 'Understand limits.',
+        prerequisites: ['Algebra'],
+        objectives: ['Evaluate limits'],
+        sections: [{
+          block_key: 'definition', title: 'Definition', markdown: 'Grounded.',
+          anchor_ids: ['anchor:one'], provenance: 'adapted',
+        }],
+        definitions: ['Limit'],
+        formulas: [],
+        worked_examples: [],
+        misconceptions: [],
+        pitfalls: [],
+        quick_reference: [],
+        citations: ['anchor:one'],
+      },
+    }
+    expect(courseLearnerChapterResponseSchema.parse(response).artifact.sections[0].block_key)
+      .toBe('definition')
+
+    for (const forbidden of ['exercises', 'attributions', 'physics_checks', 'labs']) {
+      expect(() => courseLearnerChapterResponseSchema.parse({
+        ...response,
+        artifact: { ...response.artifact, [forbidden]: [] },
+      })).toThrow()
+    }
+    expect(() => courseLearnerChapterResponseSchema.parse({
+      ...response,
+      artifact: {
+        ...response.artifact,
+        formulas: [{
+          key: 'formula', latex: 'x', meaning: 'x', anchor_ids: [],
+          unit_expression: null, provenance: 'derived', oracle_expression: 'x',
+        }],
+      },
+    })).toThrow()
+  })
+
+  it('allows only snapshot-bound activity events on the public event route', () => {
+    expect(courseLearningEventRequestSchema.parse({
+      snapshot_token: 'a'.repeat(64),
+      idempotency_key: 'open-one',
+      chapter_key: 'limits',
+      kind: 'chapter_opened',
+      payload: { block_key: null },
+    }).kind).toBe('chapter_opened')
+
+    expect(() => courseLearningEventRequestSchema.parse({
+      snapshot_token: 'a'.repeat(64),
+      idempotency_key: 'hint-one',
+      chapter_key: 'limits',
+      concept_key: 'limit-laws',
+      exercise_key: 'limits-core',
+      kind: 'hint_viewed',
+      payload: { attempt_key: 'attempt-one', hint_index: 1 },
+    })).toThrow()
+    expect(() => courseLearningEventRequestSchema.parse({
+      idempotency_key: 'position-one', chapter_key: 'limits',
+      kind: 'reading_position', payload: { block_key: 'definition' },
+    })).toThrow()
+  })
+
+  it('strictly validates every learner exercise action request', () => {
+    const base = {
+      snapshot_token: 'a'.repeat(64), chapter_key: 'limits',
+      concept_key: 'limit-laws', attempt_key: 'attempt-one',
+    }
+    expect(courseExerciseGradeRequestSchema.parse({
+      ...base, answer: { value: '4' }, hints_used: 1,
+      answer_revealed: false, mode: 'practice',
+    }).answer).toEqual({ value: '4' })
+    expect(courseExerciseHintRequestSchema.parse({
+      ...base, idempotency_key: 'hint-one', hint_index: 1,
+    }).hint_index).toBe(1)
+    expect(courseExerciseRevealRequestSchema.parse({
+      ...base, idempotency_key: 'reveal-one',
+    }).idempotency_key).toBe('reveal-one')
+    expect(courseTransferGradeRequestSchema.parse({
+      ...base, source_attempt_key: 'attempt-source',
+      transfer_task_key: 'limits-transfer', answer: ['4'],
+    }).transfer_task_key).toBe('limits-transfer')
+
+    for (const schema of [
+      courseExerciseGradeRequestSchema,
+      courseExerciseHintRequestSchema,
+      courseExerciseRevealRequestSchema,
+      courseTransferGradeRequestSchema,
+    ]) {
+      expect(() => schema.parse({ ...base, exercise_id: 'course_exercise:secret' })).toThrow()
+    }
+  })
+
+  it('accepts only a single recorded hint and a server-gated reveal response', () => {
+    const event = {
+      event_id: 'action-one', course_id: 'course:abc',
+      course_version_id: 'course_version:published', chapter_key: 'limits',
+      concept_key: 'limit-laws', exercise_key: 'limits-core',
+      kind: 'hint_viewed',
+      payload: { attempt_key: 'attempt-one', hint_index: 1 },
+      occurred_at: '2026-08-22T08:00:00Z',
+    }
+    expect(courseExerciseHintResponseSchema.parse({
+      snapshot_token: 'a'.repeat(64), hint_index: 1, total_hints: 4,
+      hint: 'Check the limiting direction.', event, mastery: null,
+    }).hint).toBe('Check the limiting direction.')
+
+    const revealed = {
+      snapshot_token: 'a'.repeat(64), answer: { value: '4' }, transfer: null,
+      events: [{
+        ...event, event_id: 'action-reveal', kind: 'answer_revealed',
+        payload: { attempt_key: 'attempt-one', transfer_task_key: null },
+      }],
+      mastery: null,
+    }
+    expect(courseExerciseRevealResponseSchema.parse(revealed).answer).toEqual({ value: '4' })
+    expect(() => courseExerciseRevealResponseSchema.parse({
+      ...revealed,
+      grader: { kind: 'numeric', expected: 4 },
+    })).toThrow()
+  })
+
+  it('parses current-chapter source metadata without accepting server paths', () => {
+    const response = {
+      snapshot_token: 'a'.repeat(64),
+      sources: [{
+        anchor_id: 'anchor:one', filename: 'calculus.pdf', kind: 'pdf_page',
+        index: 4, quote: 'A source excerpt.', source_role: 'PRIMARY',
+        bbox: [0.1, 0.2, 0.8, 0.4],
+      }],
+    }
+    expect(courseLearnerSourcesResponseSchema.parse(response).sources[0].index).toBe(4)
+    expect(() => courseLearnerSourcesResponseSchema.parse({
+      ...response,
+      sources: [{ ...response.sources[0], file_path: '/private/course.pdf' }],
+    })).toThrow()
+  })
+
+  it('strictly scopes learner notes to a chapter snapshot and stable block', () => {
+    const response = {
+      snapshot_token: 'a'.repeat(64),
+      notes: [{
+        note_id: 'course_note:one', block_key: 'definition', content: 'Remember.',
+        orphan_status: 'active', created: '2026-08-22T08:00:00Z',
+      }],
+    }
+    expect(courseLearnerNotesResponseSchema.parse(response).notes[0].content)
+      .toBe('Remember.')
+    expect(courseLearnerNoteCreateRequestSchema.parse({
+      snapshot_token: 'a'.repeat(64), block_key: 'definition', content: 'Remember.',
+    }).block_key).toBe('definition')
+    expect(() => courseLearnerNoteCreateRequestSchema.parse({
+      snapshot_token: 'a'.repeat(64), block_key: 'definition', content: 'Remember.',
+      chapter_id: 'chapter:foreign',
+    })).toThrow()
+  })
+
+  it('rejects a learning response whose payload does not match its event kind', () => {
+    expect(() => learningEventSchema.parse({
+      event_id: 'event-one',
+      course_id: 'course:abc',
+      course_version_id: 'course_version:published',
+      chapter_key: 'limits',
+      concept_key: 'limit-laws',
+      exercise_key: 'limits-core',
+      kind: 'hint_viewed',
+      payload: { block_key: 'definition' },
+      occurred_at: '2026-08-22T08:00:00Z',
+    })).toThrow()
   })
 })

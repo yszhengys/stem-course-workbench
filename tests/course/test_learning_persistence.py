@@ -14,6 +14,7 @@ from open_notebook.course.v2_contracts import (
     ExerciseBlueprint,
     LearningEvent,
     NumericGraderSpec,
+    TransferTaskSpec,
 )
 from open_notebook.course.v2_models import CourseExercise
 from open_notebook.exceptions import InvalidInputError
@@ -51,8 +52,20 @@ def _graded(
 
 
 def _blueprint(
-    exercise_key: str, *, is_core: bool = False, is_source_level: bool = False
+    exercise_key: str,
+    *,
+    is_core: bool = False,
+    is_source_level: bool = False,
+    with_transfer: bool = False,
 ) -> ExerciseBlueprint:
+    difficulty = DifficultyVector(
+        concept_count=1,
+        reasoning_steps=2,
+        symbolic_depth=1,
+        representation_shifts=0,
+        proof_burden=0,
+        physics_constraints=0,
+    )
     return ExerciseBlueprint(
         key=exercise_key,
         chapter_key="linear",
@@ -62,18 +75,25 @@ def _blueprint(
         answer_type="numeric",
         source_anchor_ids=["anchor:linear"],
         source_number="3.1" if is_source_level else None,
-        difficulty=DifficultyVector(
-            concept_count=1,
-            reasoning_steps=2,
-            symbolic_depth=1,
-            representation_shifts=0,
-            proof_burden=0,
-            physics_constraints=0,
-        ),
+        difficulty=difficulty,
         grader=NumericGraderSpec(kind="numeric", expected="4"),
         is_core=is_core,
         is_gating=is_core,
         is_source_level=is_source_level,
+        transfer_task=(
+            TransferTaskSpec(
+                key=f"{exercise_key}-transfer",
+                prompt="Construct a new equation with the same invariant.",
+                invariant_concept_keys=("linear-equations",),
+                dimensions=("inverse_or_constructive",),
+                answer_type="numeric",
+                difficulty=difficulty,
+                grader=NumericGraderSpec(kind="numeric", expected="4"),
+                anchor_ids=("anchor:linear",),
+            )
+            if with_transfer
+            else None
+        ),
     )
 
 
@@ -129,6 +149,7 @@ async def test_default_learning_repository_is_append_only_idempotent_and_replaya
     for blueprint in (
         _blueprint("linear-core", is_core=True),
         _blueprint("linear-source", is_source_level=True),
+        _blueprint("linear-reveal", is_core=True, with_transfer=True),
     ):
         await CourseExercise(
             course="course:one",
@@ -462,5 +483,62 @@ async def test_default_learning_repository_is_append_only_idempotent_and_replaya
     conflicting = source.model_copy(update={"exercise_key": "other-source"})
     with pytest.raises(InvalidInputError, match="other content"):
         await service.append_event(conflicting)
+
+    reveal = LearningEvent(
+        event_id="reveal-atomic",
+        course_id="course:one",
+        course_version_id="course_version:one",
+        chapter_key="linear",
+        concept_key="linear-equations",
+        exercise_key="linear-reveal",
+        kind="answer_revealed",
+        payload={
+            "attempt_key": "attempt-reveal-atomic",
+            "transfer_task_key": "linear-reveal-transfer",
+        },
+        occurred_at=start + timedelta(days=1, minutes=2),
+    )
+    required = reveal.model_copy(
+        update={"event_id": "required-atomic", "kind": "transfer_required"}
+    )
+    atomic_service = LearningService(clock=lambda: start + timedelta(days=2))
+    atomic_scope_switched = False
+
+    async def switch_scope_before_atomic_commit(query, variables=None):
+        nonlocal atomic_scope_switched
+        values = variables if isinstance(variables, dict) else {}
+        if not atomic_scope_switched and "event_content_1" in values:
+            atomic_scope_switched = True
+            await database.query(
+                "UPDATE course:one SET outline_version_id = course_version:old;"
+            )
+        return await original_repo_query(query, variables)
+
+    monkeypatch.setattr(
+        learning_module, "repo_query", switch_scope_before_atomic_commit
+    )
+    with pytest.raises(InvalidInputError, match="current published"):
+        await atomic_service.append_reveal_events(reveal, required)
+    monkeypatch.setattr(learning_module, "repo_query", original_repo_query)
+    await database.query(
+        "UPDATE course:one SET outline_version_id = course_version:one;"
+    )
+    assert not await database.query(
+        "SELECT id FROM course_learning_event "
+        "WHERE event_key IN ['reveal-atomic', 'required-atomic'];"
+    )
+
+    await atomic_service.append_reveal_events(reveal, required)
+    await atomic_service.append_reveal_events(reveal, required)
+    atomic_rows = cast(
+        list[dict[str, object]],
+        await database.query(
+            "SELECT event_key FROM course_learning_event "
+            "WHERE event_key IN ['reveal-atomic', 'required-atomic'];"
+        ),
+    )
+    assert {row["event_key"] for row in atomic_rows} == {
+        "reveal-atomic", "required-atomic"
+    }
 
     await database.close()

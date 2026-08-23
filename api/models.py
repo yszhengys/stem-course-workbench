@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from open_notebook.course.contracts import (
     LabSpecVariant,
     ModelSelection,
+    ProvenanceLabel,
     SafeLabKey,
 )
 from open_notebook.course.v2_contracts import (
@@ -16,7 +17,9 @@ from open_notebook.course.v2_contracts import (
     GradeResult,
     LearningEvent,
     LearningEventPayload,
+    PositionPayload,
     ReviewQueueItem,
+    Sha256,
     StableKey,
     TransferDimension,
 )
@@ -824,6 +827,21 @@ class StrictCourseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _bounded_json_answer(value: Any) -> Any:
+    try:
+        encoded = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("answer must be valid JSON") from exc
+    if len(encoded.encode("utf-8")) > 32_000:
+        raise ValueError("answer is too large")
+    return value
+
+
 CourseClientLearningEventKind = Literal[
     "chapter_opened",
     "hint_viewed",
@@ -837,6 +855,7 @@ CourseClientLearningEventKind = Literal[
 class CourseLearningEventRequest(StrictCourseRequest):
     """Client-authored action; Course ownership is added by the server."""
 
+    snapshot_token: Sha256
     idempotency_key: StableKey
     chapter_key: StableKey
     concept_key: StableKey | None = None
@@ -868,7 +887,24 @@ class CourseLearningEventRequest(StrictCourseRequest):
         return self
 
 
+class CourseActivityEventRequest(StrictCourseRequest):
+    """Only non-mastery reading activity may use the generic public event route."""
+
+    snapshot_token: Sha256
+    idempotency_key: StableKey
+    chapter_key: StableKey
+    kind: Literal["chapter_opened", "reading_position"]
+    payload: PositionPayload
+
+    @model_validator(mode="after")
+    def reading_position_has_a_block(self) -> "CourseActivityEventRequest":
+        if self.kind == "reading_position" and self.payload.block_key is None:
+            raise ValueError("reading_position requires a stable block key")
+        return self
+
+
 class CourseExerciseGradeRequest(StrictCourseRequest):
+    snapshot_token: Sha256
     chapter_key: StableKey
     concept_key: StableKey
     attempt_key: StableKey
@@ -880,18 +916,36 @@ class CourseExerciseGradeRequest(StrictCourseRequest):
     @field_validator("answer")
     @classmethod
     def answer_is_bounded_json(cls, value: Any) -> Any:
-        try:
-            encoded = json.dumps(
-                value,
-                allow_nan=False,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("answer must be valid JSON") from exc
-        if len(encoded.encode("utf-8")) > 32_000:
-            raise ValueError("answer is too large")
-        return value
+        return _bounded_json_answer(value)
+
+
+class CourseExerciseHintRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    idempotency_key: StableKey
+    chapter_key: StableKey
+    concept_key: StableKey
+    attempt_key: StableKey
+    hint_index: int = Field(ge=1, le=4)
+
+
+class CourseExerciseRevealRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    idempotency_key: StableKey
+    chapter_key: StableKey
+    concept_key: StableKey
+    attempt_key: StableKey
+
+
+class CourseTransferGradeRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    chapter_key: StableKey
+    concept_key: StableKey
+    source_attempt_key: StableKey
+    attempt_key: StableKey
+    transfer_task_key: StableKey
+    answer: Any
+
+    _bounded_answer = field_validator("answer")(_bounded_json_answer)
 
 
 class CourseLearningEventResponse(BaseModel):
@@ -903,6 +957,36 @@ class CourseExerciseGradeResponse(BaseModel):
     grade: GradeResult
     mastery: ConceptMastery | None = None
     event_key: StableKey | None = None
+    snapshot_token: Sha256
+
+
+class CourseAnswerFormat(BaseModel):
+    """Input shape metadata with no expected value or grading oracle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: AnswerType
+    component_count: int | None = Field(default=None, ge=1, le=20)
+    unit_required: bool = False
+    parts: tuple["CourseAnswerFormat", ...] = Field(
+        default_factory=tuple, max_length=20
+    )
+
+    @model_validator(mode="after")
+    def shape_matches_kind(self) -> "CourseAnswerFormat":
+        if self.kind == "vector" and self.component_count is None:
+            raise ValueError("vector answer format requires component_count")
+        if self.kind != "vector" and self.component_count is not None:
+            raise ValueError("only vector formats declare component_count")
+        if self.kind == "multipart" and not self.parts:
+            raise ValueError("multipart answer format requires parts")
+        if self.kind != "multipart" and self.parts:
+            raise ValueError("only multipart formats declare parts")
+        if self.kind == "unit" and not self.unit_required:
+            raise ValueError("unit answer format requires a unit")
+        if self.kind not in {"unit", "vector"} and self.unit_required:
+            raise ValueError("this answer format does not accept a unit")
+        return self
 
 
 class CourseTransferTaskResponse(BaseModel):
@@ -915,6 +999,7 @@ class CourseTransferTaskResponse(BaseModel):
     invariant_concept_keys: tuple[StableKey, ...]
     dimensions: tuple[TransferDimension, ...]
     answer_type: AnswerType
+    answer_format: CourseAnswerFormat
     difficulty: DifficultyVector
     anchor_ids: tuple[str, ...]
 
@@ -936,6 +1021,8 @@ class CourseExerciseResponse(BaseModel):
         "transfer",
     ]
     answer_type: AnswerType
+    answer_format: CourseAnswerFormat
+    snapshot_token: Sha256
     source_anchor_ids: tuple[str, ...]
     source_number: str | None = None
     source_section: str | None = None
@@ -946,17 +1033,155 @@ class CourseExerciseResponse(BaseModel):
     transfer: CourseTransferTaskResponse | None = None
 
 
+class CourseExerciseHintResponse(BaseModel):
+    snapshot_token: Sha256
+    hint_index: int = Field(ge=1, le=4)
+    total_hints: int = Field(ge=1, le=4)
+    hint: str = Field(min_length=1, max_length=2000)
+    event: LearningEvent
+    mastery: ConceptMastery | None = None
+
+
+class CourseExerciseRevealResponse(BaseModel):
+    snapshot_token: Sha256
+    answer: Any
+    transfer: CourseTransferTaskResponse | None = None
+    events: tuple[LearningEvent, ...] = Field(min_length=1, max_length=2)
+    mastery: ConceptMastery | None = None
+
+
+class CourseLearnerChapterSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    block_key: StableKey
+    title: str = Field(min_length=1, max_length=300)
+    markdown: str = Field(min_length=1, max_length=100_000)
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=200)
+    provenance: ProvenanceLabel
+
+
+class CourseLearnerFormula(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: StableKey
+    latex: str = Field(min_length=1, max_length=4000)
+    meaning: str = Field(min_length=1, max_length=2000)
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    unit_expression: str | None = Field(default=None, max_length=500)
+    provenance: ProvenanceLabel
+
+
+class CourseLearnerWorkedExample(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: StableKey
+    prompt: str = Field(min_length=1, max_length=4000)
+    steps: tuple[str, ...] = Field(min_length=1, max_length=50)
+    answer: str = Field(min_length=1, max_length=4000)
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    unit_expression: str | None = Field(default=None, max_length=500)
+    provenance: ProvenanceLabel
+
+
+class CourseLearnerChapterArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    purpose: str = Field(min_length=1, max_length=4000)
+    prerequisites: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    objectives: tuple[str, ...] = Field(min_length=1, max_length=100)
+    sections: tuple[CourseLearnerChapterSection, ...] = Field(
+        min_length=1, max_length=100
+    )
+    definitions: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    formulas: tuple[CourseLearnerFormula, ...] = Field(
+        default_factory=tuple, max_length=100
+    )
+    worked_examples: tuple[CourseLearnerWorkedExample, ...] = Field(
+        default_factory=tuple, max_length=100
+    )
+    misconceptions: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    pitfalls: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    quick_reference: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    citations: tuple[str, ...] = Field(default_factory=tuple, max_length=500)
+
+
+class CourseLearnerChapterResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    course_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    chapter_key: StableKey
+    chapter_no: int = Field(ge=1)
+    title: str = Field(min_length=1)
+    status: Literal["published"]
+    snapshot_token: Sha256
+    artifact: CourseLearnerChapterArtifact
+
+
+class CourseLearnerSourceResponse(BaseModel):
+    """Current-chapter evidence metadata without Source record IDs or paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    anchor_id: str = Field(min_length=1, max_length=300)
+    filename: str = Field(min_length=1, max_length=500)
+    kind: Literal["pdf_page", "pptx_slide"]
+    index: int = Field(ge=1)
+    quote: str = Field(min_length=1, max_length=4000)
+    source_role: Literal["PRIMARY", "SUPPLEMENT"]
+    bbox: tuple[float, float, float, float] | None = None
+
+
+class CourseLearnerSourcesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_token: Sha256
+    sources: tuple[CourseLearnerSourceResponse, ...]
+
+
+class CourseLearnerNoteResponse(BaseModel):
+    """A note bound to one exact published chapter record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str = Field(pattern=r"^course_note:[^:]+$")
+    block_key: StableKey
+    content: str = Field(min_length=1, max_length=20_000)
+    orphan_status: Literal["active", "orphaned"]
+    created: datetime | None = None
+
+
+class CourseLearnerNotesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_token: Sha256
+    notes: tuple[CourseLearnerNoteResponse, ...]
+
+
+class CourseLearnerNoteCreateRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    block_key: StableKey
+    content: str = Field(min_length=1, max_length=20_000)
+
+
 class CourseLearningChapterOverview(BaseModel):
     chapter_key: StableKey
     chapter_no: int = Field(ge=1)
     title: str
+    snapshot_token: Sha256
     latest_position: LearningEvent | None = None
+
+
+class CourseConceptResponse(BaseModel):
+    key: StableKey
+    label: str = Field(min_length=1, max_length=300)
 
 
 class CourseLearningOverviewResponse(BaseModel):
     course_id: str
     course_version_id: str
     chapters: tuple[CourseLearningChapterOverview, ...]
+    concepts: tuple[CourseConceptResponse, ...] = ()
     masteries: tuple[ConceptMastery, ...]
     review_queue: tuple[ReviewQueueItem, ...]
 

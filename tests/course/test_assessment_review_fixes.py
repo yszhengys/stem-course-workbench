@@ -60,6 +60,7 @@ def _core(*, gating: bool = True, chapter_key: str = "linear") -> ExerciseBluepr
         source_anchor_ids=["anchor:baseline"],
         difficulty=_difficulty(3),
         grader=NumericGraderSpec(kind="numeric", expected="4"),
+        hints=("Identify.", "Represent.", "Solve.", "Check."),
         is_core=True,
         is_gating=gating,
         transfer_task=_transfer(),

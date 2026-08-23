@@ -585,6 +585,33 @@ class AssessmentService:
             raise TypeError("transfer must be a validated TransferTaskSpec")
         return cls._grade_spec(transfer.grader, answer)
 
+    @classmethod
+    def reveal_grader_answer(cls, grader: GraderSpec) -> object:
+        """Return a JSON-safe expected answer only after a server-side reveal gate."""
+
+        if grader.kind == "numeric":
+            return grader.expected
+        if grader.kind == "symbolic":
+            return grader.expected_expression
+        if grader.kind == "unit":
+            return {"value": grader.expected_value, "unit": grader.expected_unit}
+        if grader.kind == "vector":
+            answer: dict[str, object] = {
+                "components": list(grader.expected_components)
+            }
+            if grader.expected_unit is not None:
+                answer["unit"] = grader.expected_unit
+            return answer
+        if grader.kind == "set":
+            return {"items": list(grader.expected_items)}
+        if grader.kind == "multipart":
+            return {
+                "parts": [
+                    cls.reveal_grader_answer(part) for part in grader.parts
+                ]
+            }
+        return {"rubric": grader.rubric}
+
     @staticmethod
     def decode_response(
         grader: GraderSpec,
@@ -784,6 +811,13 @@ class AssessmentService:
                 )
 
             core = cores[0]
+            if len(core.hints) != 4:
+                findings.append(
+                    cls._finding(
+                        "invalid_core_hint_layers",
+                        f"Core exercise {core.key} requires exactly four progressive hint layers.",
+                    )
+                )
             if not core.source_anchor_ids:
                 findings.append(
                     cls._finding(

@@ -699,6 +699,165 @@ class LearningService:
                             raise InvalidInputError(str(exc)) from exc
             return mastery
 
+    async def append_reveal_events(
+        self,
+        revealed: LearningEvent,
+        required: LearningEvent | None = None,
+    ) -> ConceptMastery:
+        """Commit an answer reveal and its transfer gate in one transaction."""
+
+        events = (revealed,) if required is None else (revealed, required)
+        if revealed.kind != "answer_revealed":
+            raise InvalidInputError("The first reveal event must reveal an answer.")
+        if required is not None and required.kind != "transfer_required":
+            raise InvalidInputError("The second reveal event must require transfer.")
+        revealed_payload = cast(TransferTaskPayload, revealed.payload)
+        if (revealed_payload.transfer_task_key is None) is not (required is None):
+            raise InvalidInputError(
+                "A transfer-gated answer reveal must be committed with its gate."
+            )
+        identity = (
+            revealed.course_id,
+            revealed.course_version_id,
+            revealed.chapter_key,
+            revealed.concept_key,
+            revealed.exercise_key,
+        )
+        if revealed.concept_key is None or revealed.exercise_key is None:
+            raise InvalidInputError(
+                "Answer reveals require one concept and exercise identity."
+            )
+        if any(
+            (
+                event.course_id,
+                event.course_version_id,
+                event.chapter_key,
+                event.concept_key,
+                event.exercise_key,
+            )
+            != identity
+            for event in events
+        ):
+            raise InvalidInputError(
+                "Atomic answer reveal events must share one learning identity."
+            )
+        if required is not None and cast(
+            TransferTaskPayload, required.payload
+        ) != revealed_payload:
+            raise InvalidInputError(
+                "The transfer gate must match its answer reveal payload."
+            )
+        server_now = self._require_aware(self.clock(), "clock")
+        for event in events:
+            occurred_at = self._require_aware(event.occurred_at, "occurred_at")
+            if occurred_at > server_now + MAX_FUTURE_SKEW:
+                raise InvalidInputError(
+                    "Learning event timestamp is too far in the future."
+                )
+        if any(
+            value is not None
+            for value in (
+                self.event_appender,
+                self.event_loader,
+                self.exercise_loader,
+                self.mastery_saver,
+                self.scope_validator,
+            )
+        ):
+            raise InvalidInputError(
+                "Atomic answer reveals require the database-backed learning pipeline."
+            )
+
+        lock_key = "|".join(
+            (
+                revealed.course_id,
+                revealed.course_version_id,
+                revealed.chapter_key,
+                cast(str, revealed.concept_key),
+            )
+        )
+        lock = _APPEND_LOCKS.setdefault(lock_key, asyncio.Lock())
+        async with lock:
+            exercises = await self._load_exercise_records(
+                revealed.course_id,
+                revealed.course_version_id,
+                revealed.chapter_key,
+            )
+
+            async def prepare() -> tuple[
+                tuple[LearningEvent, ...], tuple[bool, ...], ConceptMastery
+            ]:
+                existing = await self._load_event_records(
+                    revealed.course_id,
+                    revealed.course_version_id,
+                    revealed.chapter_key,
+                    cast(str, revealed.concept_key),
+                )
+                insert_events: list[bool] = []
+                pending: list[LearningEvent] = []
+                for event in events:
+                    duplicate = next(
+                        (
+                            stored
+                            for stored in existing
+                            if stored.event_id == event.event_id
+                        ),
+                        None,
+                    )
+                    if duplicate is not None and duplicate != event:
+                        raise InvalidInputError(
+                            "Learning event ID already has other content."
+                        )
+                    global_duplicate = await self._load_event_by_key(
+                        event.course_id, event.event_id
+                    )
+                    if global_duplicate is not None:
+                        if global_duplicate != event:
+                            raise InvalidInputError(
+                                "Learning event ID already has other content."
+                            )
+                        duplicate = global_duplicate
+                    should_insert = duplicate is None
+                    insert_events.append(should_insert)
+                    if should_insert:
+                        pending.append(event)
+                candidate = (*existing, *pending)
+                evaluation_time = max(
+                    server_now,
+                    max(
+                        self._require_aware(item.occurred_at, "occurred_at")
+                        for item in candidate
+                    ),
+                )
+                try:
+                    mastery = await asyncio.to_thread(
+                        self.reduce_events,
+                        candidate,
+                        exercises=exercises,
+                        now=evaluation_time,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise InvalidInputError(str(exc)) from exc
+                return existing, tuple(insert_events), mastery
+
+            scope = await self._resolve_scope(revealed)
+            for commit_attempt in range(2):
+                existing, insert_events, mastery = await prepare()
+                try:
+                    await self._commit_events_and_mastery(
+                        events,
+                        mastery,
+                        scope=scope,
+                        insert_events=insert_events,
+                        expected_event_count=len(existing),
+                    )
+                    return mastery
+                except RuntimeError:
+                    if commit_attempt == 1:
+                        raise
+                    scope = await self._resolve_scope(revealed)
+            raise RuntimeError("Atomic answer reveal commit did not complete.")
+
     async def append_activity_event(self, event: LearningEvent) -> LearningEvent:
         """Append chapter activity without creating a false mastery snapshot."""
 
@@ -1284,8 +1443,34 @@ class LearningService:
         insert_event: bool,
         expected_event_count: int,
     ) -> None:
-        event_statement = (
-            "CREATE ONLY $event_record CONTENT $event_content;" if insert_event else ""
+        await self._commit_events_and_mastery(
+            (event,),
+            mastery,
+            scope=scope,
+            insert_events=(insert_event,),
+            expected_event_count=expected_event_count,
+        )
+
+    async def _commit_events_and_mastery(
+        self,
+        events: tuple[LearningEvent, ...],
+        mastery: ConceptMastery,
+        *,
+        scope: _LearningScope,
+        insert_events: tuple[bool, ...],
+        expected_event_count: int,
+    ) -> None:
+        if not events or len(events) != len(insert_events):
+            raise ValueError("Atomic event commit inputs are inconsistent")
+        def event_variable(prefix: str, index: int) -> str:
+            return prefix if len(events) == 1 else f"{prefix}_{index}"
+
+        event_statements = "".join(
+            "CREATE ONLY "
+            f"${event_variable('event_record', index)} CONTENT "
+            f"${event_variable('event_content', index)};"
+            for index, should_insert in enumerate(insert_events)
+            if should_insert
         )
         statement = (
             "BEGIN TRANSACTION;"
@@ -1302,13 +1487,13 @@ class LearningService:
             THROW 'Learning event snapshot changed'
         };
         """
-            + event_statement
+            + event_statements
             + """
         UPSERT $mastery_record CONTENT $mastery_content;
         COMMIT TRANSACTION;
         """
         )
-        variables = self._scope_variables(event, scope)
+        variables = self._scope_variables(events[0], scope)
         variables.update(
             {
                 "mastery_record": ensure_record_id(
@@ -1321,21 +1506,25 @@ class LearningService:
                     )
                 ),
                 "mastery_content": self._mastery_content(mastery),
-                "concept_key": event.concept_key,
+                "concept_key": events[0].concept_key,
                 "expected_event_count": expected_event_count,
             }
         )
-        if insert_event:
+        for index, (event, should_insert) in enumerate(
+            zip(events, insert_events, strict=True)
+        ):
+            if not should_insert:
+                continue
             variables.update(
                 {
-                    "event_record": ensure_record_id(
+                    event_variable("event_record", index): ensure_record_id(
                         self._stable_record_id(
                             "course_learning_event",
                             event.course_id,
                             event.event_id,
                         )
                     ),
-                    "event_content": {
+                    event_variable("event_content", index): {
                         "course": ensure_record_id(event.course_id),
                         "course_version": ensure_record_id(event.course_version_id),
                         "chapter": ensure_record_id(scope.chapter_id),

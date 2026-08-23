@@ -50,4 +50,16 @@ describe('safe Lab expression interpreter', () => {
       objects: [{ type: 'point', x: 1_000_001, y: 0 }],
     })).toThrow(/safe range/)
   })
+
+  it('reports the number of samples that were actually rendered', () => {
+    const singular = validateLabSpec({
+      kind: 'function_plot', key: 'partial', title: 'Partial plot', anchor_ids: [],
+      provenance: 'pedagogical', expressions: ['sqrt(x)'], domain: { x: [-1, 1] },
+      controls: [], objects: [],
+    })
+    const sampled = sampleLab(singular)
+
+    expect(sampled.totalSamples).toBe(sampled.paths.flat().length)
+    expect(sampled.totalSamples).toBeLessThan(250)
+  })
 })

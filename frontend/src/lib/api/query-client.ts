@@ -47,4 +47,13 @@ export const QUERY_KEYS = {
   courseNotes: (id: string) => ['courses', id, 'notes'] as const,
   courseLabs: (id: string, chapterKey: string) => ['courses', id, 'chapters', chapterKey, 'labs'] as const,
   courseAttempts: (id: string, chapterKey: string) => ['courses', id, 'chapters', chapterKey, 'attempts'] as const,
+  courseLearningOverview: (id: string) => ['courses', id, 'learning', 'overview'] as const,
+  courseLearningChapter: (id: string, chapterKey: string) =>
+    ['courses', id, 'learning', 'chapters', chapterKey] as const,
+  courseLearningSources: (id: string, chapterKey: string) =>
+    ['courses', id, 'learning', 'chapters', chapterKey, 'sources'] as const,
+  courseLearningNotes: (id: string, chapterKey: string) =>
+    ['courses', id, 'learning', 'chapters', chapterKey, 'notes'] as const,
+  courseReviewQueue: (id: string) => ['courses', id, 'learning', 'review-queue'] as const,
+  courseExercises: (id: string, chapterKey?: string) => ['courses', id, 'exercises', chapterKey] as const,
 }

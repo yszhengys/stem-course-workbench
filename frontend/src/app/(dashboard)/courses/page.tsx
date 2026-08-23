@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { BookOpen, Plus } from 'lucide-react'
+import { BookOpen, Hammer, Plus } from 'lucide-react'
 
 import { AppShell } from '@/components/layout/AppShell'
 import { CoursePageEmpty, CoursePageError, CoursePageLoading } from '@/components/course/CoursePageState'
@@ -37,8 +37,7 @@ export default function CoursesPage() {
           ) : courses.data?.length ? (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {courses.data.map((course) => (
-                <Link key={course.id} href={`/courses/${encodeURIComponent(course.id)}/outline`}>
-                  <Card className="h-full transition-colors hover:border-fern">
+                <Card key={course.id} className="h-full transition-colors hover:border-fern">
                     <CardHeader>
                       <div className="mb-2 flex items-center justify-between gap-3">
                         <BookOpen className="size-5 text-fern" />
@@ -47,11 +46,24 @@ export default function CoursesPage() {
                       <CardTitle>{course.title}</CardTitle>
                       <CardDescription>{subjectLabel(t, course.subject)}</CardDescription>
                     </CardHeader>
-                    <CardContent className="text-sm text-muted-foreground">
-                      {course.description || t('course.noDescription')}
+                    <CardContent className="space-y-4 text-sm text-muted-foreground">
+                      <p>{course.description || t('course.noDescription')}</p>
+                      <div className="flex flex-wrap gap-2">
+                        <Button asChild size="sm" variant="outline">
+                          <Link href={`/courses/${encodeURIComponent(course.id)}/outline`}>
+                            <Hammer aria-hidden="true" />
+                            {t('course.openBuildMode')}
+                          </Link>
+                        </Button>
+                        <Button asChild size="sm">
+                          <Link href={`/courses/${encodeURIComponent(course.id)}/learn`}>
+                            <BookOpen aria-hidden="true" />
+                            {t('course.learnMode')}
+                          </Link>
+                        </Button>
+                      </div>
                     </CardContent>
                   </Card>
-                </Link>
               ))}
             </div>
           ) : (

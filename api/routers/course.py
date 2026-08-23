@@ -20,6 +20,7 @@ from api.models import (
     ChapterCreate,
     ChapterPublish,
     ChapterUpdate,
+    CourseActivityEventRequest,
     CourseChapterAttemptCreate,
     CourseChapterGenerateRequest,
     CourseChapterReviewRequest,
@@ -27,10 +28,18 @@ from api.models import (
     CourseEvidenceBuildRequest,
     CourseExerciseGradeRequest,
     CourseExerciseGradeResponse,
+    CourseExerciseHintRequest,
+    CourseExerciseHintResponse,
     CourseExerciseResponse,
+    CourseExerciseRevealRequest,
+    CourseExerciseRevealResponse,
     CourseFindingUpdate,
     CourseJobResponse,
-    CourseLearningEventRequest,
+    CourseLearnerChapterResponse,
+    CourseLearnerNoteCreateRequest,
+    CourseLearnerNoteResponse,
+    CourseLearnerNotesResponse,
+    CourseLearnerSourcesResponse,
     CourseLearningEventResponse,
     CourseLearningOverviewResponse,
     CourseNoteCreate,
@@ -39,6 +48,7 @@ from api.models import (
     CourseOutlineGenerateRequest,
     CourseRetrievalRequest,
     CourseSourceAssociation,
+    CourseTransferGradeRequest,
     CourseUpdate,
     CourseVersionCreate,
     LabCreate,
@@ -136,10 +146,57 @@ async def get_learning_review_queue(course_id: str):
 )
 async def append_learning_event(
     course_id: str,
-    request: CourseLearningEventRequest,
+    request: CourseActivityEventRequest,
 ):
     return await _call(
-        course_v2_service.append_learning_event(course_id, request)
+        course_v2_service.append_activity_event(course_id, request)
+    )
+
+
+@router.get(
+    "/courses/{course_id}/learning/chapters/{chapter_key}",
+    response_model=CourseLearnerChapterResponse,
+)
+async def get_learning_chapter(course_id: str, chapter_key: StableKey):
+    return await _call(
+        course_v2_service.get_learning_chapter(course_id, chapter_key)
+    )
+
+
+@router.get(
+    "/courses/{course_id}/learning/chapters/{chapter_key}/sources",
+    response_model=CourseLearnerSourcesResponse,
+)
+async def list_learning_sources(course_id: str, chapter_key: StableKey):
+    return await _call(
+        course_v2_service.list_learning_sources(course_id, chapter_key)
+    )
+
+
+@router.get(
+    "/courses/{course_id}/learning/chapters/{chapter_key}/notes",
+    response_model=CourseLearnerNotesResponse,
+)
+async def list_learning_notes(course_id: str, chapter_key: StableKey):
+    return await _call(
+        course_v2_service.list_learning_notes(course_id, chapter_key)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/learning/chapters/{chapter_key}/notes",
+    response_model=CourseLearnerNoteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_learning_note(
+    course_id: str,
+    chapter_key: StableKey,
+    request: CourseLearnerNoteCreateRequest,
+):
+    return await _call(
+        course_v2_service.create_learning_note(
+            course_id, chapter_key, request
+        )
     )
 
 
@@ -167,6 +224,48 @@ async def grade_course_exercise(
 ):
     return await _call(
         course_v2_service.grade_exercise(course_id, exercise_key, request)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/exercises/{exercise_key}/hints/next",
+    response_model=CourseExerciseHintResponse,
+)
+async def get_next_course_exercise_hint(
+    course_id: str,
+    exercise_key: StableKey,
+    request: CourseExerciseHintRequest,
+):
+    return await _call(
+        course_v2_service.next_hint(course_id, exercise_key, request)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/exercises/{exercise_key}/reveal",
+    response_model=CourseExerciseRevealResponse,
+)
+async def reveal_course_exercise_answer(
+    course_id: str,
+    exercise_key: StableKey,
+    request: CourseExerciseRevealRequest,
+):
+    return await _call(
+        course_v2_service.reveal_answer(course_id, exercise_key, request)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/exercises/{exercise_key}/transfer/grade",
+    response_model=CourseExerciseGradeResponse,
+)
+async def grade_course_transfer(
+    course_id: str,
+    exercise_key: StableKey,
+    request: CourseTransferGradeRequest,
+):
+    return await _call(
+        course_v2_service.grade_transfer(course_id, exercise_key, request)
     )
 
 

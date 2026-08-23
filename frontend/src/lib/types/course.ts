@@ -3,6 +3,13 @@ import { z } from 'zod'
 const recordId = z.string().min(3).refine((value) => value.includes(':'), {
   message: 'Expected a typed record ID',
 })
+const typedRecordId = (table: string) => z.string().regex(
+  new RegExp(`^${table}:[^:]+$`),
+  { message: `Expected a ${table} record ID` },
+)
+const courseRecordId = typedRecordId('course')
+const courseVersionRecordId = typedRecordId('course_version')
+export const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/)
 const timestamp = z.string().nullable().optional()
 const finiteNumber = z.number().finite()
 const provenanceSchema = z.enum(['verbatim', 'adapted', 'derived', 'pedagogical', '补充'])
@@ -608,3 +615,560 @@ export interface CreateCourseAttemptRequest {
   answer_revealed?: boolean
   transfer_completed?: boolean
 }
+
+export const stableCourseKeySchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,99}$/)
+export const masteryStatusSchema = z.enum([
+  'not_started',
+  'learning',
+  'practiced',
+  'mastered',
+  'review_due',
+])
+export type MasteryStatus = z.infer<typeof masteryStatusSchema>
+
+export const answerTypeSchema = z.enum([
+  'numeric',
+  'symbolic',
+  'unit',
+  'vector',
+  'set',
+  'multipart',
+  'proof',
+  'explanation',
+])
+export type AnswerType = z.infer<typeof answerTypeSchema>
+
+export interface CourseAnswerFormat {
+  kind: AnswerType
+  component_count: number | null
+  unit_required: boolean
+  parts: CourseAnswerFormat[]
+}
+
+export const courseAnswerFormatSchema: z.ZodType<CourseAnswerFormat> = z.lazy(() => z.object({
+  kind: answerTypeSchema,
+  component_count: z.number().int().min(1).max(20).nullable(),
+  unit_required: z.boolean(),
+  parts: z.array(courseAnswerFormatSchema).max(20),
+}).strict().superRefine((value, context) => {
+  if ((value.kind === 'vector') !== (value.component_count !== null)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['component_count'],
+      message: 'Only vector answers declare a component count',
+    })
+  }
+  if ((value.kind === 'multipart') !== (value.parts.length > 0)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['parts'],
+      message: 'Only multipart answers declare parts',
+    })
+  }
+  if (value.kind === 'unit' && !value.unit_required) {
+    context.addIssue({
+      code: 'custom',
+      path: ['unit_required'],
+      message: 'Unit answers require a unit',
+    })
+  }
+  if (!['unit', 'vector'].includes(value.kind) && value.unit_required) {
+    context.addIssue({
+      code: 'custom',
+      path: ['unit_required'],
+      message: 'This answer format does not accept a unit',
+    })
+  }
+}))
+
+export const transferDimensionSchema = z.enum([
+  'representation',
+  'inverse_or_constructive',
+  'constraints_frame_or_regime',
+  'method_comparison',
+  'proof_counterexample_generalization',
+  'math_physics_context',
+])
+
+export const difficultyVectorSchema = z.object({
+  concept_count: z.number().int().min(0).max(20),
+  reasoning_steps: z.number().int().min(0).max(20),
+  symbolic_depth: z.number().int().min(0).max(20),
+  representation_shifts: z.number().int().min(0).max(20),
+  proof_burden: z.number().int().min(0).max(20),
+  physics_constraints: z.number().int().min(0).max(20),
+}).strict()
+export type DifficultyVector = z.infer<typeof difficultyVectorSchema>
+
+const positionPayloadSchema = z.object({
+  block_key: stableCourseKeySchema.nullable(),
+}).strict()
+const hintViewedPayloadSchema = z.object({
+  attempt_key: stableCourseKeySchema,
+  hint_index: z.number().int().min(1).max(4),
+}).strict()
+const transferTaskPayloadSchema = z.object({
+  attempt_key: stableCourseKeySchema,
+  transfer_task_key: stableCourseKeySchema.nullable(),
+}).strict()
+const gradedPayloadSchema = z.object({
+  answer_revealed: z.boolean(),
+  hints_used: z.number().int().min(0).max(4),
+  attempt_key: stableCourseKeySchema,
+  response_parts: z.array(z.string().min(1).max(4000)).min(1).max(20),
+}).strict()
+const transferCompletedPayloadSchema = z.object({
+  attempt_key: stableCourseKeySchema,
+  source_attempt_key: stableCourseKeySchema,
+  transfer_task_key: stableCourseKeySchema,
+  response_parts: z.array(z.string().min(1).max(4000)).min(1).max(20),
+}).strict()
+const reviewCompletedPayloadSchema = z.object({
+  attempt_key: stableCourseKeySchema,
+  correct: z.boolean(),
+  answer_revealed: z.boolean(),
+  hints_used: z.number().int().min(0).max(4),
+  response_parts: z.array(z.string().min(1).max(4000)).min(1).max(20),
+}).strict()
+
+export const learningEventKindSchema = z.enum([
+  'chapter_opened',
+  'hint_viewed',
+  'answer_revealed',
+  'graded_correct',
+  'graded_incorrect',
+  'transfer_required',
+  'transfer_completed',
+  'review_completed',
+  'reading_position',
+])
+
+const learningEventPayloadSchema = z.union([
+  positionPayloadSchema,
+  hintViewedPayloadSchema,
+  transferTaskPayloadSchema,
+  gradedPayloadSchema,
+  transferCompletedPayloadSchema,
+  reviewCompletedPayloadSchema,
+])
+
+function payloadMatchesEventKind(
+  kind: z.infer<typeof learningEventKindSchema>,
+  payload: z.infer<typeof learningEventPayloadSchema>,
+) {
+  switch (kind) {
+    case 'chapter_opened':
+    case 'reading_position':
+      return positionPayloadSchema.safeParse(payload).success
+    case 'hint_viewed':
+      return hintViewedPayloadSchema.safeParse(payload).success
+    case 'answer_revealed':
+    case 'transfer_required':
+      return transferTaskPayloadSchema.safeParse(payload).success
+    case 'graded_correct':
+    case 'graded_incorrect':
+      return gradedPayloadSchema.safeParse(payload).success
+    case 'transfer_completed':
+      return transferCompletedPayloadSchema.safeParse(payload).success
+    case 'review_completed':
+      return reviewCompletedPayloadSchema.safeParse(payload).success
+  }
+}
+
+export const learningEventSchema = z.object({
+  event_id: stableCourseKeySchema,
+  course_id: recordId,
+  course_version_id: recordId,
+  chapter_key: stableCourseKeySchema,
+  concept_key: stableCourseKeySchema.nullable(),
+  exercise_key: stableCourseKeySchema.nullable(),
+  kind: learningEventKindSchema,
+  payload: learningEventPayloadSchema,
+  occurred_at: z.string().datetime({ offset: true }),
+}).strict().superRefine((value, context) => {
+  if (!payloadMatchesEventKind(value.kind, value.payload)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['payload'],
+      message: 'Payload does not match the learning event kind',
+    })
+  }
+  const isActivity = value.kind === 'chapter_opened' || value.kind === 'reading_position'
+  const exerciseEvent = !isActivity
+  const conceptEvent = exerciseEvent && value.kind !== 'hint_viewed'
+  if (isActivity && (value.concept_key !== null || value.exercise_key !== null)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['kind'],
+      message: 'Activity events cannot claim a concept or exercise',
+    })
+  }
+  if (exerciseEvent && value.exercise_key === null) {
+    context.addIssue({
+      code: 'custom',
+      path: ['exercise_key'],
+      message: 'Exercise events require an exercise key',
+    })
+  }
+  if (conceptEvent && value.concept_key === null) {
+    context.addIssue({
+      code: 'custom',
+      path: ['concept_key'],
+      message: 'Concept events require a concept key',
+    })
+  }
+  if (
+    value.kind === 'reading_position'
+    && 'block_key' in value.payload
+    && value.payload.block_key === null
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['payload', 'block_key'],
+      message: 'Reading positions require a block key',
+    })
+  }
+})
+export type LearningEvent = z.infer<typeof learningEventSchema>
+
+export const conceptMasterySchema = z.object({
+  course_id: recordId,
+  course_version_id: recordId,
+  chapter_key: stableCourseKeySchema,
+  concept_key: stableCourseKeySchema,
+  status: masteryStatusSchema,
+  successful_exercise_keys: z.array(stableCourseKeySchema).max(200),
+  unrevealed_success_count: z.number().int().min(0).max(200),
+  review_level: z.number().int().min(0).max(5),
+  review_due_at: z.string().datetime({ offset: true }).nullable(),
+  last_event_at: z.string().datetime({ offset: true }).nullable(),
+  snapshot_hash: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict()
+export type ConceptMastery = z.infer<typeof conceptMasterySchema>
+
+export const reviewQueueItemSchema = z.object({
+  chapter_key: stableCourseKeySchema,
+  concept_key: stableCourseKeySchema,
+  status: z.literal('review_due'),
+  due_at: z.string().datetime({ offset: true }),
+  interval_days: z.union([
+    z.literal(1), z.literal(3), z.literal(7), z.literal(14), z.literal(30),
+  ]),
+}).strict()
+export type ReviewQueueItem = z.infer<typeof reviewQueueItemSchema>
+
+export const courseLearningChapterOverviewSchema = z.object({
+  chapter_key: stableCourseKeySchema,
+  chapter_no: z.number().int().positive(),
+  title: z.string().min(1),
+  snapshot_token: sha256Schema,
+  latest_position: learningEventSchema.nullable(),
+}).strict()
+
+export const courseConceptSchema = z.object({
+  key: stableCourseKeySchema,
+  label: z.string().min(1).max(300),
+}).strict()
+
+export const courseLearningOverviewSchema = z.object({
+  course_id: courseRecordId,
+  course_version_id: courseVersionRecordId,
+  chapters: z.array(courseLearningChapterOverviewSchema),
+  concepts: z.array(courseConceptSchema),
+  masteries: z.array(conceptMasterySchema),
+  review_queue: z.array(reviewQueueItemSchema),
+}).strict()
+export type CourseLearningOverview = z.infer<typeof courseLearningOverviewSchema>
+
+export const courseTransferTaskSchema = z.object({
+  key: stableCourseKeySchema,
+  prompt: z.string().min(1).max(12_000),
+  invariant_concept_keys: z.array(stableCourseKeySchema).min(1).max(50),
+  dimensions: z.array(transferDimensionSchema).min(1).max(6),
+  answer_type: answerTypeSchema,
+  answer_format: courseAnswerFormatSchema,
+  difficulty: difficultyVectorSchema,
+  anchor_ids: z.array(z.string().min(1)).max(100),
+}).strict()
+export type CourseTransferTask = z.infer<typeof courseTransferTaskSchema>
+
+export const courseExerciseSchema = z.object({
+  key: stableCourseKeySchema,
+  chapter_key: stableCourseKeySchema,
+  prompt: z.string().min(1).max(12_000),
+  concept_keys: z.array(stableCourseKeySchema).min(1).max(50),
+  exercise_type: z.enum([
+    'worked_source',
+    'source_practice',
+    'generated_core',
+    'generated_challenge',
+    'transfer',
+  ]),
+  answer_type: answerTypeSchema,
+  answer_format: courseAnswerFormatSchema,
+  snapshot_token: sha256Schema,
+  source_anchor_ids: z.array(z.string().min(1)).max(100),
+  source_number: z.string().min(1).max(100).nullable(),
+  source_section: z.string().min(1).max(300).nullable(),
+  difficulty: difficultyVectorSchema,
+  is_core: z.boolean(),
+  is_gating: z.boolean(),
+  is_source_level: z.boolean(),
+  transfer: courseTransferTaskSchema.nullable(),
+}).strict()
+export type CourseExercise = z.infer<typeof courseExerciseSchema>
+
+export interface GradeResult {
+  correct: boolean | null
+  advisory: boolean
+  grants_mastery: boolean
+  feedback_code: 'correct' | 'incorrect' | 'invalid_answer' | 'advisory'
+  part_results: GradeResult[]
+}
+
+export const gradeResultSchema: z.ZodType<GradeResult> = z.lazy(() => z.object({
+  correct: z.boolean().nullable(),
+  advisory: z.boolean(),
+  grants_mastery: z.boolean(),
+  feedback_code: z.enum(['correct', 'incorrect', 'invalid_answer', 'advisory']),
+  part_results: z.array(gradeResultSchema).max(20),
+}).strict().superRefine((value, context) => {
+  if (value.advisory) {
+    if (
+      value.correct !== null
+      || value.grants_mastery
+      || value.feedback_code !== 'advisory'
+      || value.part_results.length > 0
+    ) {
+      context.addIssue({ code: 'custom', message: 'Advisory result fields are inconsistent' })
+    }
+    return
+  }
+  if (value.correct === null || value.grants_mastery !== value.correct) {
+    context.addIssue({ code: 'custom', message: 'Objective result fields are inconsistent' })
+  }
+  if (value.feedback_code === 'advisory') {
+    context.addIssue({ code: 'custom', path: ['feedback_code'], message: 'Objective results cannot be advisory' })
+  }
+  if (value.correct === true && value.feedback_code !== 'correct') {
+    context.addIssue({ code: 'custom', path: ['feedback_code'], message: 'Feedback contradicts a correct result' })
+  }
+  if (
+    value.correct === false
+    && value.feedback_code !== 'incorrect'
+    && value.feedback_code !== 'invalid_answer'
+  ) {
+    context.addIssue({ code: 'custom', path: ['feedback_code'], message: 'Feedback contradicts an incorrect result' })
+  }
+  if (value.part_results.length > 0) {
+    const partsCorrect = value.part_results.every((part) => part.correct === true)
+    const partsInvalid = value.part_results.some((part) => part.feedback_code === 'invalid_answer')
+    const expectedFeedback = partsCorrect ? 'correct' : partsInvalid ? 'invalid_answer' : 'incorrect'
+    if (value.part_results.some((part) => part.advisory)) {
+      context.addIssue({ code: 'custom', path: ['part_results'], message: 'Objective parts cannot be advisory' })
+    }
+    if (value.correct !== partsCorrect || value.feedback_code !== expectedFeedback) {
+      context.addIssue({ code: 'custom', path: ['part_results'], message: 'Multipart result contradicts its parts' })
+    }
+  }
+}))
+
+export const courseExerciseGradeResponseSchema = z.object({
+  grade: gradeResultSchema,
+  mastery: conceptMasterySchema.nullable(),
+  event_key: stableCourseKeySchema.nullable(),
+  snapshot_token: sha256Schema,
+}).strict()
+export type CourseExerciseGradeResponse = z.infer<typeof courseExerciseGradeResponseSchema>
+
+export const courseExerciseHintResponseSchema = z.object({
+  snapshot_token: sha256Schema,
+  hint_index: z.number().int().min(1).max(4),
+  total_hints: z.number().int().min(1).max(4),
+  hint: z.string().min(1).max(2000),
+  event: learningEventSchema,
+  mastery: conceptMasterySchema.nullable(),
+}).strict()
+export type CourseExerciseHintResponse = z.infer<typeof courseExerciseHintResponseSchema>
+
+export const courseExerciseRevealResponseSchema = z.object({
+  snapshot_token: sha256Schema,
+  answer: z.unknown(),
+  transfer: courseTransferTaskSchema.nullable(),
+  events: z.array(learningEventSchema).min(1).max(2),
+  mastery: conceptMasterySchema.nullable(),
+}).strict()
+export type CourseExerciseRevealResponse = z.infer<typeof courseExerciseRevealResponseSchema>
+
+export const courseLearningEventResponseSchema = z.object({
+  event: learningEventSchema,
+  mastery: conceptMasterySchema.nullable(),
+}).strict()
+
+const activityEventBase = {
+  snapshot_token: sha256Schema,
+  idempotency_key: stableCourseKeySchema,
+  chapter_key: stableCourseKeySchema,
+}
+
+export const courseLearningEventRequestSchema = z.discriminatedUnion('kind', [
+  z.object({
+    ...activityEventBase,
+    kind: z.literal('chapter_opened'),
+    payload: positionPayloadSchema,
+  }).strict(),
+  z.object({
+    ...activityEventBase,
+    kind: z.literal('reading_position'),
+    payload: z.object({ block_key: stableCourseKeySchema }).strict(),
+  }).strict(),
+])
+export type CourseLearningEventRequest = z.input<typeof courseLearningEventRequestSchema>
+
+const boundedJsonAnswerSchema = z.unknown().superRefine((value, context) => {
+  try {
+    const encoded = JSON.stringify(value)
+    if (encoded === undefined || new TextEncoder().encode(encoded).length > 32_000) {
+      context.addIssue({ code: 'custom', message: 'Answer must be bounded JSON' })
+    }
+  } catch {
+    context.addIssue({ code: 'custom', message: 'Answer must be valid JSON' })
+  }
+})
+
+const exerciseActionBase = {
+  snapshot_token: sha256Schema,
+  chapter_key: stableCourseKeySchema,
+  concept_key: stableCourseKeySchema,
+  attempt_key: stableCourseKeySchema,
+}
+
+export const courseExerciseGradeRequestSchema = z.object({
+  ...exerciseActionBase,
+  answer: boundedJsonAnswerSchema,
+  hints_used: z.number().int().min(0).max(4),
+  answer_revealed: z.boolean(),
+  mode: z.enum(['practice', 'review']),
+}).strict()
+export type CourseExerciseGradeRequest = z.input<typeof courseExerciseGradeRequestSchema>
+
+export const courseExerciseHintRequestSchema = z.object({
+  ...exerciseActionBase,
+  idempotency_key: stableCourseKeySchema,
+  hint_index: z.number().int().min(1).max(4),
+}).strict()
+export type CourseExerciseHintRequest = z.input<typeof courseExerciseHintRequestSchema>
+
+export const courseExerciseRevealRequestSchema = z.object({
+  ...exerciseActionBase,
+  idempotency_key: stableCourseKeySchema,
+}).strict()
+export type CourseExerciseRevealRequest = z.input<typeof courseExerciseRevealRequestSchema>
+
+export const courseTransferGradeRequestSchema = z.object({
+  ...exerciseActionBase,
+  source_attempt_key: stableCourseKeySchema,
+  transfer_task_key: stableCourseKeySchema,
+  answer: boundedJsonAnswerSchema,
+}).strict()
+export type CourseTransferGradeRequest = z.input<typeof courseTransferGradeRequestSchema>
+
+const learnerChapterSectionSchema = z.object({
+  block_key: stableCourseKeySchema,
+  title: z.string().min(1).max(300),
+  markdown: z.string().min(1).max(100_000),
+  anchor_ids: z.array(z.string().min(1)).max(200),
+  provenance: provenanceSchema,
+}).strict()
+
+const learnerFormulaSchema = z.object({
+  key: stableCourseKeySchema,
+  latex: z.string().min(1).max(4000),
+  meaning: z.string().min(1).max(2000),
+  anchor_ids: z.array(z.string().min(1)).max(100),
+  unit_expression: z.string().max(500).nullable(),
+  provenance: provenanceSchema,
+}).strict()
+
+const learnerWorkedExampleSchema = z.object({
+  key: stableCourseKeySchema,
+  prompt: z.string().min(1).max(4000),
+  steps: z.array(z.string().min(1)).min(1).max(50),
+  answer: z.string().min(1).max(4000),
+  anchor_ids: z.array(z.string().min(1)).max(100),
+  unit_expression: z.string().max(500).nullable(),
+  provenance: provenanceSchema,
+}).strict()
+
+export const courseLearnerChapterArtifactSchema = z.object({
+  purpose: z.string().min(1).max(4000),
+  prerequisites: z.array(z.string()).max(100),
+  objectives: z.array(z.string().min(1)).min(1).max(100),
+  sections: z.array(learnerChapterSectionSchema).min(1).max(100),
+  definitions: z.array(z.string()).max(100),
+  formulas: z.array(learnerFormulaSchema).max(100),
+  worked_examples: z.array(learnerWorkedExampleSchema).max(100),
+  misconceptions: z.array(z.string()).max(100),
+  pitfalls: z.array(z.string()).max(100),
+  quick_reference: z.array(z.string()).max(100),
+  citations: z.array(z.string().min(1)).max(500),
+}).strict()
+export type CourseLearnerChapterArtifact = z.infer<typeof courseLearnerChapterArtifactSchema>
+
+export const courseLearnerChapterResponseSchema = z.object({
+  course_id: courseRecordId,
+  course_version_id: courseVersionRecordId,
+  chapter_key: stableCourseKeySchema,
+  chapter_no: z.number().int().positive(),
+  title: z.string().min(1),
+  status: z.literal('published'),
+  snapshot_token: sha256Schema,
+  artifact: courseLearnerChapterArtifactSchema,
+}).strict()
+export type CourseLearnerChapterResponse = z.infer<typeof courseLearnerChapterResponseSchema>
+
+const normalizedBboxSchema = z.tuple([
+  z.number().min(0).max(1),
+  z.number().min(0).max(1),
+  z.number().min(0).max(1),
+  z.number().min(0).max(1),
+])
+
+export const courseLearnerSourceSchema = z.object({
+  anchor_id: z.string().min(1).max(300),
+  filename: z.string().min(1).max(500),
+  kind: z.enum(['pdf_page', 'pptx_slide']),
+  index: z.number().int().positive(),
+  quote: z.string().min(1).max(4000),
+  source_role: sourceRoleSchema,
+  bbox: normalizedBboxSchema.nullable(),
+}).strict()
+export type CourseLearnerSource = z.infer<typeof courseLearnerSourceSchema>
+
+export const courseLearnerSourcesResponseSchema = z.object({
+  snapshot_token: sha256Schema,
+  sources: z.array(courseLearnerSourceSchema),
+}).strict()
+export type CourseLearnerSourcesResponse = z.infer<typeof courseLearnerSourcesResponseSchema>
+
+export const courseLearnerNoteSchema = z.object({
+  note_id: z.string().regex(/^course_note:[^:]+$/),
+  block_key: stableCourseKeySchema,
+  content: z.string().min(1).max(20_000),
+  orphan_status: z.enum(['active', 'orphaned']),
+  created: z.string().datetime({ offset: true }).nullable(),
+}).strict()
+export type CourseLearnerNote = z.infer<typeof courseLearnerNoteSchema>
+
+export const courseLearnerNotesResponseSchema = z.object({
+  snapshot_token: sha256Schema,
+  notes: z.array(courseLearnerNoteSchema),
+}).strict()
+export type CourseLearnerNotesResponse = z.infer<typeof courseLearnerNotesResponseSchema>
+
+export const courseLearnerNoteCreateRequestSchema = z.object({
+  snapshot_token: sha256Schema,
+  block_key: stableCourseKeySchema,
+  content: z.string().min(1).max(20_000),
+}).strict()
+export type CourseLearnerNoteCreateRequest = z.input<typeof courseLearnerNoteCreateRequestSchema>

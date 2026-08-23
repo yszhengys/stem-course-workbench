@@ -112,6 +112,7 @@ def _core(**updates: object) -> ExerciseBlueprint:
         "source_anchor_ids": ["anchor:linear"],
         "difficulty": _difficulty(),
         "grader": NumericGraderSpec(kind="numeric", expected="4"),
+        "hints": ("Identify.", "Represent.", "Solve.", "Check."),
         "is_core": True,
         "is_gating": True,
         "transfer_task": _transfer(),

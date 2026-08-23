@@ -1,14 +1,22 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Label } from '@/components/ui/label'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import { sampleLab, validateLabSpec } from '@/lib/course/safe-lab'
 
+function evenlySample<T>(items: T[], limit = 20): T[] {
+  if (items.length <= limit) return items
+  return Array.from({ length: limit }, (_, index) => items[
+    Math.round((index * (items.length - 1)) / (limit - 1))
+  ])
+}
+
 export function LabRenderer({ spec: rawSpec }: { spec: unknown }) {
   const { t } = useTranslation()
+  const instanceId = useId().replace(/[^a-zA-Z0-9_-]/g, '')
   const [controlValues, setControlValues] = useState<Record<string, number>>({})
   const result = useMemo(() => {
     try {
@@ -37,6 +45,25 @@ export function LabRenderer({ spec: rawSpec }: { spec: unknown }) {
   const yMax = Math.max(...yValues, 1)
   const toX = (value: number) => 20 + ((value - xMin) / Math.max(1e-9, xMax - xMin)) * 560
   const toY = (value: number) => 300 - ((value - yMin) / Math.max(1e-9, yMax - yMin)) * 280
+  const pointRows = [
+    ...result.sampled.paths.flatMap((path, pathIndex) => path.map((point, pointIndex) => ({
+      series: pathIndex + 1,
+      point: pointIndex + 1,
+      x: point.x,
+      y: point.y,
+    }))),
+    ...result.sampled.points.map((point, pointIndex) => ({
+      series: null,
+      point: pointIndex + 1,
+      x: point.x,
+      y: point.y,
+    })),
+  ]
+  const alternativePoints = evenlySample(pointRows)
+  const alternativeVectors = evenlySample(result.sampled.vectors)
+  const vectorField = result.spec.kind === 'vector_field'
+  const displayedSamples = vectorField ? alternativeVectors.length : alternativePoints.length
+  const alternativeId = `lab-alternative-${instanceId}-${result.spec.key}`
 
   return (
     <div className="space-y-4 rounded-md border p-4">
@@ -47,14 +74,16 @@ export function LabRenderer({ spec: rawSpec }: { spec: unknown }) {
 
       {result.spec.controls.map((control) => {
         const value = controlValues[control.key] ?? control.value
+        const controlId = `lab-control-${instanceId}-${result.spec.key}-${control.key}`
+          .replace(/[^a-zA-Z0-9_-]/g, '-')
         return (
           <div key={control.key} className="space-y-2">
             <div className="flex justify-between gap-3 text-sm">
-              <Label htmlFor={`lab-control-${control.key}`}>{control.label ?? control.key}</Label>
+              <Label htmlFor={controlId}>{control.label ?? control.key}</Label>
               <span className="font-mono">{value}</span>
             </div>
             <input
-              id={`lab-control-${control.key}`}
+              id={controlId}
               type="range"
               min={control.min}
               max={control.max}
@@ -75,6 +104,7 @@ export function LabRenderer({ spec: rawSpec }: { spec: unknown }) {
         viewBox="0 0 600 320"
         role="img"
         aria-label={result.spec.title}
+        aria-describedby={alternativeId}
         className="w-full rounded-md bg-card"
       >
         <line x1="20" y1={toY(0)} x2="580" y2={toY(0)} stroke="currentColor" opacity="0.2" />
@@ -94,6 +124,77 @@ export function LabRenderer({ spec: rawSpec }: { spec: unknown }) {
           <circle key={index} cx={toX(point.x)} cy={toY(point.y)} r="4" fill="var(--fern)" />
         ))}
       </svg>
+
+      <div id={alternativeId} className="space-y-3 rounded-md border bg-muted/20 p-3">
+        <p className="text-sm font-medium">{t('course.labTextAlternative')}</p>
+        <p className="text-xs text-muted-foreground">
+          {t('course.labSampleSummary', {
+            paths: result.sampled.paths.length,
+            displayed: displayedSamples,
+            total: result.sampled.totalSamples,
+          })}
+        </p>
+        <div
+          className="max-h-64 overflow-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          role="region"
+          aria-label={t('course.labScrollableData')}
+          tabIndex={0}
+        >
+          <table
+            aria-label={t('course.labDataAlternative')}
+            className="w-full border-collapse text-left text-xs"
+          >
+            <caption className="sr-only">{t('course.labDataAlternative')}</caption>
+            <thead>
+              {vectorField ? (
+                <tr className="border-b">
+                  <th scope="col" className="p-2">{t('course.labVectorIndex')}</th>
+                  <th scope="col" className="p-2">{t('course.labCoordinateX')}</th>
+                  <th scope="col" className="p-2">{t('course.labCoordinateY')}</th>
+                  <th scope="col" className="p-2">{t('course.labVectorU')}</th>
+                  <th scope="col" className="p-2">{t('course.labVectorV')}</th>
+                </tr>
+              ) : (
+                <tr className="border-b">
+                  <th scope="col" className="p-2">{t('course.labSeries')}</th>
+                  <th scope="col" className="p-2">{t('course.labPointIndex')}</th>
+                  <th scope="col" className="p-2">{t('course.labCoordinateX')}</th>
+                  <th scope="col" className="p-2">{t('course.labCoordinateY')}</th>
+                </tr>
+              )}
+            </thead>
+            <tbody>
+              {vectorField ? alternativeVectors.map((vector, index) => (
+                <tr key={`${index}:${vector.x}:${vector.y}`} className="border-b last:border-0">
+                  <th scope="row" className="p-2 font-medium">{index + 1}</th>
+                  <td className="p-2 font-mono">{vector.x.toPrecision(6)}</td>
+                  <td className="p-2 font-mono">{vector.y.toPrecision(6)}</td>
+                  <td className="p-2 font-mono">{vector.u.toPrecision(6)}</td>
+                  <td className="p-2 font-mono">{vector.v.toPrecision(6)}</td>
+                </tr>
+              )) : alternativePoints.map((point) => (
+                <tr
+                  key={`${point.series ?? 'point'}:${point.point}:${point.x}:${point.y}`}
+                  className="border-b last:border-0"
+                >
+                  <th
+                    scope="row"
+                    className="p-2 font-medium"
+                    data-testid={point.series === null
+                      ? `lab-standalone-${point.point}`
+                      : `lab-series-${point.series}-${point.point}`}
+                  >
+                    {point.series ?? t('course.labStandalonePoint')}
+                  </th>
+                  <td className="p-2 font-mono">{point.point}</td>
+                  <td className="p-2 font-mono">{point.x.toPrecision(6)}</td>
+                  <td className="p-2 font-mono">{point.y.toPrecision(6)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   )
 }

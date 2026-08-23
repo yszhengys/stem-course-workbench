@@ -55,6 +55,7 @@ def _core(*, anchor_id: str = "anchor:source", steps: int = 4) -> ExerciseBluepr
         source_anchor_ids=[anchor_id],
         difficulty=_difficulty(steps),
         grader=NumericGraderSpec(kind="numeric", expected="4"),
+        hints=("Identify.", "Represent.", "Solve.", "Check."),
         is_core=True,
         is_gating=True,
         transfer_task=_transfer(),

@@ -92,6 +92,12 @@ def _core(
         source_anchor_ids=[anchor_id],
         difficulty=_difficulty(reasoning_steps=reasoning_steps),
         grader=NumericGraderSpec(kind="numeric", expected="4"),
+        hints=(
+            "Identify the invariant relationship.",
+            "Represent the relationship with an equation.",
+            "Apply one inverse operation at a time.",
+            "Check the result by substitution.",
+        ),
         is_core=True,
         is_gating=True,
         transfer_task=_transfer(
@@ -175,6 +181,16 @@ def test_core_exercise_requires_source_anchor_and_textbook_baseline() -> None:
         "missing_source_anchor",
         "missing_difficulty_baseline",
     }
+
+
+def test_core_exercise_requires_exactly_four_authored_hint_layers() -> None:
+    core = _core("anchor:source").model_copy(
+        update={"hints": ("Identify the invariant.", "Choose a representation.")}
+    )
+
+    findings = AssessmentService.validate_bank([core])
+
+    assert "invalid_core_hint_layers" in _codes(findings)
 
 
 def test_core_must_dominate_confirmed_textbook_baseline() -> None:
