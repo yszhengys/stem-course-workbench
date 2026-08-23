@@ -186,6 +186,20 @@ class TestTokenUtilities:
             assert isinstance(count, int)
             assert count > 0
 
+    def test_token_count_fallback_scales_for_cjk_without_spaces(self):
+        """Offline estimation must grow for scripts without word separators."""
+        from unittest.mock import patch
+
+        with patch(
+            "tiktoken.get_encoding",
+            side_effect=ImportError("tiktoken not available"),
+        ):
+            short = token_count("中文内容")
+            long = token_count("中文内容" * 100)
+
+        assert short > 0
+        assert long > short
+
 
 # ============================================================================
 # TEST SUITE 3: Version Utilities
