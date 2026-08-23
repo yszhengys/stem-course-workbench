@@ -52,15 +52,19 @@
   <a href="https://zdoc.app/zh/lfnovo/open-notebook">中文</a>
 </div>
 
-## STEM Course Workbench（本分支）
+## STEM Course Workbench V2（本分支）
 
-本仓库在 Open Notebook 之上增加了本地优先、证据可追溯的数学/物理课程工作流。Apple Silicon Mac 上可用一条命令启动，并直接进入新建课程页面：
+本仓库在 Open Notebook 之上增加了本地优先、证据可追溯的数学/物理课程工作流。V2 将课程分成两个清晰入口：Build 用于取证、生成、结构化编辑、审查和发布；Learn 用于教材阅读、确定性评分练习、掌握度、间隔复习、笔记、安全实验和带引用的章节导师。
+
+Apple Silicon Mac 上可用一条命令启动，并直接进入新建课程页面：
 
 ```bash
 ./scripts/course-workbench.sh
 ```
 
-开始使用：[STEM Course Workbench 中文使用说明](docs/0-START-HERE/course-workbench-user-guide.zh-CN.md) · [架构与维护说明](docs/course-workbench.md) · [上游 Open Notebook 文档](docs/index.md)
+课程列表中的“制作模式”和“学习模式”分别进入两个工作区。课程可手动导出为经过完整性校验的 `.stemcourse` 文件，并以全新 ID 导入，不会覆盖已有课程。
+
+开始使用：[STEM Course Workbench V2 中文使用说明](docs/0-START-HERE/course-workbench-user-guide.zh-CN.md) · [架构与维护说明](docs/course-workbench.md) · [上游 Open Notebook 文档](docs/index.md)
 
 ## A private, multi-model, 100% local, full-featured alternative to Notebook LM
 
