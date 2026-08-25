@@ -1377,9 +1377,11 @@ class CourseJobResponse(BaseModel):
     run_id: str
     status: str
 
-class CourseCreate(BaseModel):
+class CourseCreate(StrictCourseRequest):
     title: str = Field(..., min_length=1, description="Course title")
-    subject: Optional[str] = Field(None, description="Subject area")
+    subject: Optional[Literal["math", "physics"]] = Field(
+        None, description="Open Course subject"
+    )
     description: Optional[str] = Field(None, description="Course description")
     language: str = Field("zh-CN", min_length=2, max_length=20)
     notebook_id: Optional[str] = Field(
@@ -1390,9 +1392,11 @@ class CourseCreate(BaseModel):
     )
 
 
-class CourseUpdate(BaseModel):
+class CourseUpdate(StrictCourseRequest):
     title: Optional[str] = Field(None, min_length=1, description="Course title")
-    subject: Optional[str] = Field(None, description="Subject area")
+    subject: Optional[Literal["math", "physics"]] = Field(
+        None, description="Open Course subject"
+    )
     description: Optional[str] = Field(None, description="Course description")
     language: Optional[str] = Field(None, min_length=2, max_length=20)
     config: Optional[Dict[str, Any]] = Field(
