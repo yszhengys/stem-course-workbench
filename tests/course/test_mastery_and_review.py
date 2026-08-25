@@ -33,7 +33,11 @@ def _difficulty() -> DifficultyVector:
 
 
 def _blueprint(
-    key: str, *, core: bool = False, source_level: bool = False
+    key: str,
+    *,
+    core: bool = False,
+    source_level: bool = False,
+    hints: tuple[str, ...] = (),
 ) -> ExerciseBlueprint:
     transfer = (
         TransferTaskSpec(
@@ -56,6 +60,7 @@ def _blueprint(
         concept_keys=["linear-equations"],
         exercise_type="generated_core" if core else "source_practice",
         answer_type="numeric",
+        hints=hints,
         source_anchor_ids=["anchor:linear"],
         source_number="3.1" if source_level else None,
         difficulty=_difficulty(),
@@ -297,6 +302,58 @@ def test_four_hints_cap_mastery_and_attempt_summary_cannot_be_spoofed() -> None:
     )
     with pytest.raises(ValueError, match="summary"):
         _reduce([*events[:-1], spoofed], now=START + timedelta(minutes=2))
+
+
+def test_using_every_authored_hint_caps_mastery_when_fewer_than_four_exist() -> None:
+    exercises = {
+        "linear-core": _blueprint(
+            "linear-core",
+            core=True,
+            hints=("Isolate the variable.", "Check the sign."),
+        ),
+        "linear-source": _blueprint(
+            "linear-source",
+            source_level=True,
+            hints=("Collect like terms.", "Substitute to verify."),
+        ),
+    }
+    events: list[LearningEvent] = []
+    for offset, exercise_key in enumerate(exercises):
+        attempt = f"attempt-all-hints-{offset}"
+        base = START + timedelta(minutes=offset)
+        events.extend(
+            [
+                _hint(
+                    f"hint-{offset}-1",
+                    exercise_key,
+                    attempt,
+                    1,
+                    at=base + timedelta(seconds=1),
+                ),
+                _hint(
+                    f"hint-{offset}-2",
+                    exercise_key,
+                    attempt,
+                    2,
+                    at=base + timedelta(seconds=2),
+                ),
+                _graded(
+                    f"grade-all-hints-{offset}",
+                    exercise_key,
+                    attempt=attempt,
+                    hints=2,
+                    at=base + timedelta(seconds=3),
+                ),
+            ]
+        )
+
+    mastery = LearningService.reduce_events(
+        events,
+        exercises=exercises,
+        now=START + timedelta(minutes=2),
+    )
+
+    assert mastery.status == "practiced"
 
 
 def test_catalog_flags_are_not_client_controlled() -> None:
@@ -811,9 +868,19 @@ def test_revealed_review_is_recorded_while_its_transfer_is_pending() -> None:
     assert pending.status == "practiced"
     assert pending.review_level == 0
     assert pending.review_due_at == first_due
+    assert [item.model_dump(mode="json") for item in pending.pending_transfers] == [
+        {
+            "chapter_key": "linear",
+            "concept_key": "linear-equations",
+            "exercise_key": "linear-core",
+            "source_attempt_key": attempt,
+            "transfer_task_key": "linear-transfer",
+        }
+    ]
     assert completed.status == "review_due"
     assert completed.review_level == 0
     assert completed.review_due_at == first_due
+    assert completed.pending_transfers == ()
 
 
 @pytest.mark.asyncio

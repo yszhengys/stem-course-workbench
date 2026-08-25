@@ -38,6 +38,12 @@ DEFINE FIELD IF NOT EXISTS concept_key ON TABLE course_concept_mastery TYPE stri
 DEFINE FIELD IF NOT EXISTS status ON TABLE course_concept_mastery TYPE string DEFAULT 'not_started';
 DEFINE FIELD IF NOT EXISTS successful_exercise_keys ON TABLE course_concept_mastery TYPE array<string> DEFAULT [];
 DEFINE FIELD IF NOT EXISTS unrevealed_success_count ON TABLE course_concept_mastery TYPE int DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS pending_transfers ON TABLE course_concept_mastery TYPE array<object> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS pending_transfers.*.chapter_key ON TABLE course_concept_mastery TYPE string;
+DEFINE FIELD IF NOT EXISTS pending_transfers.*.concept_key ON TABLE course_concept_mastery TYPE string;
+DEFINE FIELD IF NOT EXISTS pending_transfers.*.exercise_key ON TABLE course_concept_mastery TYPE string;
+DEFINE FIELD IF NOT EXISTS pending_transfers.*.source_attempt_key ON TABLE course_concept_mastery TYPE string;
+DEFINE FIELD IF NOT EXISTS pending_transfers.*.transfer_task_key ON TABLE course_concept_mastery TYPE string;
 DEFINE FIELD IF NOT EXISTS review_level ON TABLE course_concept_mastery TYPE int DEFAULT 0;
 DEFINE FIELD IF NOT EXISTS review_due_at ON TABLE course_concept_mastery TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS last_event_at ON TABLE course_concept_mastery TYPE option<datetime>;
@@ -55,11 +61,32 @@ DEFINE FIELD IF NOT EXISTS status ON TABLE course_tutor_session TYPE string DEFA
 DEFINE FIELD IF NOT EXISTS created ON course_tutor_session DEFAULT time::now() VALUE $before OR time::now();
 DEFINE FIELD IF NOT EXISTS updated ON course_tutor_session DEFAULT time::now() VALUE time::now();
 
+DEFINE TABLE IF NOT EXISTS course_tutor_operation SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_tutor_operation TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_tutor_operation TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS session ON TABLE course_tutor_operation TYPE record<course_tutor_session>;
+DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_tutor_operation TYPE string;
+DEFINE FIELD IF NOT EXISTS operation_identity ON TABLE course_tutor_operation TYPE string;
+DEFINE FIELD IF NOT EXISTS operation_key ON TABLE course_tutor_operation TYPE string;
+DEFINE FIELD IF NOT EXISTS request_fingerprint ON TABLE course_tutor_operation TYPE string;
+DEFINE FIELD IF NOT EXISTS created ON course_tutor_operation DEFAULT time::now() VALUE $before OR time::now();
+
+-- Transient execution leases prevent duplicate model calls for concurrent retries.
+DEFINE TABLE IF NOT EXISTS course_tutor_operation_lease SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_tutor_operation_lease TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_tutor_operation_lease TYPE record<course_version>;
+DEFINE FIELD IF NOT EXISTS session ON TABLE course_tutor_operation_lease TYPE record<course_tutor_session>;
+DEFINE FIELD IF NOT EXISTS operation ON TABLE course_tutor_operation_lease TYPE record<course_tutor_operation>;
+DEFINE FIELD IF NOT EXISTS lease_token ON TABLE course_tutor_operation_lease TYPE string;
+DEFINE FIELD IF NOT EXISTS expires_at ON TABLE course_tutor_operation_lease TYPE datetime;
+DEFINE FIELD IF NOT EXISTS created ON course_tutor_operation_lease DEFAULT time::now() VALUE $before OR time::now();
+
 DEFINE TABLE IF NOT EXISTS course_tutor_turn SCHEMAFULL;
 DEFINE FIELD IF NOT EXISTS course ON TABLE course_tutor_turn TYPE record<course>;
 DEFINE FIELD IF NOT EXISTS course_version ON TABLE course_tutor_turn TYPE record<course_version>;
 DEFINE FIELD IF NOT EXISTS session ON TABLE course_tutor_turn TYPE record<course_tutor_session>;
 DEFINE FIELD IF NOT EXISTS chapter_key ON TABLE course_tutor_turn TYPE string;
+DEFINE FIELD IF NOT EXISTS operation_key ON TABLE course_tutor_turn TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS turn_no ON TABLE course_tutor_turn TYPE int;
 DEFINE FIELD IF NOT EXISTS role ON TABLE course_tutor_turn TYPE string;
 DEFINE FIELD IF NOT EXISTS content ON TABLE course_tutor_turn TYPE string;
@@ -94,6 +121,8 @@ DEFINE FIELD IF NOT EXISTS updated ON course_export DEFAULT time::now() VALUE ti
 DEFINE INDEX IF NOT EXISTS course_exercise_identity_unique ON TABLE course_exercise FIELDS course_version, chapter_key, exercise_key UNIQUE;
 DEFINE INDEX IF NOT EXISTS course_learning_event_identity_unique ON TABLE course_learning_event FIELDS course, event_key UNIQUE;
 DEFINE INDEX IF NOT EXISTS course_mastery_identity_unique ON TABLE course_concept_mastery FIELDS course, course_version, chapter_key, concept_key UNIQUE;
+DEFINE INDEX IF NOT EXISTS course_tutor_operation_identity_unique ON TABLE course_tutor_operation FIELDS session, operation_identity UNIQUE;
+DEFINE INDEX IF NOT EXISTS course_tutor_operation_lease_operation_unique ON TABLE course_tutor_operation_lease FIELDS operation UNIQUE;
 DEFINE INDEX IF NOT EXISTS course_tutor_turn_identity_unique ON TABLE course_tutor_turn FIELDS session, turn_no UNIQUE;
 DEFINE INDEX IF NOT EXISTS course_draft_revision_identity_unique ON TABLE course_draft_revision FIELDS chapter, revision_no UNIQUE;
 
@@ -105,6 +134,12 @@ DEFINE INDEX IF NOT EXISTS course_concept_mastery_course_idx ON TABLE course_con
 DEFINE INDEX IF NOT EXISTS course_concept_mastery_version_idx ON TABLE course_concept_mastery FIELDS course_version;
 DEFINE INDEX IF NOT EXISTS course_tutor_session_course_idx ON TABLE course_tutor_session FIELDS course;
 DEFINE INDEX IF NOT EXISTS course_tutor_session_version_idx ON TABLE course_tutor_session FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS course_tutor_operation_course_idx ON TABLE course_tutor_operation FIELDS course;
+DEFINE INDEX IF NOT EXISTS course_tutor_operation_version_idx ON TABLE course_tutor_operation FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS course_tutor_operation_session_idx ON TABLE course_tutor_operation FIELDS session;
+DEFINE INDEX IF NOT EXISTS course_tutor_operation_lease_course_idx ON TABLE course_tutor_operation_lease FIELDS course;
+DEFINE INDEX IF NOT EXISTS course_tutor_operation_lease_version_idx ON TABLE course_tutor_operation_lease FIELDS course_version;
+DEFINE INDEX IF NOT EXISTS course_tutor_operation_lease_session_idx ON TABLE course_tutor_operation_lease FIELDS session;
 DEFINE INDEX IF NOT EXISTS course_tutor_turn_course_idx ON TABLE course_tutor_turn FIELDS course;
 DEFINE INDEX IF NOT EXISTS course_tutor_turn_version_idx ON TABLE course_tutor_turn FIELDS course_version;
 DEFINE INDEX IF NOT EXISTS course_draft_revision_course_idx ON TABLE course_draft_revision FIELDS course;
@@ -123,6 +158,8 @@ DEFINE EVENT OVERWRITE course_delete ON TABLE course WHEN ($after == NONE) THEN 
     delete course_exercise where course == $before.id;
     delete course_learning_event where course == $before.id;
     delete course_concept_mastery where course == $before.id;
+    delete course_tutor_operation_lease where course == $before.id;
+    delete course_tutor_operation where course == $before.id;
     delete course_tutor_turn where course == $before.id;
     delete course_tutor_session where course == $before.id;
     delete course_draft_revision where course == $before.id;
@@ -135,11 +172,19 @@ DEFINE EVENT OVERWRITE course_version_delete ON TABLE course_version WHEN ($afte
     delete course_exercise where course_version == $before.id;
     delete course_learning_event where course_version == $before.id;
     delete course_concept_mastery where course_version == $before.id;
+    delete course_tutor_operation_lease where course_version == $before.id;
+    delete course_tutor_operation where course_version == $before.id;
     delete course_tutor_turn where course_version == $before.id;
     delete course_tutor_session where course_version == $before.id;
     delete course_draft_revision where course_version == $before.id;
 };
 
+DEFINE EVENT OVERWRITE lab_delete ON TABLE lab WHEN ($after == NONE) THEN {
+    delete attempt where lab == $before.id;
+};
+
 DEFINE EVENT OVERWRITE course_tutor_session_delete ON TABLE course_tutor_session WHEN ($after == NONE) THEN {
+    delete course_tutor_operation_lease where session == $before.id;
+    delete course_tutor_operation where session == $before.id;
     delete course_tutor_turn where session == $before.id;
 };

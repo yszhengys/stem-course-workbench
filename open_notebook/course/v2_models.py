@@ -21,6 +21,7 @@ from .v2_contracts import (
     LearningEventKind,
     LearningEventPayload,
     MasteryStatus,
+    PendingTransfer,
     Sha256,
     StableKey,
     TutorResponse,
@@ -157,6 +158,9 @@ class CourseConceptMastery(CourseRecord):
         default_factory=tuple, max_length=200
     )
     unrevealed_success_count: int = Field(default=0, ge=0, le=200)
+    pending_transfers: tuple[PendingTransfer, ...] = Field(
+        default_factory=tuple, max_length=200
+    )
     review_level: int = Field(default=0, ge=0, le=5)
     review_due_at: datetime | None = None
     last_event_at: datetime | None = None
@@ -170,6 +174,9 @@ class CourseConceptMastery(CourseRecord):
     def _prepare_save_data(self) -> dict[str, Any]:
         data = _record_fields(super()._prepare_save_data(), "course", "course_version")
         data["successful_exercise_keys"] = list(self.successful_exercise_keys)
+        data["pending_transfers"] = [
+            item.model_dump(mode="json") for item in self.pending_transfers
+        ]
         return data
 
 
@@ -196,13 +203,47 @@ class CourseTutorSession(CourseRecord):
         return data
 
 
-class CourseTutorTurn(AppendOnlyCourseRecord):
-    table_name: ClassVar[str] = "course_tutor_turn"
+class CourseTutorOperation(AppendOnlyCourseRecord):
+    """Immutable reservation binding one message identity to one request."""
+
+    table_name: ClassVar[str] = "course_tutor_operation"
 
     course: str
     course_version: str
     session: str
     chapter_key: StableKey
+    operation_identity: StableKey
+    operation_key: StableKey
+    request_fingerprint: Sha256
+
+    @field_validator("course", "course_version", "session", mode="before")
+    @classmethod
+    def records_as_strings(cls, value: Any) -> Any:
+        return _string_id(value)
+
+    @model_validator(mode="after")
+    def operation_key_matches_fingerprint(self) -> "CourseTutorOperation":
+        if self.operation_key != (
+            f"{self.operation_identity}-{self.request_fingerprint[:32]}"
+        ):
+            raise ValueError("Tutor operation key must match its request fingerprint")
+        return self
+
+    def _prepare_save_data(self) -> dict[str, Any]:
+        return _record_fields(
+            super()._prepare_save_data(), "course", "course_version", "session"
+        )
+
+
+class CourseTutorTurn(AppendOnlyCourseRecord):
+    table_name: ClassVar[str] = "course_tutor_turn"
+    nullable_fields: ClassVar[set[str]] = {"operation_key"}
+
+    course: str
+    course_version: str
+    session: str
+    chapter_key: StableKey
+    operation_key: StableKey | None = None
     turn_no: int = Field(ge=1)
     role: Literal["user", "assistant"]
     content: str
@@ -316,5 +357,6 @@ __all__ = [
     "CourseImmutableRecordError",
     "CourseLearningEvent",
     "CourseTutorSession",
+    "CourseTutorOperation",
     "CourseTutorTurn",
 ]

@@ -21,7 +21,7 @@ PDF/PPTX Source
 - Docker 只运行 SurrealDB（`127.0.0.1:8000`）。
 - API（`5055`）、worker 和 Next.js（`3000`）运行在宿主机。
 - Course 重型本地任务使用领域级互斥锁；上游 worker 默认并发保持 5。
-- 已落地的 migration 24/25 保持不可变；教材学习闭环的增量结构位于 migration 26。migration 26 只新增表/字段并扩展级联，支持 25→26→25 往返，不覆盖 V1 记录。
+- 已落地的 migration 24/25 保持不可变；教材学习闭环的增量结构位于 migration 26。migration 26 只新增表/字段并扩展级联，支持 25→26→25 往返，不覆盖 V1 记录；导师请求先写入不可变的 `course_tutor_operation` 预约，再通过有时限的执行租约产生学习事件或调用模型，避免并发重试重复计费。
 
 ## 代码边界
 
@@ -74,7 +74,7 @@ Course facade 返回 HTTP 202 和 command/run ID。相同 canonical 输入且已
 | `AuthoringService` | 接收判别联合的单个结构化操作；修订令牌冲突返回 409，改动后局部检查失效。 |
 | `AssessmentService` | 校验来源/核心/挑战/深迁移题库、难度向量和 grader；表面改写或不确定迁移题标为人工检查。 |
 | `LearningService` | 追加幂等学习事件，确定性评分、归约掌握度和复习队列；旧 snapshot fail closed。 |
-| `TutorService` | 当前发布章节内的引用式解释、诊断与分层提示；无证据、越界、旧版本或答案泄漏即拒绝。 |
+| `TutorService` | 当前发布章节内的证据摘录式解释、绑定真实作答的确定性诊断与已发布分层提示；完整请求指纹保证幂等重放，无证据、越界、旧版本或答案泄漏即拒绝。 |
 | `PortabilityService` | 生成/验证 `.stemcourse`，过滤本机状态，并以新 ID 单事务导入。 |
 
 ### 学习规则

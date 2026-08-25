@@ -839,6 +839,13 @@ export const conceptMasterySchema = z.object({
   status: masteryStatusSchema,
   successful_exercise_keys: z.array(stableCourseKeySchema).max(200),
   unrevealed_success_count: z.number().int().min(0).max(200),
+  pending_transfers: z.array(z.object({
+    chapter_key: stableCourseKeySchema,
+    concept_key: stableCourseKeySchema,
+    exercise_key: stableCourseKeySchema,
+    source_attempt_key: stableCourseKeySchema,
+    transfer_task_key: stableCourseKeySchema,
+  }).strict()).max(200).default([]),
   review_level: z.number().int().min(0).max(5),
   review_due_at: z.string().datetime({ offset: true }).nullable(),
   last_event_at: z.string().datetime({ offset: true }).nullable(),
@@ -1208,25 +1215,26 @@ export type CourseTutorSession = z.infer<typeof courseTutorSessionSchema>
 
 export const courseTutorMessageRequestSchema = z.object({
   snapshot_token: sha256Schema,
+  idempotency_key: stableCourseKeySchema,
   content: z.string().min(1).max(20_000),
   intent: z.enum(['explain', 'diagnose', 'hint', 'reveal']),
   exercise_key: stableCourseKeySchema.optional(),
   concept_key: stableCourseKeySchema.optional(),
   attempt_key: stableCourseKeySchema.optional(),
 }).strict().superRefine((value, context) => {
-  const revealValues = [value.exercise_key, value.concept_key, value.attempt_key]
-  if (value.intent === 'reveal' && revealValues.some((item) => item === undefined)) {
+  const scopedValues = [value.exercise_key, value.concept_key, value.attempt_key]
+  if (value.intent !== 'explain' && scopedValues.some((item) => item === undefined)) {
     context.addIssue({
       code: 'custom',
       path: ['intent'],
-      message: 'Reveal requires exercise, concept, and attempt keys',
+      message: 'Diagnose, hint, and reveal require exercise, concept, and attempt keys',
     })
   }
-  if (value.intent !== 'reveal' && revealValues.some((item) => item !== undefined)) {
+  if (value.intent === 'explain' && scopedValues.some((item) => item !== undefined)) {
     context.addIssue({
       code: 'custom',
       path: ['intent'],
-      message: 'Exercise scope is accepted only for reveal',
+      message: 'Exercise scope is not accepted for explain',
     })
   }
 })
@@ -1352,25 +1360,27 @@ export const exerciseBlueprintSchema = z.object({
 })
 export type ExerciseBlueprint = z.infer<typeof exerciseBlueprintSchema>
 
+const draftTargetKeySchema = z.string().min(1).max(300)
+
 export const draftOperationSchema = z.discriminatedUnion('kind', [
   z.object({
-    kind: z.literal('replace_text'), block_key: stableCourseKeySchema,
+    kind: z.literal('replace_text'), block_key: draftTargetKeySchema,
     text: z.string().min(1).max(20_000), anchor_ids: z.array(z.string().min(1)).max(100),
   }).strict(),
   z.object({
-    kind: z.literal('replace_formula'), block_key: stableCourseKeySchema,
+    kind: z.literal('replace_formula'), block_key: draftTargetKeySchema,
     latex: z.string().min(1).max(4000), anchor_ids: z.array(z.string().min(1)).max(100),
   }).strict(),
   z.object({
-    kind: z.literal('replace_exercise'), block_key: stableCourseKeySchema,
+    kind: z.literal('replace_exercise'), block_key: draftTargetKeySchema,
     exercise: exerciseBlueprintSchema,
   }).strict(),
   z.object({
-    kind: z.literal('replace_transfer'), block_key: stableCourseKeySchema,
+    kind: z.literal('replace_transfer'), block_key: draftTargetKeySchema,
     transfer_task: transferTaskSpecSchema,
   }).strict(),
   z.object({
-    kind: z.literal('replace_lab'), block_key: stableCourseKeySchema,
+    kind: z.literal('replace_lab'), block_key: draftTargetKeySchema,
     lab_spec: labSpecSchema,
   }).strict(),
 ])

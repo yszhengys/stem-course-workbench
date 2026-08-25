@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useEffect, useState } from 'react'
-import '@/lib/i18n'
+import i18n from '@/lib/i18n'
 import { LanguageLoadingOverlay } from '@/components/common/LanguageLoadingOverlay'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 
@@ -18,6 +18,18 @@ export function I18nProvider({
 
   useEffect(() => {
     setMounted(true)
+  }, [])
+
+  useEffect(() => {
+    const updateDocumentLanguage = (language: string) => {
+      document.documentElement.lang = language || 'en-US'
+    }
+
+    updateDocumentLanguage(i18n.resolvedLanguage ?? i18n.language)
+    i18n.on('languageChanged', updateDocumentLanguage)
+    return () => {
+      i18n.off('languageChanged', updateDocumentLanguage)
+    }
   }, [])
 
   // Avoid hydration mismatch while preserving a visible first paint.

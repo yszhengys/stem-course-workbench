@@ -315,6 +315,7 @@ export const courseApi = {
     const parsed = courseTutorMessageRequestSchema.parse(request)
     const payload: CourseTutorMessageRequest = {
       snapshot_token: parsed.snapshot_token,
+      idempotency_key: parsed.idempotency_key,
       content: parsed.content,
       intent: parsed.intent,
     }

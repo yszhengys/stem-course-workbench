@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -377,6 +378,14 @@ async def _current_chapter_labs(
 
 
 class CourseService:
+    @staticmethod
+    def chapter_artifact_anchor_ids(
+        artifact: ChapterArtifact,
+    ) -> tuple[str, ...]:
+        """Return every evidence-bearing chapter anchor in stable order."""
+
+        return tuple(_chapter_artifact_anchor_ids(artifact))
+
     @staticmethod
     async def get_model_options() -> dict[str, Any]:
         """Return explicit Course-only selections without changing global defaults."""
@@ -781,6 +790,7 @@ class CourseService:
                 status=record.status,
                 successful_exercise_keys=record.successful_exercise_keys,
                 unrevealed_success_count=record.unrevealed_success_count,
+                pending_transfers=record.pending_transfers,
                 review_level=record.review_level,
                 review_due_at=record.review_due_at,
                 last_event_at=record.last_event_at,
@@ -872,45 +882,102 @@ class CourseService:
     ]:
         """Resolve a current Course anchor to its unchanged, server-owned original."""
 
+        resolved = await CourseService._owned_evidence_assets(
+            course_id, (anchor_id,)
+        )
+        return resolved[0]
+
+    @staticmethod
+    async def _owned_evidence_assets(
+        course_id: str,
+        anchor_ids: tuple[str, ...],
+    ) -> tuple[
+        tuple[
+            CourseEvidenceAnchor,
+            EvidenceService,
+            EvidenceSourceAsset,
+            str,
+        ],
+        ...,
+    ]:
+        """Resolve anchors in bulk and inspect each unique source file once."""
+
+        if len(anchor_ids) != len(set(anchor_ids)):
+            raise CourseConflictError("Course evidence anchor identity is ambiguous")
         course = await CourseService.get_course(course_id)
+        if not anchor_ids:
+            return ()
         rows = await repo_query(
             """
             SELECT * FROM course_evidence_anchor
             WHERE course = $course
-              AND anchor_id = $anchor_id
+              AND anchor_id IN $anchor_ids
               AND is_current = true;
             """,
             {
                 "course": ensure_record_id(course_id),
-                "anchor_id": anchor_id,
+                "anchor_ids": list(anchor_ids),
             },
         )
-        if len(rows) != 1:
+        anchors = tuple(
+            CourseEvidenceAnchor(**row)
+            for row in rows
+            if isinstance(row, dict)
+        )
+        by_id = {anchor.anchor_id: anchor for anchor in anchors}
+        if len(anchors) != len(anchor_ids) or set(by_id) != set(anchor_ids):
             raise NotFoundError("Course evidence anchor not found")
-        anchor = CourseEvidenceAnchor(**rows[0])
-        if anchor.course != course_id or anchor.source not in course.source_ids:
+        if any(
+            anchor.course != course_id or anchor.source not in course.source_ids
+            for anchor in anchors
+        ):
             raise NotFoundError("Course evidence anchor not found")
-        source = await _typed_get(Source, anchor.source, "source")
-        file_path = source.asset.file_path if source.asset else None
-        if not file_path:
-            raise NotFoundError("Course evidence source not found")
+
         evidence = EvidenceService()
-        path, kind = evidence.validate_local_source_file(file_path)
-        source_hash = evidence.sha256_file(path)
-        evidence.validate_anchor_integrity(
-            anchor,
-            course_id=course_id,
-            source_hash=source_hash,
+        source_ids = tuple(sorted({anchor.source for anchor in anchors}))
+        sources = await asyncio.gather(
+            *(_typed_get(Source, source_id, "source") for source_id in source_ids)
         )
-        expected_kind = "pdf_page" if kind == "pdf" else "pptx_slide"
-        if anchor.locator.kind != expected_kind:
-            raise EvidenceInputError("Evidence anchor source kind does not match.")
-        return (
-            anchor,
-            evidence,
-            EvidenceSourceAsset(path=path, filename=path.name, kind=kind),
-            source_hash,
+
+        def inspect_source(source: Source) -> tuple[EvidenceSourceAsset, str]:
+            file_path = source.asset.file_path if source.asset else None
+            if not file_path:
+                raise NotFoundError("Course evidence source not found")
+            path, kind = evidence.validate_local_source_file(file_path)
+            return (
+                EvidenceSourceAsset(path=path, filename=path.name, kind=kind),
+                evidence.sha256_file(path),
+            )
+
+        inspected = await asyncio.gather(
+            *(asyncio.to_thread(inspect_source, source) for source in sources)
         )
+        source_assets = dict(zip(source_ids, inspected, strict=True))
+        resolved: list[
+            tuple[
+                CourseEvidenceAnchor,
+                EvidenceService,
+                EvidenceSourceAsset,
+                str,
+            ]
+        ] = []
+        for anchor_id in anchor_ids:
+            anchor = by_id[anchor_id]
+            source_asset, source_hash = source_assets[anchor.source]
+            evidence.validate_anchor_integrity(
+                anchor,
+                course_id=course_id,
+                source_hash=source_hash,
+            )
+            expected_kind = (
+                "pdf_page" if source_asset.kind == "pdf" else "pptx_slide"
+            )
+            if anchor.locator.kind != expected_kind:
+                raise EvidenceInputError(
+                    "Evidence anchor source kind does not match."
+                )
+            resolved.append((anchor, evidence, source_asset, source_hash))
+        return tuple(resolved)
 
     @staticmethod
     async def list_owned_current_anchor_ids(course_id: str) -> tuple[str, ...]:

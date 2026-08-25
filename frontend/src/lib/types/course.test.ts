@@ -630,7 +630,8 @@ describe('learner-safe Course V2 schemas', () => {
 
   it('never accepts client-selected evidence or reveal scope for other intents', () => {
     const base = {
-      snapshot_token: 'a'.repeat(64), content: 'Explain this step.', intent: 'explain',
+      snapshot_token: 'a'.repeat(64), idempotency_key: 'message-one',
+      content: 'Explain this step.', intent: 'explain',
     }
     expect(courseTutorMessageRequestSchema.parse(base).intent).toBe('explain')
     expect(() => courseTutorMessageRequestSchema.parse({
@@ -643,6 +644,14 @@ describe('learner-safe Course V2 schemas', () => {
     expect(() => courseTutorMessageRequestSchema.parse({
       ...base, intent: 'reveal', exercise_key: 'limits-core',
     })).toThrow()
+    expect(courseTutorMessageRequestSchema.parse({
+      ...base, intent: 'hint', exercise_key: 'limits-core',
+      concept_key: 'limit-laws', attempt_key: 'attempt-one',
+    }).intent).toBe('hint')
+    expect(courseTutorMessageRequestSchema.parse({
+      ...base, intent: 'diagnose', exercise_key: 'limits-core',
+      concept_key: 'limit-laws', attempt_key: 'attempt-graded',
+    }).intent).toBe('diagnose')
   })
 
   it('strictly validates structured draft operations and revision snapshots', () => {
@@ -655,6 +664,19 @@ describe('learner-safe Course V2 schemas', () => {
     }
     expect(courseDraftOperationRequestSchema.parse(operation).operation.kind)
       .toBe('replace_formula')
+    expect(courseDraftOperationRequestSchema.parse({
+      ...operation,
+      operation: { ...operation.operation, block_key: 'Formula 1 (legacy)' },
+    }).operation.block_key).toBe('Formula 1 (legacy)')
+    expect(courseDraftOperationRequestSchema.parse({
+      ...operation,
+      operation: {
+        kind: 'replace_text',
+        block_key: `worked-example-${'x'.repeat(100)}-step-50`,
+        text: 'Updated step.',
+        anchor_ids: [],
+      },
+    }).operation.block_key.length).toBeGreaterThan(100)
     expect(() => courseDraftOperationRequestSchema.parse({
       ...operation, chapter_id: 'chapter:foreign',
     })).toThrow()

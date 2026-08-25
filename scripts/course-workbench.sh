@@ -658,6 +658,56 @@ port_pids() {
     lsof -t -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null || true
 }
 
+docker_desktop_proxy_owner() {
+    owner_pid=$1
+    owner_command=$(process_command "$owner_pid")
+    case "$owner_command" in
+        *"/Applications/Docker.app/Contents/MacOS/com.docker.backend services"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+docker_port_publishers() {
+    docker ps --no-trunc --quiet --filter "publish=$1" 2>/dev/null
+}
+
+database_port_owned_by_compose() {
+    port=$1
+    [ -n "$CONTAINER_ID" ] || {
+        CONTAINER_REASON="No verified SurrealDB container is available for port $port"
+        return 1
+    }
+
+    published_ids=$(docker_port_publishers "$port")
+    publisher_status=$?
+    if [ "$publisher_status" -ne 0 ]; then
+        CONTAINER_REASON="Could not inspect Docker publishers for port $port"
+        return 1
+    fi
+    if [ -z "$published_ids" ]; then
+        CONTAINER_REASON="This checkout's SurrealDB container is not publishing host port $port"
+        return 1
+    fi
+
+    found_current=0
+    for published_id in $published_ids; do
+        if [ "$published_id" = "$CONTAINER_ID" ]; then
+            found_current=1
+            continue
+        fi
+        published_root=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$published_id" 2>/dev/null || true)
+        CONTAINER_REASON="Port $port is published by another Docker container $published_id (checkout: ${published_root:-unknown})"
+        return 1
+    done
+    if [ "$found_current" -ne 1 ]; then
+        CONTAINER_REASON="This checkout's SurrealDB container does not own host port $port"
+        return 1
+    fi
+    return 0
+}
+
 pid_belongs_to_service() {
     owner_pid=$1
     service=$2
@@ -706,6 +756,11 @@ start_database() {
     compose_container_state
     container_state=$?
     if [ "$container_state" -eq 0 ]; then
+        if ! database_port_owned_by_compose 8000; then
+            error "$CONTAINER_REASON"
+            error "Stop the other SurrealDB instance with its own checkout before retrying."
+            return 1
+        fi
         say "Reusing this checkout's SurrealDB container."
         return 0
     fi
@@ -715,10 +770,28 @@ start_database() {
     fi
     db_owners=$(port_pids 8000)
     if [ -n "$db_owners" ]; then
-        first_owner=$(printf '%s\n' "$db_owners" | head -n 1)
-        error "Port 8000 is held by another process or checkout: $(owner_diagnostic "$first_owner")."
-        error "Stop that SurrealDB instance with its own checkout before retrying."
-        return 1
+        for db_owner in $db_owners; do
+            # Docker Desktop keeps its port-forward process listening while a
+            # Compose-owned container is stopped. A verified stopped container
+            # from this checkout can be safely resumed through that proxy.
+            if [ -n "$CONTAINER_ID" ] && docker_desktop_proxy_owner "$db_owner"; then
+                active_publishers=$(docker_port_publishers 8000)
+                publisher_status=$?
+                if [ "$publisher_status" -eq 0 ] && [ -z "$active_publishers" ]; then
+                    continue
+                fi
+                if [ "$publisher_status" -ne 0 ]; then
+                    error "Could not inspect Docker publishers for port 8000."
+                else
+                    error "Port 8000 is published by another Docker container: $active_publishers"
+                fi
+                error "Stop that SurrealDB instance with its own checkout before retrying."
+                return 1
+            fi
+            error "Port 8000 is held by another process or checkout: $(owner_diagnostic "$db_owner")."
+            error "Stop that SurrealDB instance with its own checkout before retrying."
+            return 1
+        done
     fi
     say "Starting SurrealDB (Docker only)..."
     if ! docker compose -f "$REPO_ROOT/docker-compose.yml" \
@@ -731,6 +804,10 @@ start_database() {
     container_state=$?
     if [ "$container_state" -ne 0 ]; then
         error "Started SurrealDB but its Compose ownership could not be verified: $CONTAINER_REASON"
+        return 1
+    fi
+    if ! database_port_owned_by_compose 8000; then
+        error "Started SurrealDB but host port ownership is invalid: $CONTAINER_REASON"
         return 1
     fi
     STARTED_DB_CONTAINER_ID=$CONTAINER_ID
@@ -993,6 +1070,7 @@ http_200_to_file() {
 
 surreal_ready() {
     compose_container_state && \
+        database_port_owned_by_compose 8000 && \
         http_200_to_file http://127.0.0.1:8000/health /dev/null
 }
 
@@ -1067,6 +1145,7 @@ final_ownership_snapshot() {
     # This runs after every HTTP/body probe. It closes the race where a service
     # exits (or a port changes owners) during the last successful request.
     compose_container_state && \
+        database_port_owned_by_compose 8000 && \
         service_owns_listening_port api 5055 && \
         validate_process worker && \
         service_owns_listening_port frontend 3000
@@ -1273,6 +1352,10 @@ database_status() {
     compose_container_state
     state=$?
     if [ "$state" -eq 0 ]; then
+        if ! database_port_owned_by_compose 8000; then
+            say "SurrealDB: foreign/misbound ($CONTAINER_REASON)"
+            return 1
+        fi
         say "SurrealDB: running (verified Compose checkout: $REPO_ROOT)"
         return 0
     fi

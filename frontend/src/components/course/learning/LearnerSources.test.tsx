@@ -52,19 +52,35 @@ describe('LearnerSources', () => {
   })
 
   it('shows readable source labels and opens a PDF at the cited page', async () => {
+    let releaseSource: ((blob: Blob) => void) | undefined
+    api.getEvidenceSourceBlob.mockReturnValueOnce(new Promise<Blob>((resolve) => {
+      releaseSource = resolve
+    }))
+    const popup = {
+      opener: window,
+      location: { href: 'about:blank' },
+      close: vi.fn(),
+    }
+    vi.mocked(window.open).mockReturnValue(popup as unknown as Window)
     render(<LearnerSources courseId="course:one" response={response} />)
 
     expect(screen.getByText('Algebra.pdf')).toBeInTheDocument()
     expect(screen.getByText('A polynomial identity from the source.')).toBeInTheDocument()
-    expect(document.body.textContent).not.toContain('private-anchor-pdf')
+    expect(screen.getByText('private-anchor-pdf')).toBeInTheDocument()
+    expect(screen.getByText('private-anchor-pdf').closest('article')).toHaveAttribute(
+      'id', 'course-source-private-anchor-pdf',
+    )
     fireEvent.click(screen.getByRole('button', { name: 'course.openSourcePage:7' }))
+
+    expect(window.open).toHaveBeenCalledWith('about:blank', '_blank')
+    expect(popup.opener).toBeNull()
+    expect(popup.location.href).toBe('about:blank')
+    releaseSource?.(new Blob(['source']))
 
     await waitFor(() => expect(api.getEvidenceSourceBlob).toHaveBeenCalledWith(
       'course:one', 'private-anchor-pdf',
     ))
-    expect(window.open).toHaveBeenCalledWith(
-      'blob:learner-source#page=7', '_blank', 'noopener,noreferrer',
-    )
+    await waitFor(() => expect(popup.location.href).toBe('blob:learner-source#page=7'))
   })
 
   it('loads an authenticated slide preview and keeps the original download action', async () => {

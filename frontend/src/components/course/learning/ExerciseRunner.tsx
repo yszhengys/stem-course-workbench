@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { CheckCircle2, HelpCircle, RotateCcw, ShieldAlert } from 'lucide-react'
 
 import {
@@ -43,6 +43,8 @@ import type {
   CourseExerciseRevealResponse,
 } from '@/lib/types/course'
 
+type PendingTransfer = ConceptMastery['pending_transfers'][number]
+
 function newStableKey(prefix: string): string {
   const time = Date.now().toString(36)
   const random = Math.random().toString(36).slice(2, 12)
@@ -67,6 +69,104 @@ function displayAnswer(answer: unknown): string {
   }
 }
 
+function PendingTransferRunner({
+  courseId,
+  exercise,
+  pending,
+  onStaleSnapshot,
+}: {
+  courseId: string
+  exercise: CourseExercise
+  pending: PendingTransfer
+  onStaleSnapshot?: () => void
+}) {
+  const { t } = useTranslation()
+  const gradeTransfer = useGradeCourseTransfer(courseId)
+  const transfer = exercise.transfer
+  const [answer, setAnswer] = useState(() => (
+    transfer ? emptyLearnerAnswer(transfer.answer_format) : undefined
+  ))
+  const [transferAttemptKey] = useState(() => newStableKey('transfer'))
+  const [grade, setGrade] = useState<CourseExerciseGradeResponse>()
+  const [error, setError] = useState<string>()
+
+  if (!transfer || transfer.key !== pending.transfer_task_key || answer === undefined) {
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>{t('course.operationFailed')}</AlertTitle>
+        <AlertDescription>{t('course.learningSnapshotChanged')}</AlertDescription>
+      </Alert>
+    )
+  }
+
+  const submit = async () => {
+    if (!isLearnerAnswerComplete(transfer.answer_format, answer)) return
+    setError(undefined)
+    try {
+      const response = await gradeTransfer.mutateAsync({
+        exerciseKey: exercise.key,
+        request: {
+          snapshot_token: exercise.snapshot_token,
+          chapter_key: pending.chapter_key,
+          concept_key: pending.concept_key,
+          source_attempt_key: pending.source_attempt_key,
+          attempt_key: transferAttemptKey,
+          transfer_task_key: pending.transfer_task_key,
+          answer,
+        },
+      })
+      if (response.snapshot_token !== exercise.snapshot_token) {
+        setError(t('course.learningSnapshotChanged'))
+        onStaleSnapshot?.()
+        return
+      }
+      setGrade(response)
+    } catch (caught) {
+      if (isConflict(caught)) onStaleSnapshot?.()
+      setError(
+        isConflict(caught)
+          ? t('course.learningSnapshotChanged')
+          : caught instanceof Error ? caught.message : t('course.operationFailed'),
+      )
+    }
+  }
+
+  return (
+    <Alert>
+      <AlertTitle>{t('course.transferTask')}</AlertTitle>
+      <AlertDescription className="space-y-3">
+        <p>{transfer.prompt}</p>
+        <AnswerEditor
+          format={transfer.answer_format}
+          value={answer}
+          onChange={setAnswer}
+          disabled={grade?.grade.correct === true}
+        />
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => void submit()}
+          disabled={
+            gradeTransfer.isPending
+            || !isLearnerAnswerComplete(transfer.answer_format, answer)
+            || grade?.grade.correct === true
+          }
+        >
+          {t('course.checkTransferAnswer')}
+        </Button>
+        {grade && (
+          <p aria-live="polite" className="font-medium">
+            {grade.grade.correct === true
+              ? t('course.transferCompleted')
+              : gradeFeedbackLabel(t, grade.grade)}
+          </p>
+        )}
+        {error && <p role="alert">{error}</p>}
+      </AlertDescription>
+    </Alert>
+  )
+}
+
 export function ExerciseRunner({
   courseId,
   chapterKey,
@@ -74,8 +174,10 @@ export function ExerciseRunner({
   conceptKey,
   conceptLabel,
   mastery,
+  pendingTransfers,
   reviewMode,
   onStaleSnapshot,
+  onAttemptChange,
 }: {
   courseId: string
   chapterKey: string
@@ -83,8 +185,15 @@ export function ExerciseRunner({
   conceptKey: string
   conceptLabel?: string
   mastery?: ConceptMastery
+  pendingTransfers: PendingTransfer[]
   reviewMode: boolean
   onStaleSnapshot?: () => void
+  onAttemptChange?: (attempt: {
+    exerciseKey: string
+    conceptKey: string
+    attemptKey: string
+    graded: boolean
+  }) => void
 }) {
   const { t } = useTranslation()
   const gradeExercise = useGradeCourseExercise(courseId)
@@ -92,6 +201,9 @@ export function ExerciseRunner({
   const nextHint = useNextCourseExerciseHint(courseId)
   const revealAnswer = useRevealCourseExerciseAnswer(courseId)
   const [attemptKey, setAttemptKey] = useState(() => newStableKey('attempt'))
+  const [transferAttemptKey, setTransferAttemptKey] = useState(
+    () => newStableKey('transfer'),
+  )
   const [answer, setAnswer] = useState(() => emptyLearnerAnswer(exercise.answer_format))
   const [currentHint, setCurrentHint] = useState<{
     index: number
@@ -108,6 +220,15 @@ export function ExerciseRunner({
     || gradeTransfer.isPending
     || nextHint.isPending
     || revealAnswer.isPending
+
+  useEffect(() => {
+    onAttemptChange?.({
+      exerciseKey: exercise.key,
+      conceptKey,
+      attemptKey,
+      graded: Boolean(gradeResponse),
+    })
+  }, [attemptKey, conceptKey, exercise.key, gradeResponse, onAttemptChange])
 
   const handleError = (error: unknown) => {
     if (isConflict(error)) {
@@ -217,7 +338,7 @@ export function ExerciseRunner({
           chapter_key: chapterKey,
           concept_key: conceptKey,
           source_attempt_key: attemptKey,
-          attempt_key: newStableKey('transfer'),
+          attempt_key: transferAttemptKey,
           transfer_task_key: reveal.transfer.key,
           answer: transferAnswer,
         },
@@ -231,6 +352,7 @@ export function ExerciseRunner({
 
   const startAnotherAttempt = () => {
     setAttemptKey(newStableKey('attempt'))
+    setTransferAttemptKey(newStableKey('transfer'))
     setAnswer(emptyLearnerAnswer(exercise.answer_format))
     setCurrentHint(undefined)
     setReveal(undefined)
@@ -389,6 +511,23 @@ export function ExerciseRunner({
             </AlertDescription>
           </Alert>
         )}
+
+        {pendingTransfers
+          .filter((pending) => !(
+            reveal?.transfer
+            && pending.concept_key === conceptKey
+            && pending.source_attempt_key === attemptKey
+            && pending.transfer_task_key === reveal.transfer.key
+          ))
+          .map((pending) => (
+            <PendingTransferRunner
+              key={`${pending.source_attempt_key}:${pending.transfer_task_key}`}
+              courseId={courseId}
+              exercise={exercise}
+              pending={pending}
+              onStaleSnapshot={onStaleSnapshot}
+            />
+          ))}
 
         {gradeResponse && (
           <Alert variant={gradeResponse.grade.correct === false ? 'destructive' : 'default'}>

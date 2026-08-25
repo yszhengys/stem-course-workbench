@@ -21,6 +21,7 @@ from open_notebook.course.portability_service import (
     CourseBundleSnapshot,
     PortabilityService,
 )
+from open_notebook.course.tutor_service import TutorService
 from open_notebook.course.v2_contracts import CourseBundleManifest
 from open_notebook.course.v2_models import CourseExport
 from open_notebook.database.repository import ensure_record_id
@@ -120,6 +121,68 @@ def _snapshot(material: Path) -> CourseBundleSnapshot:
                 "payload": {"block_key": "definition"},
                 "occurred_at": NOW,
             },),
+            "course_tutor_session": ({
+                "id": "course_tutor_session:original",
+                "course": "course:original",
+                "course_version": "course_version:original",
+                "chapter": "chapter:original",
+                "chapter_key": "limits",
+                "model_selection": {
+                    "adapter": "codex_cli",
+                    "model": "gpt-5.6-sol",
+                    "reasoning_effort": "max",
+                },
+                "status": "active",
+            },),
+            "course_tutor_operation": ({
+                "id": "course_tutor_operation:original",
+                "course": "course:original",
+                "course_version": "course_version:original",
+                "session": "course_tutor_session:original",
+                "chapter_key": "limits",
+                "operation_identity": "tutor-message-original",
+                "operation_key": (
+                    "tutor-message-original-"
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ),
+                "request_fingerprint": "a" * 64,
+            },),
+            "course_tutor_turn": (
+                {
+                    "id": "course_tutor_turn:user",
+                    "course": "course:original",
+                    "course_version": "course_version:original",
+                    "session": "course_tutor_session:original",
+                    "chapter_key": "limits",
+                    "operation_key": (
+                        "tutor-message-original-"
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    ),
+                    "turn_no": 1,
+                    "role": "user",
+                    "content": "Explain limits.",
+                    "anchor_ids": [],
+                    "answer_revealed": False,
+                    "insufficient_evidence": False,
+                },
+                {
+                    "id": "course_tutor_turn:assistant",
+                    "course": "course:original",
+                    "course_version": "course_version:original",
+                    "session": "course_tutor_session:original",
+                    "chapter_key": "limits",
+                    "operation_key": (
+                        "tutor-message-original-"
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    ),
+                    "turn_no": 2,
+                    "role": "assistant",
+                    "content": "A grounded explanation.",
+                    "anchor_ids": ["anchor:limit"],
+                    "answer_revealed": False,
+                    "insufficient_evidence": False,
+                },
+            ),
         },
         source_materials={"source:original": material},
     )
@@ -174,6 +237,8 @@ def test_bundle_round_trip_uses_new_ids_and_preserves_learning_history(
     imported_course = plan.records["course"][0]
     imported_note = plan.records["course_note"][0]
     imported_event = plan.records["course_learning_event"][0]
+    imported_session = plan.records["course_tutor_session"][0]
+    imported_operation = plan.records["course_tutor_operation"][0]
     assert imported_course["title"] == "Calculus"
     assert imported_course["outline_version_id"] == plan.records["course_version"][0]["id"]
     assert imported_note["course"] == plan.course_id
@@ -181,6 +246,10 @@ def test_bundle_round_trip_uses_new_ids_and_preserves_learning_history(
     assert imported_note["content"] == "Remember the one-sided limit."
     assert imported_event["event_key"] == "opened-limits"
     assert imported_event["kind"] == "chapter_opened"
+    assert imported_operation["course"] == plan.course_id
+    assert imported_operation["course_version"] == plan.records["course_version"][0]["id"]
+    assert imported_operation["session"] == imported_session["id"]
+    assert imported_operation["request_fingerprint"] == "a" * 64
     assert set(plan.materials) == {plan.records["source"][0]["id"]}
     assert next(iter(plan.materials.values())).data.startswith(b"%PDF")
 
@@ -237,6 +306,14 @@ async def test_verified_bundle_is_written_atomically_with_fresh_relationships(
         list[dict[str, Any]],
         await database.query("SELECT * FROM course_learning_event;"),
     )
+    tutor_sessions = cast(
+        list[dict[str, Any]],
+        await database.query("SELECT * FROM course_tutor_session;"),
+    )
+    tutor_operations = cast(
+        list[dict[str, Any]],
+        await database.query("SELECT * FROM course_tutor_operation;"),
+    )
     references = cast(
         list[dict[str, Any]],
         await database.query("SELECT in, out FROM reference;"),
@@ -250,6 +327,13 @@ async def test_verified_bundle_is_written_atomically_with_fresh_relationships(
     assert str(notes[0]["course"]) == result.course_id
     assert notes[0]["content"] == "Remember the one-sided limit."
     assert events[0]["event_key"] == "opened-limits"
+    assert len(tutor_operations) == 1
+    loaded_operation = await TutorService()._default_operation_loader(
+        str(tutor_sessions[0]["id"]),
+        "tutor-message-original",
+    )
+    assert loaded_operation is not None
+    assert str(loaded_operation.id) == str(tutor_operations[0]["id"])
     assert len(references) == 1
     assert str(references[0]["in"]) == str(sources[0]["id"])
     imported_path = Path(sources[0]["asset"]["file_path"])

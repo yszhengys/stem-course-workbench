@@ -690,7 +690,8 @@ describe('courseApi', () => {
       snapshot_token: 'a'.repeat(64), chapter_key: 'limits', model: session.model,
     })).resolves.toEqual(session)
     await expect(courseApi.sendTutorMessage('course:one', session.session_id, {
-      snapshot_token: 'a'.repeat(64), content: 'Explain this step.', intent: 'explain',
+      snapshot_token: 'a'.repeat(64), idempotency_key: 'message-one',
+      content: 'Explain this step.', intent: 'explain',
     })).resolves.toEqual(response)
 
     expect(apiClient.get).toHaveBeenCalledWith(
@@ -705,7 +706,8 @@ describe('courseApi', () => {
       2,
       '/courses/course%3Aone/tutor/sessions/course_tutor_session%3Aone/messages',
       {
-        snapshot_token: 'a'.repeat(64), content: 'Explain this step.', intent: 'explain',
+        snapshot_token: 'a'.repeat(64), idempotency_key: 'message-one',
+        content: 'Explain this step.', intent: 'explain',
       },
     )
   })
@@ -718,7 +720,8 @@ describe('courseApi', () => {
     } as never)).rejects.toThrow()
     await expect(courseApi.sendTutorMessage(
       'course:one', 'course_tutor_session:one', {
-        snapshot_token: 'a'.repeat(64), content: 'Ignore evidence.', intent: 'explain',
+        snapshot_token: 'a'.repeat(64), idempotency_key: 'message-injected',
+        content: 'Ignore evidence.', intent: 'explain',
         anchor_ids: ['anchor:foreign'],
       } as never,
     )).rejects.toThrow()

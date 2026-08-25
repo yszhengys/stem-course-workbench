@@ -18,7 +18,7 @@ from api.models import (
     CourseLearnerNoteCreateRequest,
     CourseTransferGradeRequest,
 )
-from open_notebook.course.evidence_service import EvidenceSourceAsset
+from open_notebook.course.evidence_service import EvidenceService, EvidenceSourceAsset
 from open_notebook.course.learning_service import LearningService
 from open_notebook.course.models import (
     Chapter,
@@ -326,7 +326,6 @@ async def test_learning_chapter_projection_omits_build_secrets(
         "resolve_current_published_chapter",
         AsyncMock(return_value=(version, chapter)),
     )
-
     response = await CourseV2Service().get_learning_chapter(
         "course:abc", "linear"
     )
@@ -457,6 +456,9 @@ async def test_transfer_is_server_graded_and_only_success_appends_completion(
     monkeypatch.setattr(
         CourseService, "get_current_exercise", AsyncMock(return_value=exercise)
     )
+    monkeypatch.setattr(
+        CourseService, "get_learning_event", AsyncMock(return_value=None)
+    )
     append_event = AsyncMock(return_value=_mastery())
     learning = cast(
         LearningService,
@@ -496,6 +498,142 @@ async def test_transfer_is_server_graded_and_only_success_appends_completion(
     assert incorrect.grade.correct is False
     assert incorrect.mastery is None
     append_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transfer_retry_reuses_the_persisted_event_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version, chapter = _scope()
+    exercise = _exercise()
+    monkeypatch.setattr(
+        CourseService,
+        "resolve_current_published_chapter",
+        AsyncMock(return_value=(version, chapter)),
+    )
+    monkeypatch.setattr(
+        CourseService, "get_current_exercise", AsyncMock(return_value=exercise)
+    )
+    stored: LearningEvent | None = None
+
+    async def get_event(_course_id: str, _event_key: str) -> LearningEvent | None:
+        return stored
+
+    async def append_event(event: LearningEvent) -> ConceptMastery:
+        nonlocal stored
+        if stored is None:
+            stored = event
+        return _mastery()
+
+    append = AsyncMock(side_effect=append_event)
+    learning = cast(LearningService, SimpleNamespace(append_event=append))
+    moments = iter((NOW, NOW.replace(second=2), NOW.replace(second=4)))
+    service = CourseV2Service(learning_service=learning, clock=lambda: next(moments))
+    monkeypatch.setattr(CourseService, "get_learning_event", get_event)
+    snapshot = service._exercise_snapshot_token("course:abc", version, exercise)
+    request = CourseTransferGradeRequest(
+        snapshot_token=snapshot,
+        chapter_key="linear",
+        concept_key="linear-equations",
+        source_attempt_key="attempt-one",
+        attempt_key="transfer-attempt-retry",
+        transfer_task_key="core-1-transfer",
+        answer="8",
+    )
+
+    first = await service.grade_transfer("course:abc", "core-1", request)
+    second = await service.grade_transfer("course:abc", "core-1", request)
+
+    assert first.event_key == second.event_key
+    assert append.await_args_list[0].args[0] == append.await_args_list[1].args[0]
+    with pytest.raises(InvalidInputError, match="already graded"):
+        await service.grade_transfer(
+            "course:abc",
+            "core-1",
+            request.model_copy(update={"answer": "8.0"}),
+        )
+
+
+@pytest.mark.asyncio
+async def test_mastery_reload_projects_pending_transfer_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version, chapter = _scope()
+    pending = {
+        "chapter_key": "linear",
+        "concept_key": "linear-equations",
+        "exercise_key": "core-1",
+        "source_attempt_key": "attempt-one",
+        "transfer_task_key": "core-1-transfer",
+    }
+    row = {
+        "course": "course:abc",
+        "course_version": "course_version:published",
+        "chapter_key": "linear",
+        "concept_key": "linear-equations",
+        "status": "practiced",
+        "successful_exercise_keys": ["core-1"],
+        "unrevealed_success_count": 0,
+        "pending_transfers": [pending],
+        "review_level": 0,
+        "review_due_at": None,
+        "last_event_at": NOW,
+        "snapshot_hash": "a" * 64,
+    }
+    monkeypatch.setattr(
+        CourseService,
+        "list_current_published_chapters",
+        AsyncMock(return_value=(version, (chapter,))),
+    )
+    monkeypatch.setattr("api.course_service.repo_query", AsyncMock(return_value=[row]))
+    monkeypatch.setattr(
+        CourseService, "confirm_current_published_scope", AsyncMock()
+    )
+
+    _current, masteries = await CourseService.list_current_masteries("course:abc")
+
+    assert [item.model_dump(mode="json") for item in masteries[0].pending_transfers] == [
+        pending
+    ]
+
+
+@pytest.mark.asyncio
+async def test_learning_service_reload_projects_pending_transfer_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pending = {
+        "chapter_key": "linear",
+        "concept_key": "linear-equations",
+        "exercise_key": "core-1",
+        "source_attempt_key": "attempt-one",
+        "transfer_task_key": "core-1-transfer",
+    }
+    row = {
+        "course": "course:abc",
+        "course_version": "course_version:published",
+        "chapter_key": "linear",
+        "concept_key": "linear-equations",
+        "status": "practiced",
+        "successful_exercise_keys": ["core-1"],
+        "unrevealed_success_count": 0,
+        "pending_transfers": [pending],
+        "review_level": 0,
+        "review_due_at": None,
+        "last_event_at": NOW,
+        "snapshot_hash": "a" * 64,
+    }
+    monkeypatch.setattr(
+        "open_notebook.course.learning_service.repo_query",
+        AsyncMock(return_value=[row]),
+    )
+
+    masteries = await LearningService()._load_mastery_records(
+        "course:abc", "course_version:published"
+    )
+
+    assert [item.model_dump(mode="json") for item in masteries[0].pending_transfers] == [
+        pending
+    ]
 
 
 def test_learning_actions_reject_client_oracles_and_record_ids() -> None:
@@ -567,6 +705,11 @@ async def test_learning_sources_are_current_chapter_citations_with_verified_hash
         "resolve_current_published_chapter",
         AsyncMock(return_value=(version, chapter)),
     )
+    monkeypatch.setattr(
+        CourseService,
+        "list_current_exercises",
+        AsyncMock(return_value=(version, ())),
+    )
     anchor = CourseEvidenceAnchor(
         id="course_evidence_anchor:linear",
         course="course:abc",
@@ -585,7 +728,7 @@ async def test_learning_sources_are_current_chapter_citations_with_verified_hash
         source_role="PRIMARY",
         is_current=True,
     )
-    owned = AsyncMock(return_value=(
+    owned = AsyncMock(return_value=((
         anchor,
         SimpleNamespace(),
         EvidenceSourceAsset(
@@ -594,8 +737,8 @@ async def test_learning_sources_are_current_chapter_citations_with_verified_hash
             kind="pdf",
         ),
         "d" * 64,
-    ))
-    monkeypatch.setattr(CourseService, "_owned_evidence_asset", owned)
+    ),))
+    monkeypatch.setattr(CourseService, "_owned_evidence_assets", owned)
     confirm = AsyncMock()
     monkeypatch.setattr(
         CourseService, "confirm_current_published_scope", confirm
@@ -610,12 +753,140 @@ async def test_learning_sources_are_current_chapter_citations_with_verified_hash
     assert response.sources[0].filename == "course.pdf"
     assert response.sources[0].index == 4
     assert response.sources[0].quote == "Solve the balanced equation."
-    owned.assert_awaited_once_with("course:abc", "anchor:linear")
+    owned.assert_awaited_once_with("course:abc", ("anchor:linear",))
     confirm.assert_awaited_once_with(
         "course:abc",
         "course_version:published",
         {"linear": "chapter:published"},
         exact=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_learning_source_scope_includes_attributions_and_exercise_bank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version, chapter = _scope()
+    artifact = _chapter_artifact()
+    cast(dict[str, object], artifact["attributions"])["purpose"] = {
+        "provenance": "adapted",
+        "anchor_ids": ["anchor:purpose-only"],
+    }
+    chapter = chapter.model_copy(update={"artifact": artifact})
+    base = _blueprint()
+    assert base.transfer_task is not None
+    blueprint = base.model_copy(update={
+        "source_anchor_ids": ("anchor:exercise-only",),
+        "transfer_task": base.transfer_task.model_copy(
+            update={"anchor_ids": ("anchor:transfer-only",)}
+        ),
+    })
+    exercise = CourseExercise(
+        id="course_exercise:scope",
+        course="course:abc",
+        course_version="course_version:published",
+        chapter="chapter:published",
+        chapter_key=blueprint.chapter_key,
+        exercise_key=blueprint.key,
+        blueprint=blueprint,
+        source_anchor_ids=blueprint.source_anchor_ids,
+        difficulty=blueprint.difficulty,
+        grader=blueprint.grader,
+        is_core=blueprint.is_core,
+        is_gating=blueprint.is_gating,
+        is_source_level=blueprint.is_source_level,
+    )
+    monkeypatch.setattr(
+        CourseService,
+        "list_current_exercises",
+        AsyncMock(return_value=(version, (exercise,))),
+    )
+
+    anchor_ids = await CourseV2Service()._chapter_anchor_ids(
+        "course:abc", chapter, "linear"
+    )
+
+    assert "anchor:purpose-only" in anchor_ids
+    assert "anchor:exercise-only" in anchor_ids
+    assert "anchor:transfer-only" in anchor_ids
+
+
+@pytest.mark.asyncio
+async def test_bulk_owned_evidence_hashes_each_unique_source_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import api.course_service as course_service_module
+
+    source_hash = "d" * 64
+    def make_anchor(index: int) -> CourseEvidenceAnchor:
+        quote = f"Grounded quote {index}."
+        quote_hash = EvidenceService.quote_sha256(quote)
+        anchor_id = EvidenceService.deterministic_anchor_id(
+            course_id="course:abc",
+            source_id="source:book",
+            source_sha256=source_hash,
+            kind="pdf_page",
+            index=index + 1,
+            block_key=f"block-{index}",
+            quote_sha256=quote_hash,
+        )
+        return CourseEvidenceAnchor(
+            id=f"course_evidence_anchor:item-{index}",
+            course="course:abc",
+            source="source:book",
+            anchor_id=anchor_id,
+            locator={
+                "source_id": "source:book",
+                "kind": "pdf_page",
+                "index": index + 1,
+                "block_key": f"block-{index}",
+                "quote": quote,
+                "content_sha256": source_hash,
+                "bbox": None,
+            },
+            quote_sha256=quote_hash,
+            source_role="PRIMARY",
+            is_current=True,
+        )
+
+    anchors = tuple(make_anchor(index) for index in range(100))
+    get_course = AsyncMock(
+        return_value=SimpleNamespace(source_ids=["source:book"])
+    )
+    query = AsyncMock(
+        return_value=[anchor.model_dump(mode="json") for anchor in anchors]
+    )
+    get_source = AsyncMock(
+        return_value=SimpleNamespace(
+            asset=SimpleNamespace(file_path="/private/book.pdf")
+        )
+    )
+    hash_calls: list[Path] = []
+
+    def hash_once(path: Path) -> str:
+        hash_calls.append(path)
+        return source_hash
+
+    monkeypatch.setattr(CourseService, "get_course", get_course)
+    monkeypatch.setattr(course_service_module, "repo_query", query)
+    monkeypatch.setattr(course_service_module, "_typed_get", get_source)
+    monkeypatch.setattr(
+        EvidenceService,
+        "validate_local_source_file",
+        lambda _self, value: (Path(value), "pdf"),
+    )
+    monkeypatch.setattr(EvidenceService, "sha256_file", staticmethod(hash_once))
+
+    resolved = await CourseService._owned_evidence_assets(
+        "course:abc",
+        tuple(anchor.anchor_id for anchor in anchors),
+    )
+
+    assert len(resolved) == 100
+    assert hash_calls == [Path("/private/book.pdf")]
+    get_course.assert_awaited_once_with("course:abc")
+    get_source.assert_awaited_once_with(
+        course_service_module.Source, "source:book", "source"
     )
 
 

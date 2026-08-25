@@ -1,12 +1,15 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
 import { ArrowLeft, Hammer } from 'lucide-react'
 
 import { ChapterReader } from '@/components/course/learning/ChapterReader'
-import { ChapterTutor } from '@/components/course/learning/ChapterTutor'
+import {
+  ChapterTutor,
+  type TutorAttemptScope,
+} from '@/components/course/learning/ChapterTutor'
 import { ChapterNotes } from '@/components/course/learning/ChapterNotes'
 import { ExerciseRunner } from '@/components/course/learning/ExerciseRunner'
 import { LearnerSources } from '@/components/course/learning/LearnerSources'
@@ -59,7 +62,23 @@ export default function CourseLearnChapterPage() {
   const readingKeys = useRef(new Map<string, string>())
   const opened = useRef(false)
   const recordedBlocks = useRef(new Set<string>())
+  const [tutorAttempts, setTutorAttempts] = useState<
+    Record<string, TutorAttemptScope>
+  >({})
   const append = appendEvent.mutateAsync
+
+  const updateTutorAttempt = useCallback((attempt: TutorAttemptScope) => {
+    setTutorAttempts((current) => {
+      const existing = current[attempt.exerciseKey]
+      if (
+        existing
+        && existing.conceptKey === attempt.conceptKey
+        && existing.attemptKey === attempt.attemptKey
+        && existing.graded === attempt.graded
+      ) return current
+      return { ...current, [attempt.exerciseKey]: attempt }
+    })
+  }, [])
 
   useEffect(() => {
     if (
@@ -235,15 +254,22 @@ export default function CourseLearnChapterPage() {
               )
               return (
                 <ExerciseRunner
-                  key={exercise.key}
+                  key={`${exercise.key}:${selectedConcept}:${exercise.snapshot_token}`}
                   courseId={courseId}
                   chapterKey={chapterKey}
                   exercise={exercise}
                   conceptKey={selectedConcept}
                   conceptLabel={conceptLabel(overview.data, selectedConcept)}
                   mastery={mastery}
+                  pendingTransfers={overview.data.masteries.flatMap(
+                    (item) => (item.pending_transfers ?? []).filter(
+                      (pending) => pending.chapter_key === chapterKey
+                        && pending.exercise_key === exercise.key,
+                    ),
+                  )}
                   reviewMode={reviewMode}
                   onStaleSnapshot={refreshLearningSnapshot}
+                  onAttemptChange={updateTutorAttempt}
                 />
               )
             })}
@@ -256,6 +282,11 @@ export default function CourseLearnChapterPage() {
             snapshotToken={chapter.data.snapshot_token}
             exercises={exercises.data ?? []}
             concepts={overview.data.concepts}
+            attempts={Object.values(tutorAttempts).filter((attempt) => (
+              (exercises.data ?? []).some(
+                (exercise) => exercise.key === attempt.exerciseKey,
+              )
+            ))}
           />
 
           {notes.isLoading ? <CourseInlineLoading /> : notes.isError ? (

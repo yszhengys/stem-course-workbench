@@ -5,6 +5,7 @@ import { Download, ExternalLink, LibraryBig } from 'lucide-react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { courseApi } from '@/lib/api/course'
+import { courseCitationTarget } from '@/lib/course/citations'
 import { locatorKindLabel, sourceRoleLabel } from '@/lib/course/course-labels'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import type {
@@ -62,9 +63,18 @@ function SourceCard({
   }
 
   async function openPdfPage() {
+    const popup = window.open('about:blank', '_blank')
+    if (!popup) {
+      setSourceFailed(true)
+      return
+    }
+    popup.opener = null
     const objectUrl = await loadSource()
-    if (!objectUrl) return
-    window.open(`${objectUrl}#page=${source.index}`, '_blank', 'noopener,noreferrer')
+    if (!objectUrl) {
+      popup.close()
+      return
+    }
+    popup.location.href = `${objectUrl}#page=${source.index}`
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
   }
 
@@ -80,12 +90,18 @@ function SourceCard({
   }
 
   return (
-    <article className="space-y-3 rounded-md border bg-background p-4 text-sm">
+    <article
+      id={courseCitationTarget(source.anchor_id)}
+      className="scroll-mt-6 space-y-3 rounded-md border bg-background p-4 text-sm"
+    >
       <div>
         <h3 className="font-semibold">{source.filename}</h3>
         <p className="text-xs text-muted-foreground">
           {sourceRoleLabel(t, source.source_role)} · {locatorKindLabel(t, source.kind)} {source.index}
         </p>
+        <code className="break-all text-xs text-muted-foreground">
+          {source.anchor_id}
+        </code>
       </div>
       <blockquote className="border-l-2 pl-3 text-muted-foreground">
         {source.quote}

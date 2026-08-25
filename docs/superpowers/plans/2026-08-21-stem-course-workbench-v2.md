@@ -45,7 +45,7 @@
 **Interfaces:**
 - Produces: `DifficultyVector`, `ExerciseBlueprint`, `TransferTaskSpec`, `GraderSpec`, `LearningEvent`, `ConceptMastery`, `ReviewQueueItem`, `TutorTurn`, `TutorResponse`, `DraftRevision`, `DraftOperation`, `CourseBundleManifest`.
 - Produces: `CourseTaskBackend.submit(request) -> str`, `get(job_id) -> CommandJobStatus`, `cancel(job_id) -> None`.
-- Produces records: `course_exercise`, `course_learning_event`, `course_concept_mastery`, `course_tutor_session`, `course_tutor_turn`, `course_draft_revision`, `course_export`.
+- Produces records: `course_exercise`, `course_learning_event`, `course_concept_mastery`, `course_tutor_session`, immutable `course_tutor_operation`, transient `course_tutor_operation_lease`, `course_tutor_turn`, `course_draft_revision`, `course_export`.
 
 - [ ] **Step 1: Write strict contract and migration round-trip tests**
 

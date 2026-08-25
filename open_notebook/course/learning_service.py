@@ -22,6 +22,7 @@ from .v2_contracts import (
     GraderSpec,
     HintViewedPayload,
     LearningEvent,
+    PendingTransfer,
     ReviewCompletedPayload,
     ReviewQueueItem,
     TransferCompletedPayload,
@@ -149,6 +150,14 @@ class LearningService:
         response_parts: tuple[str, ...],
     ) -> object:
         return AssessmentService.decode_response(exercise.grader, response_parts)
+
+    @staticmethod
+    def _used_every_authored_hint(
+        exercise: ExerciseBlueprint,
+        state: _AttemptState,
+    ) -> bool:
+        available_hint_count = len(exercise.hints) or 4
+        return state.hints_used >= available_hint_count
 
     @classmethod
     def reduce_events(
@@ -379,7 +388,7 @@ class LearningService:
                         practiced = True
                     if (
                         exercise.is_core or exercise.is_source_level
-                    ) and state.hints_used < 4:
+                    ) and not cls._used_every_authored_hint(exercise, state):
                         successful_keys.add(exercise.key)
                         if not state.answer_revealed:
                             unrevealed_keys.add(exercise.key)
@@ -440,7 +449,7 @@ class LearningService:
                 would_advance = (
                     review_payload.correct
                     and not review_payload.answer_revealed
-                    and state.hints_used < 4
+                    and not cls._used_every_authored_hint(exercise, state)
                 )
                 if pending_transfers and would_advance:
                     raise ValueError("review cannot advance while transfer is pending")
@@ -450,7 +459,10 @@ class LearningService:
                 if not review_payload.correct:
                     review_level = 0
                     review_due_at = cls._safe_add(occurred_at, REVIEW_INTERVAL_DAYS[0])
-                elif not review_payload.answer_revealed and state.hints_used < 4:
+                elif (
+                    not review_payload.answer_revealed
+                    and not cls._used_every_authored_hint(exercise, state)
+                ):
                     review_level = min(review_level + 1, 5)
                     review_due_at = cls._safe_add(
                         occurred_at,
@@ -485,6 +497,18 @@ class LearningService:
             review_level = 0
 
         successful = tuple(sorted(successful_keys))
+        recoverable_transfers = tuple(
+            PendingTransfer(
+                chapter_key=identity[2],
+                concept_key=identity[3],
+                exercise_key=exercise_key,
+                source_attempt_key=source_attempt_key,
+                transfer_task_key=transfer_task_key,
+            )
+            for exercise_key, source_attempt_key, transfer_task_key in sorted(
+                pending_transfers
+            )
+        )
         snapshot_payload = {
             "course_id": identity[0],
             "course_version_id": identity[1],
@@ -493,6 +517,9 @@ class LearningService:
             "status": status,
             "successful_exercise_keys": successful,
             "unrevealed_success_count": len(unrevealed_keys),
+            "pending_transfers": [
+                item.model_dump(mode="json") for item in recoverable_transfers
+            ],
             "review_level": review_level,
             "review_due_at": (
                 review_due_at.isoformat() if review_due_at is not None else None
@@ -526,6 +553,7 @@ class LearningService:
             status=status,
             successful_exercise_keys=successful,
             unrevealed_success_count=len(unrevealed_keys),
+            pending_transfers=recoverable_transfers,
             review_level=review_level,
             review_due_at=review_due_at,
             last_event_at=last_event_at,
@@ -1303,6 +1331,9 @@ class LearningService:
             "status": mastery.status,
             "successful_exercise_keys": list(mastery.successful_exercise_keys),
             "unrevealed_success_count": mastery.unrevealed_success_count,
+            "pending_transfers": [
+                item.model_dump(mode="json") for item in mastery.pending_transfers
+            ],
             "review_level": mastery.review_level,
             "review_due_at": mastery.review_due_at,
             "last_event_at": mastery.last_event_at,
@@ -1667,6 +1698,7 @@ class LearningService:
                 status=record.status,
                 successful_exercise_keys=record.successful_exercise_keys,
                 unrevealed_success_count=record.unrevealed_success_count,
+                pending_transfers=record.pending_transfers,
                 review_level=record.review_level,
                 review_due_at=record.review_due_at,
                 last_event_at=record.last_event_at,

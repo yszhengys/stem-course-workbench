@@ -18,6 +18,8 @@ import {
   useRevealCourseExerciseAnswer,
 } from '@/lib/hooks/use-courses'
 
+const tutorCapture = vi.hoisted(() => ({ current: undefined as unknown }))
+
 vi.mock('next/navigation', () => ({
   useParams: () => ({ courseId: 'course%3Aabc', chapterKey: 'limits' }),
 }))
@@ -36,7 +38,10 @@ vi.mock('@/components/course/LabRenderer', () => ({
   LabRenderer: () => <div>course.labDataAlternative</div>,
 }))
 vi.mock('@/components/course/learning/ChapterTutor', () => ({
-  ChapterTutor: () => <section>course.chapterTutor</section>,
+  ChapterTutor: (props: unknown) => {
+    tutorCapture.current = props
+    return <section>course.chapterTutor</section>
+  },
 }))
 vi.mock('@/lib/hooks/use-courses', () => ({
   useAppendCourseLearningEvent: vi.fn(),
@@ -192,6 +197,7 @@ describe('CourseLearnChapterPage', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    tutorCapture.current = undefined
     append.mutateAsync.mockResolvedValue({ event: {}, mastery: null })
     grade.mutateAsync.mockResolvedValue({
       grade: {
@@ -296,6 +302,32 @@ describe('CourseLearnChapterPage', () => {
     expect(await screen.findByText('course.gradeCorrect')).toBeVisible()
   })
 
+  it('shares the current exercise attempt with the scoped tutor', async () => {
+    render(<CourseLearnChapterPage />)
+
+    await waitFor(() => expect(tutorCapture.current).toEqual(
+      expect.objectContaining({
+        attempts: [expect.objectContaining({
+          exerciseKey: 'limits-core',
+          conceptKey: 'limit-laws',
+          attemptKey: expect.stringMatching(/^attempt-/),
+          graded: false,
+        })],
+      }),
+    ))
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'course.exerciseAnswer' }), {
+      target: { value: '4' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'course.checkAnswer' }))
+
+    await waitFor(() => expect(tutorCapture.current).toEqual(
+      expect.objectContaining({
+        attempts: [expect.objectContaining({ graded: true })],
+      }),
+    ))
+  })
+
   it('shows only current-publication sources and saves a snapshot-bound note', async () => {
     render(<CourseLearnChapterPage />)
 
@@ -303,7 +335,7 @@ describe('CourseLearnChapterPage', () => {
     expect(screen.getByText('Limits.pdf')).toBeVisible()
     expect(screen.getByText('The source definition of a limit.')).toBeVisible()
     expect(screen.getByText('Approach is not equality.')).toBeVisible()
-    expect(document.body.textContent).not.toContain('private-anchor')
+    expect(screen.getByText('private-anchor')).toBeVisible()
     expect(document.body.textContent).not.toContain('course_note:one')
 
     fireEvent.change(screen.getByLabelText('course.notePlaceholder'), {
@@ -371,6 +403,111 @@ describe('CourseLearnChapterPage', () => {
       }),
     }))
     expect(await screen.findByText('course.transferCompleted')).toBeVisible()
+  })
+
+  it('recovers and completes an exact pending transfer after navigation', async () => {
+    vi.mocked(useCourseLearningOverview).mockReturnValue(queryResult({
+      ...overviewData(),
+      masteries: [{
+        ...mastery,
+        pending_transfers: [{
+          chapter_key: 'limits',
+          concept_key: 'limit-laws',
+          exercise_key: 'limits-core',
+          source_attempt_key: 'tutor-reveal-attempt',
+          transfer_task_key: 'limits-transfer',
+        }],
+      }],
+    }) as never)
+
+    render(<CourseLearnChapterPage />)
+
+    expect(screen.getByText('Transfer prompt')).toBeVisible()
+    const answerFields = screen.getAllByRole('textbox', { name: 'course.exerciseAnswer' })
+    fireEvent.change(answerFields.at(-1)!, { target: { value: '4' } })
+    fireEvent.click(screen.getByRole('button', { name: 'course.checkTransferAnswer' }))
+
+    await waitFor(() => expect(gradeTransfer.mutateAsync).toHaveBeenCalledWith({
+      exerciseKey: 'limits-core',
+      request: expect.objectContaining({
+        snapshot_token: exerciseSnapshot,
+        concept_key: 'limit-laws',
+        source_attempt_key: 'tutor-reveal-attempt',
+        transfer_task_key: 'limits-transfer',
+        answer: '4',
+      }),
+    }))
+    expect(await screen.findByText('course.transferCompleted')).toBeVisible()
+  })
+
+  it('reuses a pending transfer attempt identity after a lost response', async () => {
+    vi.mocked(useCourseLearningOverview).mockReturnValue(queryResult({
+      ...overviewData(),
+      masteries: [{
+        ...mastery,
+        pending_transfers: [{
+          chapter_key: 'limits', concept_key: 'limit-laws',
+          exercise_key: 'limits-core', source_attempt_key: 'attempt-recovered',
+          transfer_task_key: 'limits-transfer',
+        }],
+      }],
+    }) as never)
+    gradeTransfer.mutateAsync.mockRejectedValueOnce(new Error('response lost'))
+    render(<CourseLearnChapterPage />)
+    const answerFields = screen.getAllByRole('textbox', { name: 'course.exerciseAnswer' })
+    fireEvent.change(answerFields.at(-1)!, { target: { value: '4' } })
+    const submit = screen.getByRole('button', { name: 'course.checkTransferAnswer' })
+
+    fireEvent.click(submit)
+    await waitFor(() => expect(gradeTransfer.mutateAsync).toHaveBeenCalledTimes(1))
+    fireEvent.click(submit)
+    await waitFor(() => expect(gradeTransfer.mutateAsync).toHaveBeenCalledTimes(2))
+
+    expect(gradeTransfer.mutateAsync.mock.calls[0][0].request.attempt_key).toBe(
+      gradeTransfer.mutateAsync.mock.calls[1][0].request.attempt_key,
+    )
+  })
+
+  it('resets local attempts when a multi-concept exercise changes concept', async () => {
+    vi.mocked(useCourseLearningOverview).mockReturnValue(queryResult({
+      ...overviewData(), review_queue: [], masteries: [],
+    }) as never)
+    const view = render(<CourseLearnChapterPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'course.revealAnswer' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'course.confirmReveal' }))
+    await waitFor(() => expect(reveal.mutateAsync).toHaveBeenCalledTimes(1))
+    const revealRequest = reveal.mutateAsync.mock.calls[0][0].request
+    expect(revealRequest.concept_key).toBe('continuity')
+
+    vi.mocked(useCourseLearningOverview).mockReturnValue(queryResult({
+      ...overviewData(),
+      review_queue: [],
+      masteries: [{
+        ...mastery,
+        concept_key: 'continuity',
+        pending_transfers: [{
+          chapter_key: 'limits',
+          concept_key: 'continuity',
+          exercise_key: 'limits-core',
+          source_attempt_key: revealRequest.attempt_key,
+          transfer_task_key: 'limits-transfer',
+        }],
+      }],
+    }) as never)
+    view.rerender(<CourseLearnChapterPage />)
+
+    const answerFields = screen.getAllByRole('textbox', { name: 'course.exerciseAnswer' })
+    fireEvent.change(answerFields.at(-1)!, { target: { value: '4' } })
+    fireEvent.click(screen.getByRole('button', { name: 'course.checkTransferAnswer' }))
+
+    await waitFor(() => expect(gradeTransfer.mutateAsync).toHaveBeenCalledWith({
+      exerciseKey: 'limits-core',
+      request: expect.objectContaining({
+        concept_key: 'continuity',
+        source_attempt_key: revealRequest.attempt_key,
+      }),
+    }))
   })
 
   it('fails closed when overview and chapter snapshots do not match', async () => {

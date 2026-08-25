@@ -50,6 +50,7 @@ from .v2_models import (
     CourseExercise,
     CourseExport,
     CourseLearningEvent,
+    CourseTutorOperation,
     CourseTutorSession,
     CourseTutorTurn,
 )
@@ -75,6 +76,7 @@ _TABLE_ORDER = (
     "course_learning_event",
     "course_concept_mastery",
     "course_tutor_session",
+    "course_tutor_operation",
     "course_tutor_turn",
     "course_draft_revision",
 )
@@ -96,6 +98,7 @@ _MODEL_BY_TABLE: dict[str, type[BaseModel]] = {
     "course_learning_event": CourseLearningEvent,
     "course_concept_mastery": CourseConceptMastery,
     "course_tutor_session": CourseTutorSession,
+    "course_tutor_operation": CourseTutorOperation,
     "course_tutor_turn": CourseTutorTurn,
     "course_draft_revision": CourseDraftRevision,
 }
@@ -120,6 +123,7 @@ _RECORD_FIELDS: dict[str, tuple[str, ...]] = {
     "course_learning_event": ("course", "course_version", "chapter"),
     "course_concept_mastery": ("course", "course_version"),
     "course_tutor_session": ("course", "course_version", "chapter"),
+    "course_tutor_operation": ("course", "course_version", "session"),
     "course_tutor_turn": ("course", "course_version", "session"),
     "course_draft_revision": (
         "course",
@@ -789,6 +793,7 @@ class PortabilityService:
             "course_learning_event": "SELECT * FROM course_learning_event WHERE course = $course ORDER BY occurred_at, id;",
             "course_concept_mastery": "SELECT * FROM course_concept_mastery WHERE course = $course ORDER BY id;",
             "course_tutor_session": "SELECT * FROM course_tutor_session WHERE course = $course ORDER BY id;",
+            "course_tutor_operation": "SELECT * FROM course_tutor_operation WHERE course = $course ORDER BY session, operation_identity;",
             "course_tutor_turn": "SELECT * FROM course_tutor_turn WHERE course = $course ORDER BY session, turn_no;",
             "course_draft_revision": "SELECT * FROM course_draft_revision WHERE course = $course ORDER BY chapter, revision_no;",
         }

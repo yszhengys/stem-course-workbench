@@ -630,7 +630,7 @@ export function useGradeCourseTransfer(courseId: string) {
       exerciseKey: string
       request: CourseTransferGradeRequest
     }) => courseApi.gradeTransfer(courseId, exerciseKey, request),
-    onSuccess: async () => {
+    onSettled: async () => {
       await Promise.all([
         client.invalidateQueries({ queryKey: QUERY_KEYS.courseLearningOverview(courseId) }),
         client.invalidateQueries({ queryKey: QUERY_KEYS.courseReviewQueue(courseId) }),
@@ -686,7 +686,7 @@ export function useSendCourseTutorMessage(
       if (!sessionId) throw new Error('Tutor session is required')
       return courseApi.sendTutorMessage(courseId, sessionId, request)
     },
-    onSuccess: async () => {
+    onSettled: async () => {
       await Promise.all([
         client.invalidateQueries({ queryKey: QUERY_KEYS.courseTutorSessions(courseId) }),
         client.invalidateQueries({ queryKey: QUERY_KEYS.courseLearningOverview(courseId) }),

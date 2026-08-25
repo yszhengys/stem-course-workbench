@@ -16,6 +16,7 @@ from open_notebook.course.v2_contracts import (
     MultipartGraderSpec,
     NumericGraderSpec,
     ReplaceFormulaOperation,
+    ReplaceTextOperation,
     ReviewQueueItem,
     SymbolicGraderSpec,
     TransferTaskSpec,
@@ -307,3 +308,21 @@ def test_tutor_draft_and_bundle_contracts_preserve_audit_data() -> None:
     assert response.turn.anchor_ids == ("anchor:limit",)
     assert revision.operation.kind == "replace_formula"
     assert manifest.files[0].path == "records/course.json"
+
+
+def test_draft_target_accepts_bounded_opaque_v1_and_synthesized_keys() -> None:
+    opaque = ReplaceFormulaOperation(
+        kind="replace_formula",
+        block_key="Formula 1 (legacy)",
+        latex="x=1",
+        anchor_ids=(),
+    )
+    synthesized = ReplaceTextOperation(
+        kind="replace_text",
+        block_key=f"worked-example-{'x' * 100}-step-50",
+        text="Updated step.",
+        anchor_ids=(),
+    )
+
+    assert opaque.block_key == "Formula 1 (legacy)"
+    assert len(synthesized.block_key) > 100

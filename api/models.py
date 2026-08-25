@@ -1192,6 +1192,7 @@ class CourseTutorSessionResponse(BaseModel):
 
 class CourseTutorMessageRequest(StrictCourseRequest):
     snapshot_token: Sha256
+    idempotency_key: StableKey
     content: str = Field(min_length=1, max_length=20_000)
     intent: Literal["explain", "diagnose", "hint", "reveal"]
     exercise_key: StableKey | None = None
@@ -1200,18 +1201,22 @@ class CourseTutorMessageRequest(StrictCourseRequest):
 
     @model_validator(mode="after")
     def reveal_scope_is_explicit(self) -> "CourseTutorMessageRequest":
-        reveal_values = (
+        scoped_values = (
             self.exercise_key,
             self.concept_key,
             self.attempt_key,
         )
-        if self.intent == "reveal" and any(value is None for value in reveal_values):
+        if self.intent in {"diagnose", "hint", "reveal"} and any(
+            value is None for value in scoped_values
+        ):
             raise ValueError(
-                "reveal requires exercise_key, concept_key, and attempt_key"
+                "diagnose, hint, and reveal require exercise_key, concept_key, and attempt_key"
             )
-        if self.intent != "reveal" and any(value is not None for value in reveal_values):
+        if self.intent == "explain" and any(
+            value is not None for value in scoped_values
+        ):
             raise ValueError(
-                "exercise and attempt identities are accepted only for reveal"
+                "exercise and attempt identities are not accepted for explain"
             )
         return self
 

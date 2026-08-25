@@ -90,6 +90,7 @@ describe('Course mastery presentation', () => {
     const baseMastery = {
       course_id: 'course:abc', course_version_id: 'course_version:published',
       chapter_key: 'limits', successful_exercise_keys: [], unrevealed_success_count: 0,
+      pending_transfers: [],
       review_level: 0, review_due_at: null, last_event_at: null,
       snapshot_hash: 'c'.repeat(64),
     }

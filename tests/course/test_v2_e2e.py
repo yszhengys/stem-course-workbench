@@ -253,6 +253,11 @@ async def test_build_approve_edit_publish_and_grounded_tutor_flow(
         session_loader=AsyncMock(return_value=session),
         turn_loader=AsyncMock(return_value=()),
         turn_appender=append_turns,
+        operation_loader=AsyncMock(return_value=None),
+        operation_reserver=AsyncMock(side_effect=lambda operation: operation),
+        operation_lease_acquirer=AsyncMock(return_value=True),
+        operation_lease_renewer=AsyncMock(return_value=True),
+        operation_lease_releaser=AsyncMock(),
         clock=lambda: NOW,
     )
     response = await tutor.respond(
@@ -265,6 +270,7 @@ async def test_build_approve_edit_publish_and_grounded_tutor_flow(
             allowed_anchor_ids=(anchor_id,),
         ),
         session_id="course_tutor_session:e2e",
+        message_key="message-e2e",
         content="Why can the value at the point be missing?",
         intent="explain",
         evidence=(TutorEvidence(

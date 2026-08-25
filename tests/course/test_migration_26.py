@@ -7,6 +7,8 @@ V2_TABLES = (
     "course_learning_event",
     "course_concept_mastery",
     "course_tutor_session",
+    "course_tutor_operation",
+    "course_tutor_operation_lease",
     "course_tutor_turn",
     "course_draft_revision",
     "course_export",

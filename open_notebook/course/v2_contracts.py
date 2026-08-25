@@ -48,6 +48,7 @@ from sympy import (
 from .contracts import LabSpecVariant, _validate_generated_text
 
 StableKey: TypeAlias = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,99}$")]
+DraftTargetKey: TypeAlias = Annotated[str, Field(min_length=1, max_length=300)]
 Sha256: TypeAlias = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 AnswerType: TypeAlias = Literal[
     "numeric",
@@ -689,6 +690,16 @@ MasteryStatus: TypeAlias = Literal[
 ]
 
 
+class PendingTransfer(V2Contract):
+    """Recoverable transfer gate created by an exact answer-reveal attempt."""
+
+    chapter_key: StableKey
+    concept_key: StableKey
+    exercise_key: StableKey
+    source_attempt_key: StableKey
+    transfer_task_key: StableKey
+
+
 class ConceptMastery(V2Contract):
     course_id: str = Field(pattern=r"^course:[^:]+$")
     course_version_id: str = Field(pattern=r"^course_version:[^:]+$")
@@ -699,6 +710,9 @@ class ConceptMastery(V2Contract):
         default_factory=tuple, max_length=200
     )
     unrevealed_success_count: int = Field(default=0, ge=0, le=200)
+    pending_transfers: tuple[PendingTransfer, ...] = Field(
+        default_factory=tuple, max_length=200
+    )
     review_level: int = Field(default=0, ge=0, le=5)
     review_due_at: datetime | None = None
     last_event_at: datetime | None = None
@@ -809,7 +823,7 @@ class TutorResponse(V2Contract):
 
 class ReplaceTextOperation(V2Contract):
     kind: Literal["replace_text"]
-    block_key: StableKey
+    block_key: DraftTargetKey
     text: str = Field(min_length=1, max_length=20000)
     anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
 
@@ -818,7 +832,7 @@ class ReplaceTextOperation(V2Contract):
 
 class ReplaceFormulaOperation(V2Contract):
     kind: Literal["replace_formula"]
-    block_key: StableKey
+    block_key: DraftTargetKey
     latex: str = Field(min_length=1, max_length=4000)
     anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
 
@@ -827,13 +841,13 @@ class ReplaceFormulaOperation(V2Contract):
 
 class ReplaceExerciseOperation(V2Contract):
     kind: Literal["replace_exercise"]
-    block_key: StableKey
+    block_key: DraftTargetKey
     exercise: ExerciseBlueprint
 
 
 class ReplaceTransferOperation(V2Contract):
     kind: Literal["replace_transfer"]
-    block_key: StableKey
+    block_key: DraftTargetKey
     transfer_task: TransferTaskSpec
 
 
@@ -906,7 +920,7 @@ class FrozenLabSpec(RootModel[str]):
 
 class ReplaceLabOperation(V2Contract):
     kind: Literal["replace_lab"]
-    block_key: StableKey
+    block_key: DraftTargetKey
     lab_spec: FrozenLabSpec
 
 
@@ -975,6 +989,7 @@ __all__ = [
     "DifficultyVector",
     "DraftOperation",
     "DraftRevision",
+    "DraftTargetKey",
     "EvidenceCategory",
     "EvidenceClassification",
     "ExerciseBankArtifact",
@@ -992,6 +1007,7 @@ __all__ = [
     "MultipartGraderSpec",
     "NumericGraderSpec",
     "ObjectiveGraderSpec",
+    "PendingTransfer",
     "PositionPayload",
     "ReplaceExerciseOperation",
     "ReplaceFormulaOperation",

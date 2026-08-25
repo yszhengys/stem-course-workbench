@@ -25,6 +25,7 @@ from open_notebook.course.contracts import (
     ChapterArtifact,
     ChapterSection,
     FormulaArtifact,
+    FunctionPlotLabSpec,
 )
 from open_notebook.course.publication_service import (
     DraftPublicationError,
@@ -36,6 +37,7 @@ from open_notebook.course.v2_contracts import (
     NumericGraderSpec,
     ReplaceExerciseOperation,
     ReplaceFormulaOperation,
+    ReplaceLabOperation,
     ReplaceTextOperation,
 )
 
@@ -197,6 +199,77 @@ def test_human_text_edit_keeps_explicit_provenance_and_rejects_foreign_anchors()
         )
 
 
+def test_unvalidated_edits_accumulate_every_required_check() -> None:
+    service = AuthoringService(clock=lambda: NOW)
+    draft = _draft()
+    formula_change = service.apply_operation(
+        draft,
+        ReplaceFormulaOperation(
+            kind="replace_formula",
+            block_key="speed",
+            latex="v=2*d/t",
+            anchor_ids=["anchor:one"],
+        ),
+        expected_revision=draft.revision_token,
+    )
+
+    text_change = service.apply_operation(
+        formula_change.draft,
+        ReplaceTextOperation(
+            kind="replace_text",
+            block_key="definition",
+            text="A revised source-grounded definition.",
+            anchor_ids=["anchor:one"],
+        ),
+        expected_revision=formula_change.draft.revision_token,
+    )
+
+    assert text_change.revision.invalidated_checks == (
+        "formula",
+        "unit",
+        "numeric",
+        "citation",
+        "structure",
+    )
+
+
+def test_v1_opaque_block_keys_remain_editable_and_ambiguous_targets_fail() -> None:
+    service = AuthoringService(clock=lambda: NOW)
+    legacy_artifact = _artifact().model_copy(deep=True)
+    legacy_artifact.sections[0].key = "Section 1"
+    legacy_draft = _draft().model_copy(update={"artifact": legacy_artifact})
+
+    changed = service.apply_operation(
+        legacy_draft,
+        ReplaceTextOperation(
+            kind="replace_text",
+            block_key="Section 1",
+            text="Updated legacy section content.",
+            anchor_ids=["anchor:one"],
+        ),
+        expected_revision=legacy_draft.revision_token,
+    )
+
+    assert changed.draft.artifact.sections[0].markdown == (
+        "Updated legacy section content."
+    )
+
+    ambiguous_artifact = _artifact().model_copy(deep=True)
+    ambiguous_artifact.sections[0].key = "purpose"
+    ambiguous_draft = _draft().model_copy(update={"artifact": ambiguous_artifact})
+    with pytest.raises(DraftConflictError, match="ambiguous"):
+        service.apply_operation(
+            ambiguous_draft,
+            ReplaceTextOperation(
+                kind="replace_text",
+                block_key="purpose",
+                text="This target must not be chosen arbitrarily.",
+                anchor_ids=["anchor:one"],
+            ),
+            expected_revision=ambiguous_draft.revision_token,
+        )
+
+
 def test_draft_operations_fail_closed_for_stale_ready_or_unknown_targets() -> None:
     service = AuthoringService(clock=lambda: NOW)
     draft = _draft()
@@ -283,6 +356,64 @@ def test_targeted_validation_reports_only_invalidated_checks() -> None:
     assert result.checked == ("formula", "unit", "numeric")
     assert result.findings
     assert {finding.kind for finding in result.findings} <= set(result.checked)
+
+
+def test_exercise_review_findings_are_blocking_structure_findings() -> None:
+    service = AuthoringService(clock=lambda: NOW)
+    draft = _draft()
+    replacement = _exercise().model_copy(
+        update={"prompt": "Evaluate the edited source-level limit."}
+    )
+    change = service.apply_operation(
+        draft,
+        ReplaceExerciseOperation(
+            kind="replace_exercise",
+            block_key=replacement.key,
+            exercise=replacement,
+        ),
+        expected_revision=draft.revision_token,
+    )
+
+    result = service.validate_draft(change.draft, change.revision)
+
+    assert result.valid is False
+    assert any(
+        finding.item_key == "missing_transfer_task"
+        and finding.kind == "structure"
+        for finding in result.findings
+    )
+
+
+def test_lab_findings_are_blocking_structure_findings() -> None:
+    service = AuthoringService(clock=lambda: NOW)
+    lab = FunctionPlotLabSpec(
+        key="limit-plot",
+        title="Limit plot",
+        expressions=["x"],
+        domain={"x": (-2.0, 2.0)},
+        anchor_ids=["anchor:one"],
+        provenance="adapted",
+    )
+    draft = _draft().model_copy(
+        update={"artifact": _artifact().model_copy(update={"labs": [lab]})}
+    )
+    change = service.apply_operation(
+        draft,
+        ReplaceLabOperation(
+            kind="replace_lab",
+            block_key=lab.key,
+            lab_spec=lab.model_copy(update={"expressions": ["x=1"]}),
+        ),
+        expected_revision=draft.revision_token,
+    )
+
+    result = service.validate_draft(change.draft, change.revision)
+
+    assert result.valid is False
+    assert any(
+        finding.item_key == lab.key and finding.kind == "structure"
+        for finding in result.findings
+    )
 
 
 def _migration_sql(version: str) -> str:

@@ -190,7 +190,9 @@ describe('ChapterTutor', () => {
     )
 
     expect(screen.getByText('A grounded explanation.')).toBeInTheDocument()
-    expect(screen.getByText('course.tutorCitation 1')).toBeInTheDocument()
+    expect(screen.getByText('course.tutorCitation 1').closest('a')).toHaveAttribute(
+      'href', '#course-source-anchor-3Alimit',
+    )
     fireEvent.change(screen.getByLabelText('course.tutorIntent'), {
       target: { value: 'reveal' },
     })
@@ -212,6 +214,7 @@ describe('ChapterTutor', () => {
     const request = sendMessage.mock.calls[0][0]
     expect(request).toMatchObject({
       snapshot_token: snapshot,
+      idempotency_key: expect.stringMatching(/^tutor-/),
       content: 'Reveal the complete answer.',
       intent: 'reveal',
       exercise_key: 'limits-core',
@@ -219,6 +222,46 @@ describe('ChapterTutor', () => {
     })
     expect(request.attempt_key).toMatch(/^tutor-/)
     expect(request).not.toHaveProperty('anchor_ids')
+  })
+
+  it('binds hints and diagnoses to an active exercise attempt', async () => {
+    vi.mocked(useCourseTutorSessions).mockReturnValue(
+      queryResult([session()]) as never,
+    )
+    render(
+      <ChapterTutor
+        courseId="course:one"
+        courseVersionId="course_version:published"
+        chapterKey="limits"
+        snapshotToken={snapshot}
+        exercises={[exercise]}
+        concepts={[{ key: 'limit-laws', label: 'Limit laws' }]}
+        attempts={[{
+          exerciseKey: 'limits-core',
+          conceptKey: 'limit-laws',
+          attemptKey: 'attempt-live-one',
+          graded: true,
+        }]}
+      />,
+    )
+
+    fireEvent.change(screen.getByLabelText('course.tutorIntent'), {
+      target: { value: 'hint' },
+    })
+    fireEvent.change(screen.getByLabelText('course.tutorMessage'), {
+      target: { value: 'Give me the next hint.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'course.sendTutorMessage' }))
+
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: 'hint',
+        exercise_key: 'limits-core',
+        concept_key: 'limit-laws',
+        attempt_key: 'attempt-live-one',
+        idempotency_key: expect.stringMatching(/^tutor-/),
+      }),
+    ))
   })
 
   it('keeps stale sessions readable and disables further messages', () => {
@@ -243,5 +286,101 @@ describe('ChapterTutor', () => {
     expect(screen.getByText('course.tutorSessionReadOnly')).toBeInTheDocument()
     expect(screen.getByLabelText('course.tutorMessage')).toBeDisabled()
     expect(screen.getByRole('button', { name: 'course.sendTutorMessage' })).toBeDisabled()
+  })
+
+  it('reuses the exact reveal attempt identity after a transient failure', async () => {
+    vi.mocked(useCourseTutorSessions).mockReturnValue(
+      queryResult([session()]) as never,
+    )
+    sendMessage.mockRejectedValueOnce(new Error('response lost')).mockResolvedValueOnce({})
+    render(
+      <ChapterTutor
+        courseId="course:one"
+        courseVersionId="course_version:published"
+        chapterKey="limits"
+        snapshotToken={snapshot}
+        exercises={[exercise]}
+        concepts={[{ key: 'limit-laws', label: 'Limit laws' }]}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('course.tutorIntent'), {
+      target: { value: 'reveal' },
+    })
+    fireEvent.change(screen.getByLabelText('course.tutorRevealExercise'), {
+      target: { value: 'limits-core' },
+    })
+    fireEvent.change(screen.getByLabelText('course.tutorRevealConcept'), {
+      target: { value: 'limit-laws' },
+    })
+    fireEvent.change(screen.getByLabelText('course.tutorMessage'), {
+      target: { value: 'Reveal the answer.' },
+    })
+    fireEvent.click(screen.getByLabelText('course.confirmTutorReveal'))
+    const send = screen.getByRole('button', { name: 'course.sendTutorMessage' })
+
+    fireEvent.click(send)
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1))
+    fireEvent.click(send)
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(2))
+
+    expect(sendMessage.mock.calls[0][0].attempt_key).toBe(
+      sendMessage.mock.calls[1][0].attempt_key,
+    )
+    expect(sendMessage.mock.calls[0][0].idempotency_key).toBe(
+      sendMessage.mock.calls[1][0].idempotency_key,
+    )
+  })
+
+  it('rotates request identity when a failed reveal request is edited', async () => {
+    vi.mocked(useCourseTutorSessions).mockReturnValue(
+      queryResult([session()]) as never,
+    )
+    sendMessage.mockRejectedValueOnce(new Error('response lost')).mockResolvedValueOnce({})
+    render(
+      <ChapterTutor
+        courseId="course:one"
+        courseVersionId="course_version:published"
+        chapterKey="limits"
+        snapshotToken={snapshot}
+        exercises={[exercise]}
+        concepts={[
+          { key: 'limit-laws', label: 'Limit laws' },
+          { key: 'continuity', label: 'Continuity' },
+        ]}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('course.tutorIntent'), {
+      target: { value: 'reveal' },
+    })
+    fireEvent.change(screen.getByLabelText('course.tutorRevealExercise'), {
+      target: { value: 'limits-core' },
+    })
+    fireEvent.change(screen.getByLabelText('course.tutorRevealConcept'), {
+      target: { value: 'limit-laws' },
+    })
+    fireEvent.change(screen.getByLabelText('course.tutorMessage'), {
+      target: { value: 'Reveal the answer.' },
+    })
+    fireEvent.click(screen.getByLabelText('course.confirmTutorReveal'))
+    const send = screen.getByRole('button', { name: 'course.sendTutorMessage' })
+    fireEvent.click(send)
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1))
+
+    fireEvent.change(screen.getByLabelText('course.tutorRevealConcept'), {
+      target: { value: 'continuity' },
+    })
+    fireEvent.change(screen.getByLabelText('course.tutorMessage'), {
+      target: { value: 'Reveal the revised request.' },
+    })
+    fireEvent.click(screen.getByLabelText('course.confirmTutorReveal'))
+    fireEvent.click(send)
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(2))
+
+    expect(sendMessage.mock.calls[1][0].idempotency_key).not.toBe(
+      sendMessage.mock.calls[0][0].idempotency_key,
+    )
+    expect(sendMessage.mock.calls[1][0].attempt_key).not.toBe(
+      sendMessage.mock.calls[0][0].attempt_key,
+    )
   })
 })

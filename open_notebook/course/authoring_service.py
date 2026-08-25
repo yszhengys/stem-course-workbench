@@ -45,6 +45,14 @@ _INVALIDATED_CHECKS: dict[str, tuple[ValidationCheck, ...]] = {
     "replace_transfer": ("unit", "numeric", "physics", "citation", "structure"),
     "replace_lab": ("physics", "citation", "structure"),
 }
+_VALIDATION_CHECK_ORDER: tuple[ValidationCheck, ...] = (
+    "formula",
+    "unit",
+    "numeric",
+    "physics",
+    "citation",
+    "structure",
+)
 
 
 class DraftConflictError(InvalidInputError):
@@ -102,6 +110,10 @@ class DraftState(V2Contract):
         default=None, pattern=r"^course_draft_revision:[^:]+$"
     )
     revision_status: RevisionStatus | None = None
+    invalidated_checks: tuple[ValidationCheck, ...] = Field(
+        default_factory=tuple,
+        max_length=6,
+    )
     chapter_updated: datetime | None = Field(default=None, exclude=True)
 
     @model_validator(mode="after")
@@ -178,10 +190,59 @@ class AuthoringService:
             raise DraftImmutableError("Approved or published Course artifacts are immutable.")
 
     @staticmethod
+    def _require_unique_target(matches: int, label: str) -> None:
+        if matches == 0:
+            raise DraftConflictError(f"Draft {label} block does not exist.")
+        if matches > 1:
+            raise DraftConflictError(f"Draft {label} block target is ambiguous.")
+
+    @staticmethod
+    def _text_target_keys(artifact: ChapterArtifact) -> tuple[str, ...]:
+        keys = ["purpose", *(section.key for section in artifact.sections)]
+        attributed_lists = (
+            ("prerequisite", artifact.prerequisites),
+            ("objective", artifact.objectives),
+            ("definition", artifact.definitions),
+            ("misconception", artifact.misconceptions),
+            ("pitfall", artifact.pitfalls),
+            ("quick-reference", artifact.quick_reference),
+        )
+        for prefix, values in attributed_lists:
+            keys.extend(f"{prefix}-{index + 1}" for index in range(len(values)))
+        for example in artifact.worked_examples:
+            keys.extend(
+                (
+                    f"worked-example-{example.key}-prompt",
+                    f"worked-example-{example.key}-answer",
+                    *(
+                        f"worked-example-{example.key}-step-{index + 1}"
+                        for index in range(len(example.steps))
+                    ),
+                )
+            )
+        for exercise in artifact.exercises:
+            keys.extend(
+                (
+                    f"legacy-exercise-{exercise.key}-prompt",
+                    f"legacy-exercise-{exercise.key}-answer",
+                    f"legacy-exercise-{exercise.key}-transfer",
+                    *(
+                        f"legacy-exercise-{exercise.key}-hint-{index + 1}"
+                        for index in range(len(exercise.hints))
+                    ),
+                )
+            )
+        return tuple(keys)
+
+    @staticmethod
     def _replace_text(
         artifact: ChapterArtifact,
         operation: ReplaceTextOperation,
     ) -> ChapterArtifact:
+        AuthoringService._require_unique_target(
+            AuthoringService._text_target_keys(artifact).count(operation.block_key),
+            "text",
+        )
         updated = artifact.model_copy(deep=True)
         provenance = _human_provenance(operation.anchor_ids)
 
@@ -290,6 +351,10 @@ class AuthoringService:
         artifact: ChapterArtifact,
         operation: ReplaceFormulaOperation,
     ) -> ChapterArtifact:
+        AuthoringService._require_unique_target(
+            sum(formula.key == operation.block_key for formula in artifact.formulas),
+            "formula",
+        )
         updated = artifact.model_copy(deep=True)
         for index, formula in enumerate(updated.formulas):
             if formula.key != operation.block_key:
@@ -316,6 +381,10 @@ class AuthoringService:
             or replacement.chapter_key != chapter_key
         ):
             raise DraftConflictError("Exercise stable identity cannot be changed.")
+        AuthoringService._require_unique_target(
+            sum(exercise.key == operation.block_key for exercise in exercises),
+            "exercise",
+        )
         updated = list(exercises)
         for index, exercise in enumerate(updated):
             if exercise.key == operation.block_key:
@@ -328,6 +397,16 @@ class AuthoringService:
         exercises: tuple[ExerciseBlueprint, ...],
         operation: ReplaceTransferOperation,
     ) -> tuple[ExerciseBlueprint, ...]:
+        matching = tuple(
+            exercise
+            for exercise in exercises
+            if operation.block_key
+            in {
+                exercise.key,
+                exercise.transfer_task.key if exercise.transfer_task is not None else "",
+            }
+        )
+        AuthoringService._require_unique_target(len(matching), "transfer")
         updated = list(exercises)
         for index, exercise in enumerate(updated):
             current = exercise.transfer_task
@@ -354,6 +433,10 @@ class AuthoringService:
         replacement = operation.lab_spec.as_lab_spec()
         if replacement.key != operation.block_key:
             raise DraftConflictError("Lab stable identity cannot be changed.")
+        AuthoringService._require_unique_target(
+            sum(lab.key == operation.block_key for lab in artifact.labs),
+            "Lab",
+        )
         updated = artifact.model_copy(deep=True)
         for index, lab in enumerate(updated.labs):
             if lab.key == operation.block_key:
@@ -402,6 +485,12 @@ class AuthoringService:
         elif isinstance(operation, ReplaceLabOperation):
             artifact = self._replace_lab(artifact, operation)
 
+        invalidated = set(_INVALIDATED_CHECKS[operation.kind])
+        if draft.revision_status == "draft":
+            invalidated.update(draft.invalidated_checks)
+        invalidated_checks = tuple(
+            check for check in _VALIDATION_CHECK_ORDER if check in invalidated
+        )
         next_no = draft.revision_no + 1
         changed = DraftState(
             scope=draft.scope,
@@ -410,6 +499,7 @@ class AuthoringService:
             revision_no=next_no,
             revision_id=f"course_draft_revision:pending-{next_no}",
             revision_status="draft",
+            invalidated_checks=invalidated_checks,
             chapter_updated=draft.chapter_updated,
         )
         if changed.artifact_hash == draft.artifact_hash:
@@ -423,7 +513,7 @@ class AuthoringService:
             base_artifact_hash=draft.artifact_hash,
             artifact_hash=changed.artifact_hash,
             operation=operation,
-            invalidated_checks=_INVALIDATED_CHECKS[operation.kind],
+            invalidated_checks=invalidated_checks,
             created_at=occurred_at.astimezone(timezone.utc),
         )
         return DraftChange(draft=changed, revision=revision)
@@ -446,9 +536,10 @@ class AuthoringService:
             draft.artifact,
             known_anchors,
         )
-        if set(checked).intersection(
-            {"unit", "numeric", "physics", "citation", "structure"}
-        ):
+        assessment_checks = {
+            "unit", "numeric", "physics", "citation", "structure"
+        }
+        if assessment_checks.issubset(set(checked)):
             findings.extend(
                 AssessmentService.validate_bank(
                     draft.exercises,
@@ -456,8 +547,14 @@ class AuthoringService:
                     expected_chapter_keys={draft.scope.chapter_key},
                 )
             )
+        normalized = tuple(
+            finding.model_copy(update={"kind": "structure"})
+            if finding.kind in {"review", "lab"}
+            else finding
+            for finding in findings
+        )
         selected = tuple(
-            finding for finding in findings if finding.kind in set(checked)
+            finding for finding in normalized if finding.kind in set(checked)
         )
         blocking = any(
             finding.severity in {"high", "error"}
@@ -530,6 +627,11 @@ class AuthoringService:
             revision_no=latest.revision_no if latest is not None else 0,
             revision_id=str(latest.id) if latest is not None else None,
             revision_status=latest.status if latest is not None else None,
+            invalidated_checks=(
+                latest.invalidated_checks
+                if latest is not None and latest.status == "draft"
+                else ()
+            ),
             chapter_updated=chapter.updated,
         )
         if latest is not None and latest.artifact_hash != state.artifact_hash:

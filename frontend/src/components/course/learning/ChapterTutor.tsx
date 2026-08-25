@@ -17,6 +17,7 @@ import {
   useSendCourseTutorMessage,
 } from '@/lib/hooks/use-courses'
 import { useTranslation } from '@/lib/hooks/use-translation'
+import { courseCitationTarget } from '@/lib/course/citations'
 import type {
   CourseExercise,
   CourseTutorMessageRequest,
@@ -24,6 +25,13 @@ import type {
 } from '@/lib/types/course'
 
 type TutorIntent = CourseTutorMessageRequest['intent']
+
+export interface TutorAttemptScope {
+  exerciseKey: string
+  conceptKey: string
+  attemptKey: string
+  graded: boolean
+}
 
 function tutorAttemptKey(): string {
   return `tutor-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 18)}`
@@ -37,6 +45,7 @@ export function ChapterTutor({
   snapshotToken,
   exercises,
   concepts,
+  attempts = [],
 }: {
   courseId: string
   courseVersionId: string
@@ -44,6 +53,7 @@ export function ChapterTutor({
   snapshotToken: string
   exercises: CourseExercise[]
   concepts: { key: string; label: string }[]
+  attempts?: TutorAttemptScope[]
 }) {
   const { t } = useTranslation()
   const sessions = useCourseTutorSessions(courseId)
@@ -56,6 +66,11 @@ export function ChapterTutor({
   const [revealExerciseKey, setRevealExerciseKey] = useState('')
   const [revealConceptKey, setRevealConceptKey] = useState('')
   const [confirmReveal, setConfirmReveal] = useState(false)
+  const [messageKey, setMessageKey] = useState(() => tutorAttemptKey())
+  const [selectedAttemptKey, setSelectedAttemptKey] = useState('')
+  const [revealAttemptKey, setRevealAttemptKey] = useState(
+    () => tutorAttemptKey(),
+  )
 
   const chapterSessions = useMemo(
     () => (sessions.data ?? []).filter((session) => session.chapter_key === chapterKey),
@@ -84,6 +99,15 @@ export function ChapterTutor({
   const revealExercise = revealExercises.find(
     (exercise) => exercise.key === revealExerciseKey,
   )
+  const scopedAttempts = intent === 'diagnose'
+    ? attempts.filter((attempt) => attempt.graded)
+    : attempts
+  const selectedAttempt = scopedAttempts.find(
+    (attempt) => attempt.attemptKey === selectedAttemptKey,
+  ) ?? scopedAttempts[0]
+  useEffect(() => {
+    setMessageKey(tutorAttemptKey())
+  }, [selectedAttempt?.attemptKey])
   const conceptLabel = (key: string) => (
     concepts.find((concept) => concept.key === key)?.label
     ?? t('course.conceptLabelUnavailable')
@@ -104,27 +128,41 @@ export function ChapterTutor({
     if (!selectedSessionId || !writable || !trimmed) return
     const request: CourseTutorMessageRequest = {
       snapshot_token: snapshotToken,
+      idempotency_key: messageKey,
       content: trimmed,
       intent,
     }
-    if (intent === 'reveal') {
+    if (intent === 'hint' || intent === 'diagnose') {
+      if (!selectedAttempt) return
+      request.exercise_key = selectedAttempt.exerciseKey
+      request.concept_key = selectedAttempt.conceptKey
+      request.attempt_key = selectedAttempt.attemptKey
+    } else if (intent === 'reveal') {
       if (!revealExercise || !revealConceptKey || !confirmReveal) return
       request.exercise_key = revealExercise.key
       request.concept_key = revealConceptKey
-      request.attempt_key = tutorAttemptKey()
+      request.attempt_key = revealAttemptKey
     }
-    await sendMessage.mutateAsync(request)
-    setMessage('')
-    setConfirmReveal(false)
+    try {
+      await sendMessage.mutateAsync(request)
+      setMessage('')
+      setConfirmReveal(false)
+      setMessageKey(tutorAttemptKey())
+      if (intent === 'reveal') setRevealAttemptKey(tutorAttemptKey())
+    } catch {
+      // Mutation feedback owns the visible error; preserve identity for retry.
+    }
   }
 
-  const revealReady = intent !== 'reveal' || Boolean(
-    revealExercise && revealConceptKey && confirmReveal,
-  )
+  const scopeReady = intent === 'reveal'
+    ? Boolean(revealExercise && revealConceptKey && confirmReveal)
+    : intent === 'hint' || intent === 'diagnose'
+      ? Boolean(selectedAttempt)
+      : true
   const sendDisabled = (
     !writable
     || !message.trim()
-    || !revealReady
+    || !scopeReady
     || sendMessage.isPending
   )
 
@@ -157,7 +195,10 @@ export function ChapterTutor({
           <select
             id="course-tutor-session"
             value={selectedSessionId ?? ''}
-            onChange={(event) => setSelectedSessionId(event.target.value)}
+            onChange={(event) => {
+              setSelectedSessionId(event.target.value)
+              setMessageKey(tutorAttemptKey())
+            }}
             className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
           >
             {chapterSessions.map((session) => (
@@ -196,9 +237,15 @@ export function ChapterTutor({
                 {turn.anchor_ids.length > 0 && (
                   <div className="mt-3 flex flex-wrap gap-2" aria-label={t('course.tutorCitations')}>
                     {turn.anchor_ids.map((anchorId, index) => (
-                      <Badge key={anchorId} variant="outline" title={anchorId}>
-                        {t('course.tutorCitation', { index: index + 1 })}
-                      </Badge>
+                      <a
+                        key={anchorId}
+                        href={`#${courseCitationTarget(anchorId)}`}
+                        title={anchorId}
+                      >
+                        <Badge variant="outline">
+                          {t('course.tutorCitation', { index: index + 1 })}
+                        </Badge>
+                      </a>
                     ))}
                   </div>
                 )}
@@ -250,6 +297,7 @@ export function ChapterTutor({
               onChange={(event) => {
                 setIntent(event.target.value as TutorIntent)
                 setConfirmReveal(false)
+                setMessageKey(tutorAttemptKey())
               }}
               disabled={!writable || sendMessage.isPending}
               className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
@@ -275,6 +323,8 @@ export function ChapterTutor({
                     setRevealExerciseKey(event.target.value)
                     setRevealConceptKey('')
                     setConfirmReveal(false)
+                    setRevealAttemptKey(tutorAttemptKey())
+                    setMessageKey(tutorAttemptKey())
                   }}
                   disabled={!writable}
                   className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
@@ -293,7 +343,12 @@ export function ChapterTutor({
                   id="course-tutor-reveal-concept"
                   aria-label={t('course.tutorRevealConcept')}
                   value={revealConceptKey}
-                  onChange={(event) => setRevealConceptKey(event.target.value)}
+                  onChange={(event) => {
+                    setRevealConceptKey(event.target.value)
+                    setConfirmReveal(false)
+                    setRevealAttemptKey(tutorAttemptKey())
+                    setMessageKey(tutorAttemptKey())
+                  }}
                   disabled={!writable || !revealExercise}
                   className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
                 >
@@ -316,13 +371,47 @@ export function ChapterTutor({
             </div>
           )}
 
+          {(intent === 'hint' || intent === 'diagnose') && (
+            <div className="space-y-2">
+              <Label htmlFor="course-tutor-attempt">{t('course.tutorAttempt')}</Label>
+              <select
+                id="course-tutor-attempt"
+                aria-label={t('course.tutorAttempt')}
+                value={selectedAttempt?.attemptKey ?? ''}
+                onChange={(event) => {
+                  setSelectedAttemptKey(event.target.value)
+                  setMessageKey(tutorAttemptKey())
+                }}
+                disabled={!writable || scopedAttempts.length === 0}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+              >
+                {scopedAttempts.length === 0 && (
+                  <option value="">{t('course.noAttempts')}</option>
+                )}
+                {scopedAttempts.map((attempt) => {
+                  const item = exercises.find(
+                    (exercise) => exercise.key === attempt.exerciseKey,
+                  )
+                  return (
+                    <option key={attempt.attemptKey} value={attempt.attemptKey}>
+                      {item?.prompt ?? attempt.exerciseKey} — {conceptLabel(attempt.conceptKey)}
+                    </option>
+                  )
+                })}
+              </select>
+            </div>
+          )}
+
           <div className="space-y-2">
             <Label htmlFor="course-tutor-message">{t('course.tutorMessage')}</Label>
             <Textarea
               id="course-tutor-message"
               aria-label={t('course.tutorMessage')}
               value={message}
-              onChange={(event) => setMessage(event.target.value)}
+              onChange={(event) => {
+                setMessage(event.target.value)
+                setMessageKey(tutorAttemptKey())
+              }}
               disabled={!writable || sendMessage.isPending}
               placeholder={t('course.tutorMessagePlaceholder')}
               maxLength={20_000}

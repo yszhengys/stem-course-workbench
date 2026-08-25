@@ -194,7 +194,8 @@ describe('Course learner queries', () => {
       { wrapper: wrapperFor(client) },
     )
     const request = {
-      snapshot_token: 'a'.repeat(64), content: 'Explain this step.', intent: 'explain' as const,
+      snapshot_token: 'a'.repeat(64), idempotency_key: 'message-one',
+      content: 'Explain this step.', intent: 'explain' as const,
     }
     await act(async () => { await result.current.mutateAsync(request) })
 

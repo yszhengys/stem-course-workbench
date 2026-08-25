@@ -406,6 +406,30 @@ class TestBuildSourceContext:
         assert first_text in formatted
         assert SOURCE_TRUNCATION_NOTICE in formatted
 
+    @pytest.mark.asyncio
+    async def test_offline_cjk_source_still_respects_the_rendered_token_budget(self):
+        """No-space CJK content cannot bypass the offline source budget."""
+        full_text = "数学公式与物理证据必须保持可追溯" * 1_000
+        source = _mock_source([])
+        source.get_context.return_value["full_text"] = full_text
+
+        with (
+            patch(
+                "open_notebook.utils.context_builder.Source.get",
+                new=AsyncMock(return_value=source),
+            ),
+            patch("tiktoken.get_encoding", side_effect=OSError("offline")),
+        ):
+            result = await build_source_context("source:123", max_tokens=120)
+
+        rendered = _format_source_context(result)
+        assert result["metadata"]["source_text_status"] == "truncated"
+        assert result["sources"][0]["full_text"].endswith(
+            SOURCE_TRUNCATION_NOTICE
+        )
+        assert len(result["sources"][0]["full_text"]) < len(full_text)
+        assert token_count(rendered) <= 120
+
     @pytest.mark.parametrize(
         ("status", "full_text", "expected"),
         [

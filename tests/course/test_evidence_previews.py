@@ -291,7 +291,7 @@ async def test_course_preview_service_checks_course_ownership_and_current_hash(
 
     assert loaded.content.startswith(b"<svg")
     assert query.await_args is not None
-    assert query.await_args.args[1]["anchor_id"] == anchor.anchor_id
+    assert query.await_args.args[1]["anchor_ids"] == [anchor.anchor_id]
 
     monkeypatch.setattr(
         CourseService, "get_course", AsyncMock(return_value=_course([]))

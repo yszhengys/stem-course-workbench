@@ -16,7 +16,6 @@ the frontend — do not change it here.
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, Optional, Tuple
 
 from loguru import logger
@@ -91,7 +90,7 @@ def _rendered_source_context_tokens(
     if encoding is _TOKENIZER_UNSET:
         return token_count(rendered)
     if encoding is None:
-        return int(len(rendered.split()) * 1.3)
+        return token_count(rendered)
     return len(encoding.encode(rendered, disallowed_special=()))
 
 
@@ -240,17 +239,43 @@ def _truncate_source_to_token_budget(
         if best is not None:
             return best, True
     except (ImportError, OSError):
-        # Match token_count's offline fallback with deterministic word-boundary
-        # prefixes. Its split-based estimate is monotonic, so binary search does
-        # not need the tokenizer path's validation window.
-        word_ends = [match.end() for match in re.finditer(r"\S+", full_text)]
+        # The offline estimate accounts for both words and characters so CJK and
+        # other no-space scripts cannot bypass the budget. Character prefixes are
+        # deterministic and keep the search logarithmic for large documents.
+        # Bound the search with the source-only part of that estimate. Metadata
+        # and the truncation notice can only make the rendered candidate larger,
+        # so this remains a safe upper bound while avoiding needless searches
+        # across obviously over-budget suffixes.
+        fallback_upper_bound = len(full_text)
+        word_count = 0
+        ascii_characters = 0
+        non_ascii_characters = 0
+        previous_was_space = True
+        for character_count, character in enumerate(full_text, start=1):
+            if character.isspace():
+                previous_was_space = True
+                continue
+            if previous_was_space:
+                word_count += 1
+            previous_was_space = False
+            if character.isascii():
+                ascii_characters += 1
+            else:
+                non_ascii_characters += 1
+            word_estimate = int(word_count * 1.3)
+            character_estimate = non_ascii_characters + (
+                ascii_characters + 3
+            ) // 4
+            if max(word_estimate, character_estimate) > max_tokens:
+                fallback_upper_bound = character_count - 1
+                break
 
-        def word_prefix(word_count: int) -> str:
-            return full_text[: word_ends[word_count - 1]]
+        def character_prefix(character_count: int) -> str:
+            return full_text[:character_count]
 
         best = find_fitting_prefix(
-            min(len(word_ends), max_tokens),
-            word_prefix,
+            fallback_upper_bound,
+            character_prefix,
             0,
         )
         if best is not None:

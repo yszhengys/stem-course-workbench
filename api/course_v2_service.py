@@ -60,6 +60,7 @@ from open_notebook.course.authoring_service import (
     DraftState,
 )
 from open_notebook.course.contracts import ChapterArtifact, CourseOutlineArtifact
+from open_notebook.course.evidence_service import EvidenceService
 from open_notebook.course.learning_service import (
     REVIEW_INTERVAL_DAYS,
     LearningService,
@@ -306,16 +307,7 @@ class CourseV2Service:
         chapter: Chapter,
         chapter_key: str,
     ) -> CourseLearnerChapterArtifact:
-        try:
-            artifact = ChapterArtifact.model_validate(chapter.artifact)
-        except Exception as exc:
-            raise InvalidInputError(
-                "Published chapter content is unavailable or invalid."
-            ) from exc
-        if artifact.chapter_key != chapter_key:
-            raise InvalidInputError(
-                "Published chapter artifact uses another stable key."
-            )
+        artifact = cls._chapter_artifact(chapter, chapter_key)
         return CourseLearnerChapterArtifact(
             purpose=artifact.purpose,
             prerequisites=tuple(artifact.prerequisites),
@@ -361,19 +353,40 @@ class CourseV2Service:
         )
 
     @staticmethod
-    def _learner_anchor_ids(
-        artifact: CourseLearnerChapterArtifact,
-    ) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(
-            anchor_id
-            for anchors in (
-                artifact.citations,
-                *(section.anchor_ids for section in artifact.sections),
-                *(formula.anchor_ids for formula in artifact.formulas),
-                *(example.anchor_ids for example in artifact.worked_examples),
+    def _chapter_artifact(
+        chapter: Chapter,
+        chapter_key: str,
+    ) -> ChapterArtifact:
+        try:
+            artifact = ChapterArtifact.model_validate(chapter.artifact)
+        except Exception as exc:
+            raise InvalidInputError(
+                "Published chapter content is unavailable or invalid."
+            ) from exc
+        if artifact.chapter_key != chapter_key:
+            raise InvalidInputError(
+                "Published chapter artifact uses another stable key."
             )
-            for anchor_id in anchors
-        ))
+        return artifact
+
+    @classmethod
+    async def _chapter_anchor_ids(
+        cls,
+        course_id: str,
+        chapter: Chapter,
+        chapter_key: str,
+    ) -> tuple[str, ...]:
+        artifact = cls._chapter_artifact(chapter, chapter_key)
+        collected = list(CourseService.chapter_artifact_anchor_ids(artifact))
+        _version, exercises = await CourseService.list_current_exercises(
+            course_id, chapter_key
+        )
+        for exercise in exercises:
+            collected.extend(exercise.source_anchor_ids)
+            transfer = exercise.blueprint.transfer_task
+            if transfer is not None:
+                collected.extend(transfer.anchor_ids)
+        return tuple(dict.fromkeys(collected))
 
     @staticmethod
     def _learner_block_keys(
@@ -614,12 +627,14 @@ class CourseV2Service:
         chapter_key: str,
     ) -> CourseLearnerSourcesResponse:
         version, chapter, version_id = await self._scope(course_id, chapter_key)
-        learner_artifact = self._learner_artifact(chapter, chapter_key)
+        anchor_ids = await self._chapter_anchor_ids(
+            course_id, chapter, chapter_key
+        )
+        owned_assets = await CourseService._owned_evidence_assets(
+            course_id, anchor_ids
+        )
         sources: list[CourseLearnerSourceResponse] = []
-        for anchor_id in self._learner_anchor_ids(learner_artifact):
-            anchor, _evidence, source, _source_hash = (
-                await CourseService._owned_evidence_asset(course_id, anchor_id)
-            )
+        for anchor, _evidence, source, _source_hash in owned_assets:
             sources.append(CourseLearnerSourceResponse(
                 anchor_id=anchor.anchor_id,
                 filename=source.filename,
@@ -724,7 +739,9 @@ class CourseV2Service:
         chapter_key: str,
     ) -> tuple[CourseVersion, Chapter, TutorScope]:
         version, chapter, version_id = await self._scope(course_id, chapter_key)
-        learner_artifact = self._learner_artifact(chapter, chapter_key)
+        allowed_anchor_ids = await self._chapter_anchor_ids(
+            course_id, chapter, chapter_key
+        )
         scope = TutorScope(
             course_id=course_id,
             course_version_id=version_id,
@@ -733,7 +750,7 @@ class CourseV2Service:
             snapshot_token=self._chapter_snapshot_token(
                 course_id, version, chapter
             ),
-            allowed_anchor_ids=self._learner_anchor_ids(learner_artifact),
+            allowed_anchor_ids=allowed_anchor_ids,
         )
         return version, chapter, scope
 
@@ -810,12 +827,14 @@ class CourseV2Service:
         self,
         course_id: str,
         scope: TutorScope,
+        *,
+        include_answers: bool,
     ) -> tuple[TutorEvidence, ...]:
-        async def resolve(anchor_id: str) -> TutorEvidence:
-            anchor, _evidence, _source, _source_hash = (
-                await CourseService._owned_evidence_asset(course_id, anchor_id)
-            )
-            return TutorEvidence(
+        owned_assets = await CourseService._owned_evidence_assets(
+            course_id, scope.allowed_anchor_ids
+        )
+        return tuple(
+            TutorEvidence(
                 anchor_id=anchor.anchor_id,
                 quote=anchor.locator.quote,
                 source_role=(
@@ -824,11 +843,10 @@ class CourseV2Service:
                     else "PRIMARY"
                 ),
             )
-
-        return tuple(
-            await asyncio.gather(
-                *(resolve(anchor_id) for anchor_id in scope.allowed_anchor_ids)
-            )
+            for anchor, _evidence, _source, _source_hash in owned_assets
+            if include_answers
+            or EvidenceService.classify_assessment_anchor(anchor).category
+            != "answer"
         )
 
     async def respond_to_tutor(
@@ -850,23 +868,34 @@ class CourseV2Service:
                 "Tutor session belongs to an older published version and is read-only."
             )
         self._require_snapshot(scope.snapshot_token, request.snapshot_token)
-        evidence = await self._tutor_evidence(course_id, scope)
-        exercise = (
-            await CourseService.get_current_exercise(
-                course_id,
-                scope.chapter_key,
-                request.exercise_key,
-            )
-            if request.exercise_key is not None
-            else None
+        evidence = await self._tutor_evidence(
+            course_id,
+            scope,
+            include_answers=request.intent == "reveal",
         )
+        _exercise_version, exercises = await CourseService.list_current_exercises(
+            course_id,
+            scope.chapter_key,
+        )
+        exercise = next(
+            (
+                item
+                for item in exercises
+                if item.exercise_key == request.exercise_key
+            ),
+            None,
+        )
+        if request.exercise_key is not None and exercise is None:
+            raise TutorGroundingError("Current Course exercise not found.")
         response = await self._tutor().respond(
             scope=scope,
             session_id=session_id,
+            message_key=request.idempotency_key,
             content=request.content,
             intent=request.intent,
             evidence=evidence,
             exercise=exercise,
+            protected_exercises=exercises,
             concept_key=request.concept_key,
             attempt_key=request.attempt_key,
         )
@@ -1418,7 +1447,7 @@ class CourseV2Service:
                 )
             ).encode("utf-8")
         ).hexdigest()
-        event = LearningEvent(
+        candidate = LearningEvent(
             event_id=event_key,
             course_id=course_id,
             course_version_id=version_id,
@@ -1434,7 +1463,25 @@ class CourseV2Service:
             ),
             occurred_at=self.clock(),
         )
-        mastery = await self.learning_service.append_event(event)
+        existing = await CourseService.get_learning_event(course_id, event_key)
+        if existing is not None:
+            if not self._same_grade_event(existing, candidate):
+                raise InvalidInputError(
+                    "Attempt key was already graded with different content."
+                )
+            event = existing
+        else:
+            event = candidate
+        try:
+            mastery = await self.learning_service.append_event(event)
+        except InvalidInputError:
+            concurrent = await CourseService.get_learning_event(course_id, event_key)
+            if concurrent is None or not self._same_grade_event(
+                concurrent, candidate
+            ):
+                raise
+            event = concurrent
+            mastery = await self.learning_service.append_event(event)
         return CourseExerciseGradeResponse(
             grade=grade,
             mastery=mastery,
