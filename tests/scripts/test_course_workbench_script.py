@@ -221,6 +221,14 @@ if args and args[0] == "compose":
         (state / "docker.service").write_text("surrealdb", encoding="utf-8")
         (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
         raise SystemExit(0)
+    if tail == ["up", "-d", "--force-recreate", "surrealdb"]:
+        (state / "docker.exists").touch()
+        (state / "docker.running").touch()
+        (state / "docker.root").write_text(project_dir, encoding="utf-8")
+        (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+        (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+        (state / "docker.publishers").unlink(missing_ok=True)
+        raise SystemExit(0)
     if tail == ["stop", "surrealdb"]:
         (state / "docker.running").unlink(missing_ok=True)
         raise SystemExit(0)
@@ -1342,6 +1350,60 @@ def test_running_owned_surreal_container_requires_its_own_published_port(
     combined = result.stdout + result.stderr
     assert "foreign-surrealdb" in combined
     assert "another Docker container" in combined
+
+
+def test_running_owned_surreal_container_repairs_missing_port_publish(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = _with_ui_contract(env)
+    (state / "docker.exists").touch()
+    (state / "docker.running").touch()
+    (state / "docker.root").write_text(str(repo), encoding="utf-8")
+    (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+    (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+    # Docker can retain HostConfig.PortBindings while omitting the active
+    # publisher when the container was created during a port collision.
+    (state / "docker.publishers").write_text("", encoding="utf-8")
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert any(
+        call.endswith("up -d --force-recreate surrealdb")
+        for call in _calls(state / "docker.calls")
+    )
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_running_owned_surreal_container_does_not_repair_over_foreign_process(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    foreign_pid = 424242
+    (state / "docker.exists").touch()
+    (state / "docker.running").touch()
+    (state / "docker.root").write_text(str(repo), encoding="utf-8")
+    (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+    (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+    (state / "docker.publishers").write_text("", encoding="utf-8")
+    (state / "port.8000").write_text(str(foreign_pid), encoding="utf-8")
+    (state / f"pid.{foreign_pid}.cwd").write_text(
+        "/another/checkout", encoding="utf-8"
+    )
+    (state / f"pid.{foreign_pid}.command").write_text(
+        "foreign service", encoding="utf-8"
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "another process or checkout" in combined
+    assert not any(
+        call.endswith("up -d --force-recreate surrealdb")
+        for call in _calls(state / "docker.calls")
+    )
 
 
 @pytest.mark.parametrize("race", ["id", "root", "service"])

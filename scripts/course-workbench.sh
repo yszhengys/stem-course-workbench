@@ -498,10 +498,20 @@ wait_for_process_group_exit() {
     owned_pgid=$1
     attempt_limit=$2
     attempts=0
-    while process_group_has_members "$owned_pgid" && [ "$attempts" -lt "$attempt_limit" ]; do
+    while [ "$attempts" -lt "$attempt_limit" ]; do
+        # A just-exited direct child can remain as a zombie until this launcher
+        # reaps it. `kill -0 -PGID` still sees that zombie and would otherwise
+        # consume the full shutdown timeout even though no process is running.
+        if ! process_alive "$owned_pgid"; then
+            wait "$owned_pgid" 2>/dev/null || true
+        fi
+        process_group_has_members "$owned_pgid" || return 0
         attempts=$((attempts + 1))
         sleep "$STOP_POLL_INTERVAL"
     done
+    if ! process_alive "$owned_pgid"; then
+        wait "$owned_pgid" 2>/dev/null || true
+    fi
     ! process_group_has_members "$owned_pgid"
 }
 
@@ -536,6 +546,9 @@ terminate_owned_child() {
             attempts=$((attempts + 1))
             sleep "$STOP_POLL_INTERVAL"
         done
+    fi
+    if ! process_alive "$owned_pid"; then
+        wait "$owned_pid" 2>/dev/null || true
     fi
     ! process_alive "$owned_pid"
 }
@@ -752,11 +765,57 @@ compose_container_state() {
     return 0
 }
 
+repair_database_port_publish() {
+    active_publishers=$(docker_port_publishers 8000)
+    publisher_status=$?
+    if [ "$publisher_status" -ne 0 ]; then
+        CONTAINER_REASON="Could not inspect Docker publishers for port 8000"
+        return 1
+    fi
+    # Never recreate while any container claims the port. In particular, this
+    # preserves a foreign checkout even when Docker Desktop's proxy obscures
+    # the host-side listener identity.
+    [ -z "$active_publishers" ] || return 1
+
+    db_owners=$(port_pids 8000)
+    for db_owner in $db_owners; do
+        if docker_desktop_proxy_owner "$db_owner"; then
+            continue
+        fi
+        CONTAINER_REASON="Port 8000 is held by another process or checkout: $(owner_diagnostic "$db_owner")"
+        return 1
+    done
+
+    say "Repairing this checkout's missing SurrealDB port publish..."
+    if ! docker compose -f "$REPO_ROOT/docker-compose.yml" \
+        --project-directory "$REPO_ROOT" up -d --force-recreate surrealdb; then
+        CONTAINER_REASON="Could not recreate this checkout's SurrealDB container"
+        return 1
+    fi
+    STARTED_DB=1
+
+    compose_container_state
+    repaired_state=$?
+    if [ "$repaired_state" -ne 0 ]; then
+        CONTAINER_REASON="Recreated SurrealDB but its Compose ownership could not be verified: $CONTAINER_REASON"
+        return 1
+    fi
+    STARTED_DB_CONTAINER_ID=$CONTAINER_ID
+    if ! database_port_owned_by_compose 8000; then
+        CONTAINER_REASON="Recreated SurrealDB but host port ownership is invalid: $CONTAINER_REASON"
+        return 1
+    fi
+    return 0
+}
+
 start_database() {
     compose_container_state
     container_state=$?
     if [ "$container_state" -eq 0 ]; then
         if ! database_port_owned_by_compose 8000; then
+            if repair_database_port_publish; then
+                return 0
+            fi
             error "$CONTAINER_REASON"
             error "Stop the other SurrealDB instance with its own checkout before retrying."
             return 1
