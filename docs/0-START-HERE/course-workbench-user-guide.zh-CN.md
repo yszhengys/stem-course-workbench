@@ -181,6 +181,8 @@ API 和 worker 使用 `.env`，worker 默认并发为 5。Course 的 Docling 与
 
 这些目录、原始教学材料、模型缓存和凭据都被 Git 忽略。不要把它们强制加入提交，也不要把密钥粘贴到 issue、PR 或日志中。
 
+GitHub 仓库公开只会公开已提交的源代码、文档和明确可再分发的合成测试材料，不会自动上传上述本地目录。Course Workbench 是单用户、本地优先的开发配置；在完成独立身份认证、访问控制、CORS、TLS、数据库凭据和网络边界加固之前，不要把 SurrealDB、API 或前端直接暴露到公网。
+
 备份前先执行 `./scripts/course-workbench.sh stop`，再用你自己的加密存储工具同时备份 `surreal_data/`、`notebook_data/` 和 `.env`。恢复时三者应来自同一个时间点。同步上游代码前先提交自己的代码改动，然后从 `upstream` 获取并在功能分支集成；不要用会覆盖本地数据的 Git 命令处理上述目录。
 
 ## 常见故障

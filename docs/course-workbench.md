@@ -83,6 +83,6 @@ npm run build
 
 ## 上游同步
 
-`origin` 应始终指向私有 `yszhengys/stem-course-workbench`，`upstream` 指向 `lfnovo/open-notebook`。先获取上游并在功能分支集成；migration 25 及 Course facade 是本分支的兼容边界，不要用旧 V1 migration 24 或旧 schema 覆盖。保留 MIT License 和上游历史。
+`origin` 应始终指向公开源代码仓库 `yszhengys/stem-course-workbench`，`upstream` 指向 `lfnovo/open-notebook`。先获取上游并在功能分支集成；migration 25 及 Course facade 是本分支的兼容边界，不要用旧 V1 migration 24 或旧 schema 覆盖。保留 MIT License 和上游历史；课程原文、证据缓存、数据库、模型缓存和凭据继续只留在 Git 忽略的本地目录。
 
 用户入口见[中文使用说明](0-START-HERE/course-workbench-user-guide.zh-CN.md)，上游通用架构见[开发文档](7-DEVELOPMENT/index.md)。

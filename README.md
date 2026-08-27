@@ -62,6 +62,8 @@
 
 开始使用：[STEM Course Workbench 中文使用说明](docs/0-START-HERE/course-workbench-user-guide.zh-CN.md) · [架构与维护说明](docs/course-workbench.md) · [上游 Open Notebook 文档](docs/index.md)
 
+> **公开仓库与本地数据：** 本仓库公开的是源代码、文档和明确可再分发的合成测试材料，不包含本机课程原文、证据缓存、数据库、模型缓存或 `.env`。当前 Course Workbench 是单用户、本地优先的开发配置；不要把 SurrealDB、API 或前端直接暴露到公网。
+
 ## A private, multi-model, 100% local, full-featured alternative to Notebook LM
 
 ![New Notebook](docs/assets/asset_list.png)
