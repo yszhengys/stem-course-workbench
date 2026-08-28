@@ -32,6 +32,8 @@ from api.models import (
     CourseDraftValidateRequest,
     CourseDraftValidationResponse,
     CourseEvidenceBuildRequest,
+    CourseExerciseBankGenerateRequest,
+    CourseExerciseBuildStatusResponse,
     CourseExerciseGradeRequest,
     CourseExerciseGradeResponse,
     CourseExerciseHintRequest,
@@ -579,6 +581,42 @@ async def review_chapter(
         )
     )
     return _job(submission)
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/exercises/generate",
+    response_model=CourseJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def generate_chapter_exercises(
+    course_id: str,
+    chapter_key: str,
+    request: CourseExerciseBankGenerateRequest,
+):
+    submission = await _call(
+        course_commands.submit_exercise_bank(
+            course_id=course_id,
+            chapter_key=chapter_key,
+            anchor_ids=request.anchor_ids,
+            prompt_version=request.prompt_version,
+            model=request.model,
+            review_model=request.review_model,
+            force=request.force,
+        )
+    )
+    return _job(submission)
+
+
+@router.get(
+    "/courses/{course_id}/chapters/{chapter_key}/exercises/build-status",
+    response_model=CourseExerciseBuildStatusResponse,
+)
+async def get_chapter_exercise_build_status(
+    course_id: str, chapter_key: str
+):
+    return await _call(
+        course_v2_service.exercise_build_status(course_id, chapter_key)
+    )
 
 
 @router.get("/courses/{course_id}/chapters/{chapter_key}")

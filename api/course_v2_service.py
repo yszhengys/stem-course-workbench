@@ -22,6 +22,7 @@ from api.models import (
     CourseDraftResponse,
     CourseDraftValidateRequest,
     CourseDraftValidationResponse,
+    CourseExerciseBuildStatusResponse,
     CourseExerciseGradeRequest,
     CourseExerciseGradeResponse,
     CourseExerciseHintRequest,
@@ -1273,6 +1274,16 @@ class CourseV2Service:
             )
             for exercise in exercises
         )
+
+    async def exercise_build_status(
+        self, course_id: str, chapter_key: str
+    ) -> CourseExerciseBuildStatusResponse:
+        from api.course_command_service import CourseCommandService
+
+        payload = await CourseCommandService().exercise_build_status(
+            course_id, chapter_key
+        )
+        return CourseExerciseBuildStatusResponse.model_validate(payload)
 
     async def next_hint(
         self,

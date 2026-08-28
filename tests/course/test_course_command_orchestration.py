@@ -119,6 +119,7 @@ print(json.dumps(sorted(
     assert json.loads(completed.stdout.splitlines()[-1]) == [
         "course_build_evidence",
         "course_generate_chapter",
+        "course_generate_exercise_bank",
         "course_generate_outline",
         "course_review_chapter",
     ]
@@ -157,6 +158,14 @@ def test_registered_course_command_schemas_validate_real_queue_arguments() -> No
             "chapter_key": "linear-equations",
             "prompt_version": "v1",
             "model": model,
+        },
+        "course_generate_exercise_bank": {
+            **common,
+            "anchor_ids": ["anchor:one"],
+            "chapter_key": "linear-equations",
+            "prompt_version": "v2",
+            "model": model,
+            "review_model": model,
         },
         "course_review_chapter": {
             **common,

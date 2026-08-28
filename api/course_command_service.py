@@ -12,6 +12,9 @@ from surreal_commands import submit_command
 from open_notebook.course import state_machine as sm
 from open_notebook.course.contracts import ModelSelection, ValidationFinding
 from open_notebook.course.evidence_service import EvidenceInputError, EvidenceService
+from open_notebook.course.exercise_workflow_service import (
+    exercise_generation_claim_args,
+)
 from open_notebook.course.generation_service import (
     CourseGenerationService,
     PublicationBlocked,
@@ -524,6 +527,130 @@ class CourseCommandService:
             chapter_key=chapter_key,
             force=force,
         )
+
+    async def submit_exercise_bank(
+        self,
+        *,
+        course_id: str,
+        chapter_key: str,
+        anchor_ids: list[str],
+        prompt_version: str,
+        model: ModelSelection,
+        review_model: ModelSelection,
+        force: bool = False,
+    ) -> CourseJobSubmission:
+        try:
+            await ensure_course_models_selectable([model, review_model])
+        except AdapterError as exc:
+            raise InvalidInputError(str(exc)) from exc
+        course, source_hashes, _ = await self._grounded(course_id, anchor_ids)
+        version, outline = await CourseWorkflowService.approved_version(course)
+        _, proposal = CourseWorkflowService._outline_chapter(outline, chapter_key)
+        concept_anchors = {
+            concept.key: set(concept.anchor_ids) for concept in outline.concepts
+        }
+        allowed_anchors = set(proposal.anchor_ids).union(
+            *(
+                concept_anchors.get(key, set())
+                for key in proposal.objective_keys
+            )
+        )
+        if not set(anchor_ids).issubset(allowed_anchors):
+            raise EvidenceInputError(
+                "Exercise anchors must belong to the target outline chapter."
+            )
+        chapters = await CourseVersion.chapters(str(version.id))
+        chapter = await CourseWorkflowService.resolve_current_chapter(
+            course_id=course_id,
+            version_id=str(version.id),
+            chapter_key=chapter_key,
+            chapters=chapters,
+        )
+        arguments = exercise_generation_claim_args(
+            course_id=course_id,
+            version_id=str(version.id),
+            chapter_key=chapter_key,
+            anchor_ids=anchor_ids,
+            generation_model=model,
+            review_model=review_model,
+            prompt_version=prompt_version,
+        )
+        return await self.submit_stage(
+            course_id=course_id,
+            course_version_id=str(version.id),
+            chapter_id=str(chapter.id),
+            stage="exercise_bank",
+            command_name="course_generate_exercise_bank",
+            command_args=arguments,
+            model=model,
+            prompt_version=prompt_version,
+            anchor_ids=anchor_ids,
+            source_hashes=source_hashes,
+            chapter_key=chapter_key,
+            force=force,
+        )
+
+    async def exercise_build_status(
+        self, course_id: str, chapter_key: str
+    ) -> dict[str, Any]:
+        course = await Course.get(course_id)
+        version, outline = await CourseWorkflowService.approved_version(course)
+        CourseWorkflowService._outline_chapter(outline, chapter_key)
+        chapter = await CourseWorkflowService.resolve_current_chapter(
+            course_id=course_id,
+            version_id=str(version.id),
+            chapter_key=chapter_key,
+        )
+        rows = await repo_query(
+            "SELECT * FROM course_generation_run "
+            "WHERE course = $course AND course_version = $version "
+            "AND chapter = $chapter AND chapter_key = $chapter_key "
+            "AND stage = 'exercise_bank' ORDER BY created DESC, id DESC LIMIT 1;",
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(str(version.id)),
+                "chapter": ensure_record_id(str(chapter.id)),
+                "chapter_key": chapter_key,
+            },
+        )
+        if not rows:
+            return {
+                "run_id": None,
+                "command_id": None,
+                "status": "not_started",
+                "error_message": None,
+                "exercise_count": 0,
+            }
+        run = CourseGenerationRun(**rows[0])
+        if (
+            run.course != course_id
+            or run.course_version != str(version.id)
+            or run.chapter != str(chapter.id)
+            or run.chapter_key != chapter_key
+            or run.stage != "exercise_bank"
+        ):
+            raise NotFoundError("Exercise build run not found")
+        if run.status in ACTIVE_RUN_STATUSES and run.command:
+            run = await self.get_run(course_id, str(run.id))
+        count_rows = await repo_query(
+            "SELECT count() AS count FROM course_exercise "
+            "WHERE course = $course AND course_version = $version "
+            "AND chapter = $chapter AND chapter_key = $chapter_key GROUP ALL;",
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(str(version.id)),
+                "chapter": ensure_record_id(str(chapter.id)),
+                "chapter_key": chapter_key,
+            },
+        )
+        exercise_count = int(count_rows[0].get("count", 0)) if count_rows else 0
+        return {
+            "run_id": str(run.id),
+            "command_id": run.command,
+            "status": run.status,
+            "error_message": run.error_message,
+            "exercise_count": exercise_count,
+        }
 
     async def get_run(
         self, course_id: str, run_id: str

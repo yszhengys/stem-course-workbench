@@ -1361,6 +1361,26 @@ class CourseChapterReviewRequest(CourseAnchoredJobRequest):
     escalation_model: ModelSelection
 
 
+class CourseExerciseBankGenerateRequest(CourseAnchoredJobRequest):
+    prompt_version: str = Field("v2", min_length=1, max_length=100)
+    review_model: ModelSelection
+
+
+class CourseExerciseBuildStatusResponse(BaseModel):
+    run_id: str | None = None
+    command_id: str | None = None
+    status: Literal[
+        "not_started",
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+    ]
+    error_message: str | None = None
+    exercise_count: int = Field(default=0, ge=0)
+
+
 class CourseRetrievalRequest(StrictCourseRequest):
     anchor_ids: List[str] = Field(..., min_length=1, max_length=500)
 

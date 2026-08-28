@@ -14,10 +14,12 @@ from pydantic import ConfigDict, Field, field_validator
 from surreal_commands import CommandInput, CommandOutput, command
 
 from open_notebook.course.contracts import ModelSelection, SafeLabKey
+from open_notebook.course.exercise_workflow_service import ExerciseWorkflowService
 from open_notebook.course.model_adapters import (
     AdapterError,
     ensure_course_models_selectable,
 )
+from open_notebook.course.models import CourseGenerationRun
 from open_notebook.course.workflow_service import CourseWorkflowService
 from open_notebook.exceptions import (
     ConfigurationError,
@@ -72,6 +74,10 @@ class CourseReviewInput(CourseChapterInput):
     escalation_model: ModelSelection
 
 
+class CourseExerciseBankInput(CourseChapterInput):
+    review_model: ModelSelection
+
+
 class CourseCommandOutput(CommandOutput):
     success: bool
     run_id: str
@@ -92,6 +98,7 @@ COURSE_RETRY = {
 
 
 _workflow = CourseWorkflowService()
+_exercise_workflow = ExerciseWorkflowService(workflow=_workflow)
 OperationResultT = TypeVar("OperationResultT")
 
 
@@ -279,6 +286,49 @@ async def course_generate_chapter_command(
         raise ValueError(str(exc)) from exc
     return CourseCommandOutput(
         success=True, run_id=input_data.run_id, artifact_id=str(chapter.id)
+    )
+
+
+@command("course_generate_exercise_bank", app="open_notebook", retry=COURSE_RETRY)
+async def course_generate_exercise_bank_command(
+    input_data: CourseExerciseBankInput,
+) -> CourseCommandOutput:
+    command_id = _command_id(input_data)
+    try:
+        await ensure_course_models_selectable(
+            [input_data.model, input_data.review_model]
+        )
+    except (AdapterError, ValueError) as exc:
+        await _permanent_failure(input_data, exc)
+        raise ValueError(str(exc)) from exc
+
+    async def operation():
+        run = await CourseGenerationRun.get(input_data.run_id)
+        return await _exercise_workflow.generate_and_persist(
+            run_id=input_data.run_id,
+            command_id=command_id or "",
+            course_id=input_data.course_id,
+            version_id=run.course_version or "",
+            chapter_key=input_data.chapter_key,
+            anchor_ids=input_data.anchor_ids,
+            generation_model=input_data.model,
+            review_model=input_data.review_model,
+            prompt_version=input_data.prompt_version,
+        )
+
+    try:
+        exercises = await _execute_course_operation(input_data, operation)
+    except _TerminalCourseFailure:
+        raise
+    except (ValueError, InvalidInputError, NotFoundError, ConfigurationError) as exc:
+        await _permanent_failure(input_data, exc)
+        raise ValueError(str(exc)) from exc
+    chapter_id = exercises[0].chapter if exercises else None
+    return CourseCommandOutput(
+        success=True,
+        run_id=input_data.run_id,
+        artifact_id=chapter_id,
+        finding_count=len(exercises),
     )
 
 
