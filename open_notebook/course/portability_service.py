@@ -14,11 +14,11 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile, ZipInfo
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from surrealdb import RecordID
 
 from open_notebook.database.repository import ensure_record_id, repo_query
@@ -27,6 +27,7 @@ from open_notebook.exceptions import InvalidInputError, NotFoundError
 
 from .models import (
     Attempt,
+    BibliographicSource,
     Chapter,
     Course,
     CourseEvidenceAnchor,
@@ -66,6 +67,7 @@ _TABLE_ORDER = (
     "chapter",
     "evidence",
     "course_evidence_anchor",
+    "course_bibliographic_source",
     "course_generation_run",
     "course_validation_finding",
     "lab",
@@ -80,6 +82,7 @@ _TABLE_ORDER = (
     "course_tutor_turn",
     "course_draft_revision",
 )
+_LEGACY_OPTIONAL_TABLES = frozenset({"course_bibliographic_source"})
 _MODEL_BY_TABLE: dict[str, type[BaseModel]] = {
     "notebook": Notebook,
     "source": Source,
@@ -88,6 +91,7 @@ _MODEL_BY_TABLE: dict[str, type[BaseModel]] = {
     "chapter": Chapter,
     "evidence": Evidence,
     "course_evidence_anchor": CourseEvidenceAnchor,
+    "course_bibliographic_source": BibliographicSource,
     "course_generation_run": CourseGenerationRun,
     "course_validation_finding": CourseValidationFinding,
     "lab": Lab,
@@ -108,6 +112,7 @@ _RECORD_FIELDS: dict[str, tuple[str, ...]] = {
     "chapter": ("course_version",),
     "evidence": ("course", "source"),
     "course_evidence_anchor": ("course", "source", "evidence"),
+    "course_bibliographic_source": ("course", "source"),
     "course_generation_run": ("course", "course_version", "chapter"),
     "course_validation_finding": (
         "course",
@@ -153,6 +158,19 @@ class CourseBundleError(InvalidInputError):
     """Raised before any import write when a bundle is unsafe or invalid."""
 
 
+class VisualEvidenceManifestEntry(BaseModel):
+    """Portable cache identity metadata; never contains a cache path or bytes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    anchor_id: str = Field(pattern=r"^anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}$")
+    source_id: str = Field(pattern=r"^source:[A-Za-z0-9_-]+$")
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    slide_index: int = Field(ge=1)
+    visual_status: Literal["available", "text_only"]
+    cache_identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 @dataclass(frozen=True, slots=True)
 class CourseBundleSnapshot:
     root_course_id: str
@@ -174,6 +192,7 @@ class ValidatedCourseBundle:
     course_title: str
     records: Mapping[str, tuple[dict[str, object], ...]]
     materials: Mapping[str, BundleMaterial]
+    visual_evidence: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +257,167 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _visual_cache_identity(
+    *,
+    anchor_id: str,
+    source_id: str,
+    source_sha256: str,
+    slide_index: int,
+    visual_status: str,
+) -> str:
+    return _sha256(
+        _canonical_json(
+            {
+                "version": 1,
+                "anchor_id": anchor_id,
+                "source_id": source_id,
+                "source_sha256": source_sha256,
+                "slide_index": slide_index,
+                "visual_status": visual_status,
+            }
+        )
+    )
+
+
+def _validate_cache_relative_path(value: str) -> None:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\x00" in value
+        or "\\" in value
+        or path.is_absolute()
+        or ".." in path.parts
+        or str(path) != value
+    ):
+        raise CourseBundleError("Course evidence cache identity is invalid.")
+
+
+def _build_visual_evidence_manifest(
+    raw_records: Mapping[str, tuple[Mapping[str, object], ...] | list[object]],
+) -> tuple[dict[str, object], ...]:
+    raw_anchors = raw_records.get("course_evidence_anchor", ())
+    if not isinstance(raw_anchors, (tuple, list)):
+        raise CourseBundleError("Course bundle record collections must be arrays.")
+    entries: list[VisualEvidenceManifestEntry] = []
+    seen: set[str] = set()
+    for raw_anchor in raw_anchors:
+        if not isinstance(raw_anchor, Mapping):
+            raise CourseBundleError("Course bundle records must be objects.")
+        try:
+            anchor = CourseEvidenceAnchor.model_validate(raw_anchor)
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise CourseBundleError(
+                "Course bundle has an invalid course_evidence_anchor record."
+            ) from exc
+        if anchor.locator.kind != "pptx_slide":
+            continue
+        if anchor.anchor_id in seen:
+            raise CourseBundleError(
+                "Course visual evidence anchor identities must be unique."
+            )
+        seen.add(anchor.anchor_id)
+        for stored_path in (anchor.preview_path, anchor.visual_preview_path):
+            if stored_path is not None:
+                _validate_cache_relative_path(stored_path)
+        entry = VisualEvidenceManifestEntry(
+            anchor_id=anchor.anchor_id,
+            source_id=anchor.source,
+            source_sha256=anchor.locator.content_sha256,
+            slide_index=anchor.locator.index,
+            visual_status=anchor.visual_preview_status,
+            cache_identity_sha256=_visual_cache_identity(
+                anchor_id=anchor.anchor_id,
+                source_id=anchor.source,
+                source_sha256=anchor.locator.content_sha256,
+                slide_index=anchor.locator.index,
+                visual_status=anchor.visual_preview_status,
+            ),
+        )
+        entries.append(entry)
+    return tuple(
+        entry.model_dump(mode="json")
+        for entry in sorted(
+            entries,
+            key=lambda item: (item.source_id, item.slide_index, item.anchor_id),
+        )
+    )
+
+
+def _validate_visual_evidence_manifest(
+    raw_entries: object,
+    records: Mapping[str, tuple[dict[str, object], ...]],
+    *,
+    require_complete: bool,
+) -> tuple[dict[str, object], ...]:
+    if not isinstance(raw_entries, list):
+        raise CourseBundleError("Course visual evidence manifest must be an array.")
+    anchors: dict[str, dict[str, object]] = {}
+    pptx_anchor_ids: set[str] = set()
+    for anchor_row in records["course_evidence_anchor"]:
+        anchor_id = str(anchor_row.get("anchor_id"))
+        if anchor_id in anchors:
+            raise CourseBundleError(
+                "Course visual evidence anchor identities must be unique."
+            )
+        anchors[anchor_id] = anchor_row
+        locator = anchor_row.get("locator")
+        if isinstance(locator, dict) and locator.get("kind") == "pptx_slide":
+            pptx_anchor_ids.add(anchor_id)
+
+    entries: list[VisualEvidenceManifestEntry] = []
+    seen: set[str] = set()
+    for raw_entry in raw_entries:
+        try:
+            entry = VisualEvidenceManifestEntry.model_validate(raw_entry)
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise CourseBundleError(
+                "Course visual evidence manifest is invalid."
+            ) from exc
+        if entry.anchor_id in seen:
+            raise CourseBundleError(
+                "Course visual evidence manifest contains duplicate anchors."
+            )
+        seen.add(entry.anchor_id)
+        matched_anchor = anchors.get(entry.anchor_id)
+        locator = (
+            matched_anchor.get("locator")
+            if matched_anchor is not None
+            else None
+        )
+        if (
+            matched_anchor is None
+            or not isinstance(locator, dict)
+            or locator.get("kind") != "pptx_slide"
+            or str(matched_anchor.get("source")) != entry.source_id
+            or str(locator.get("source_id")) != entry.source_id
+            or str(locator.get("content_sha256")) != entry.source_sha256
+            or locator.get("index") != entry.slide_index
+            or entry.cache_identity_sha256
+            != _visual_cache_identity(
+                anchor_id=entry.anchor_id,
+                source_id=entry.source_id,
+                source_sha256=entry.source_sha256,
+                slide_index=entry.slide_index,
+                visual_status=entry.visual_status,
+            )
+        ):
+            raise CourseBundleError(
+                "Course visual evidence manifest does not match its anchor."
+            )
+        entries.append(entry)
+    if require_complete and seen != pptx_anchor_ids:
+        raise CourseBundleError(
+            "Course visual evidence manifest is incomplete."
+        )
+    return tuple(
+        entry.model_dump(mode="json")
+        for entry in sorted(
+            entries,
+            key=lambda item: (item.source_id, item.slide_index, item.anchor_id),
+        )
+    )
+
+
 def _zip_info(path: str) -> ZipInfo:
     info = ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
     info.compress_type = ZIP_DEFLATED
@@ -252,7 +432,12 @@ def _validated_record_id(value: object, table: str) -> str:
     return record_id
 
 
-def _model_row(table: str, row: Mapping[str, object]) -> dict[str, object]:
+def _model_row(
+    table: str,
+    row: Mapping[str, object],
+    *,
+    reject_cache_paths: bool,
+) -> dict[str, object]:
     candidate = copy.deepcopy(dict(row))
     if table == "source":
         candidate.pop("command", None)
@@ -261,8 +446,19 @@ def _model_row(table: str, row: Mapping[str, object]) -> dict[str, object]:
             candidate["asset"] = {"file_path": None, "url": None}
     elif table == "course_generation_run":
         candidate["command"] = None
-    elif table in {"evidence", "course_evidence_anchor"}:
+    elif table == "evidence":
         candidate["preview_path"] = None
+    elif table == "course_evidence_anchor":
+        if reject_cache_paths and any(
+            candidate.get(field_name) is not None
+            for field_name in ("preview_path", "visual_preview_path")
+        ):
+            raise CourseBundleError(
+                "Course bundle records must not contain evidence cache paths."
+            )
+        candidate["preview_path"] = None
+        candidate["visual_preview_path"] = None
+        candidate["visual_preview_status"] = "text_only"
     try:
         model = _MODEL_BY_TABLE[table].model_validate(candidate)
         dumped = model.model_dump(mode="json")
@@ -276,6 +472,8 @@ def _model_row(table: str, row: Mapping[str, object]) -> dict[str, object]:
 def _normalize_records(
     raw_records: Mapping[str, tuple[Mapping[str, object], ...] | list[object]],
     root_course_id: str,
+    *,
+    reject_cache_paths: bool = False,
 ) -> dict[str, tuple[dict[str, object], ...]]:
     unknown = set(raw_records) - set(_TABLE_ORDER)
     if unknown:
@@ -290,7 +488,11 @@ def _normalize_records(
         for raw_row in raw_rows:
             if not isinstance(raw_row, Mapping):
                 raise CourseBundleError("Course bundle records must be objects.")
-            row = _model_row(table, raw_row)
+            row = _model_row(
+                table,
+                raw_row,
+                reject_cache_paths=reject_cache_paths,
+            )
             record_id = _validated_record_id(row.get("id"), table)
             if record_id in seen:
                 raise CourseBundleError("Course bundle record IDs must be unique.")
@@ -312,6 +514,36 @@ def _normalize_records(
         raise CourseBundleError("Course bundle Source scope is inconsistent.")
     if {str(value) for value in course_source_ids} != source_ids:
         raise CourseBundleError("Course bundle Source scope is inconsistent.")
+    raw_primary_source_ids = course.get("primary_source_ids", [])
+    raw_supplement_source_ids = course.get("supplement_source_ids", [])
+    if not isinstance(raw_primary_source_ids, list) or not isinstance(
+        raw_supplement_source_ids, list
+    ):
+        raise CourseBundleError("Course bundle Source scope is inconsistent.")
+    primary_source_ids = {str(value) for value in raw_primary_source_ids}
+    supplement_source_ids = {
+        str(value) for value in raw_supplement_source_ids
+    }
+    bibliography_sources: set[str] = set()
+    for bibliography in normalized["course_bibliographic_source"]:
+        source_id = str(bibliography.get("source"))
+        expected_role = (
+            "PRIMARY"
+            if source_id in primary_source_ids
+            else "SUPPLEMENT"
+            if source_id in supplement_source_ids
+            else None
+        )
+        if (
+            bibliography.get("course") != root_course_id
+            or expected_role is None
+            or bibliography.get("source_role") != expected_role
+            or source_id in bibliography_sources
+        ):
+            raise CourseBundleError(
+                "Course bundle bibliography scope is inconsistent."
+            )
+        bibliography_sources.add(source_id)
     return normalized
 
 
@@ -374,6 +606,7 @@ class PortabilityService:
         destination = destination.resolve()
         if destination.suffix.lower() != ".stemcourse":
             raise CourseBundleError("Course bundle filename must end in .stemcourse.")
+        visual_evidence = _build_visual_evidence_manifest(snapshot.records)
         normalized = _normalize_records(snapshot.records, snapshot.root_course_id)
         course_title = str(normalized["course"][0]["title"])
         if course_title != snapshot.course_title:
@@ -404,6 +637,7 @@ class PortabilityService:
                 "root_course_id": snapshot.root_course_id,
                 "records": normalized,
                 "material_paths": material_paths,
+                "visual_evidence": visual_evidence,
             }
         )
         file_payloads["records/course.json"] = records_payload
@@ -505,25 +739,49 @@ class PortabilityService:
             raise CourseBundleError("Course bundle is not a valid ZIP container.") from exc
 
         root_payload = _strict_json(payloads["records/course.json"])
-        if not isinstance(root_payload, dict) or set(root_payload) != {
+        required_root_fields = {
             "root_course_id",
             "records",
             "material_paths",
-        }:
+        }
+        optional_root_fields = {"visual_evidence"}
+        if (
+            not isinstance(root_payload, dict)
+            or not required_root_fields.issubset(root_payload)
+            or set(root_payload) - required_root_fields - optional_root_fields
+        ):
             raise CourseBundleError("Course bundle record index is invalid.")
         root_course_id = str(root_payload["root_course_id"])
         _validated_record_id(root_course_id, "course")
         raw_records = root_payload["records"]
         if not isinstance(raw_records, dict):
             raise CourseBundleError("Course bundle record index is invalid.")
-        records = _normalize_records(raw_records, root_course_id)
+        records = _normalize_records(
+            raw_records,
+            root_course_id,
+            reject_cache_paths=True,
+        )
+        has_visual_manifest = "visual_evidence" in root_payload
+        visual_evidence = _validate_visual_evidence_manifest(
+            root_payload.get("visual_evidence", []),
+            records,
+            require_complete=has_visual_manifest,
+        )
         course_title = str(records["course"][0]["title"])
         if manifest.course_title != course_title:
             raise CourseBundleError("Course bundle title is inconsistent.")
-        expected_counts = {item.record_type: item.count for item in manifest.record_counts}
-        if len(expected_counts) != len(manifest.record_counts) or expected_counts != {
+        expected_counts = {
+            item.record_type: item.count for item in manifest.record_counts
+        }
+        if len(expected_counts) != len(manifest.record_counts):
+            raise CourseBundleError("Course bundle record counts are inconsistent.")
+        actual_counts = {
             table: len(records[table]) for table in _TABLE_ORDER
-        }:
+        }
+        for table in _LEGACY_OPTIONAL_TABLES:
+            if table not in expected_counts and actual_counts[table] == 0:
+                expected_counts[table] = 0
+        if expected_counts != actual_counts:
             raise CourseBundleError("Course bundle record counts are inconsistent.")
 
         raw_material_paths = root_payload["material_paths"]
@@ -552,6 +810,7 @@ class PortabilityService:
             course_title=course_title,
             records=records,
             materials=materials,
+            visual_evidence=visual_evidence,
         )
 
     def build_import_plan(self, bundle: ValidatedCourseBundle) -> CourseImportPlan:
@@ -785,6 +1044,7 @@ class PortabilityService:
         table_queries = {
             "evidence": "SELECT * FROM evidence WHERE course = $course ORDER BY id;",
             "course_evidence_anchor": "SELECT * FROM course_evidence_anchor WHERE course = $course ORDER BY id;",
+            "course_bibliographic_source": "SELECT * FROM course_bibliographic_source WHERE course = $course ORDER BY source, id;",
             "course_generation_run": "SELECT * FROM course_generation_run WHERE course = $course ORDER BY id;",
             "course_validation_finding": "SELECT * FROM course_validation_finding WHERE course = $course ORDER BY id;",
             "progress": "SELECT * FROM progress WHERE course = $course ORDER BY id;",
