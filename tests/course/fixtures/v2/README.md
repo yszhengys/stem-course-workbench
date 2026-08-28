@@ -12,7 +12,11 @@ Each fixture includes source-numbered exercises, an explicit worked solution, a 
 
 All prose, numbers, exercises, solutions, and figure descriptions in these files were authored specifically for this repository on 2026-08-24. They are not transcriptions or adaptations of a published textbook. The fixture content is dedicated to the public domain under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/).
 
-The files are JSON rather than PDF/PPTX so they remain small, reviewable, deterministic, and free of binary or OCR variability. Real Docling PDF/PPTX extraction is covered separately by the opt-in local smoke gate and its generated temporary materials; those temporary files are never committed.
+The files are JSON rather than PDF/PPTX so the fast quality benchmarks remain
+small, reviewable, deterministic, and free of OCR variability. Real Docling
+PDF/PPTX extraction is covered separately by the opt-in release gate over the
+repository-owned, fixed-hash CC0 files in `../gold/`; user teaching materials
+are never committed.
 
 ## Maintenance rules
 

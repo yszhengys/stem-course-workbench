@@ -17,6 +17,8 @@ from open_notebook.course.pptx_visual_renderer import (
     PptxVisualUnavailable,
 )
 
+GOLD_ROOT = Path(__file__).parent / "fixtures" / "gold"
+
 
 def _pptx(path: Path, slide_count: int = 2) -> None:
     from pptx import Presentation
@@ -280,13 +282,13 @@ def test_missing_converter_is_explicitly_unavailable(tmp_path: Path) -> None:
     reason="set OPEN_NOTEBOOK_RUN_REAL_PPTX_VISUAL_SMOKE=1 for real LibreOffice smoke",
 )
 def test_real_libreoffice_pdfium_smoke(tmp_path: Path) -> None:
-    source = tmp_path / "real-smoke.pptx"
-    _pptx(source, slide_count=2)
+    source = GOLD_ROOT / "stem-evidence-gold.pptx"
     renderer = PptxVisualRenderer()
     if renderer.locate_converter() is None:
         pytest.skip("LibreOffice soffice is genuinely unavailable")
 
     rendered = renderer.render(source, _sha256(source), tmp_path / "visuals")
 
-    assert list(rendered) == [1, 2]
+    assert list(rendered) == [1, 2, 3]
     assert all(path.read_bytes().startswith(b"\x89PNG") for path in rendered.values())
+    assert len({path.read_bytes() for path in rendered.values()}) == 3
