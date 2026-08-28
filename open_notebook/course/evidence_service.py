@@ -388,7 +388,10 @@ class EvidenceService:
     def _extract_docling_sync(self, path: Path, kind: EvidenceKind) -> str:
         try:
             from docling.datamodel.base_models import InputFormat
-            from docling.datamodel.pipeline_options import PdfPipelineOptions
+            from docling.datamodel.pipeline_options import (
+                PdfPipelineOptions,
+                RapidOcrOptions,
+            )
             from docling.document_converter import DocumentConverter, PdfFormatOption
         except ImportError as exc:
             raise EvidenceConfigurationError(
@@ -398,6 +401,7 @@ class EvidenceService:
         if kind == "pdf":
             options = PdfPipelineOptions(
                 do_ocr=True,
+                ocr_options=RapidOcrOptions(backend="onnxruntime"),
                 do_formula_enrichment=True,
                 do_picture_description=False,
                 do_chart_extraction=False,

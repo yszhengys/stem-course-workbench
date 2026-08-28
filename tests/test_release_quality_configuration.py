@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ ROOT = Path(__file__).parents[1]
 TEST_WORKFLOW = ROOT / ".github" / "workflows" / "test.yml"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "course-release-gates.yml"
 VITEST_CONFIG = ROOT / "frontend" / "vitest.config.ts"
+PYPROJECT = ROOT / "pyproject.toml"
 
 
 def _workflow(path: Path) -> dict[str, Any]:
@@ -47,6 +49,15 @@ def test_vitest_enforces_measured_frontend_coverage_floors() -> None:
         "lines": 55,
     }.items():
         assert re.search(rf"\b{metric}:\s*{floor}\b", body)
+
+
+def test_runtime_installs_onnxruntime_for_docling_rapidocr() -> None:
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+
+    assert any(
+        dependency.startswith("onnxruntime")
+        for dependency in project["dependencies"]
+    )
 
 
 def test_course_release_workflow_runs_three_isolated_runtime_gates() -> None:
