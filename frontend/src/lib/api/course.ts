@@ -8,6 +8,7 @@ import {
   bibliographicSourceSchema,
   courseAcademicVerificationRequestSchema,
   courseBibliographyUpdateRequestSchema,
+  courseCoverageResponseSchema,
   courseDraftOperationRequestSchema,
   courseDraftResponseSchema,
   courseDraftValidationResponseSchema,
@@ -204,6 +205,29 @@ export const courseApi = {
       `/courses/${pathId(courseId)}/bibliography/csl-json`,
     )
     return z.array(z.record(z.string(), z.unknown())).parse(response.data)
+  },
+
+  async getCoverage(courseId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/coverage`,
+    )
+    return courseCoverageResponseSchema.parse(response.data)
+  },
+
+  async downloadCoverage(courseId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/coverage/export`,
+      { responseType: 'blob' },
+    )
+    const objectUrl = URL.createObjectURL(response.data as Blob)
+    const anchor = document.createElement('a')
+    try {
+      anchor.href = objectUrl
+      anchor.download = `course-coverage-${courseId.replace(/[^A-Za-z0-9_-]/g, '-')}.json`
+      anchor.click()
+    } finally {
+      URL.revokeObjectURL(objectUrl)
+    }
   },
 
   async associateSource(courseId: string, request: { source_id: string; role: 'PRIMARY' | 'SUPPLEMENT' }) {

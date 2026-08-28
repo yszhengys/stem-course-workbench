@@ -3,11 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
-import { AlertTriangle, ArrowLeft, BookMarked, BookOpen, CheckCircle2, FileText, Network } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, BookMarked, BookOpen, CheckCircle2, FileSearch, FileText, Network } from 'lucide-react'
 
 import { AppShell } from '@/components/layout/AppShell'
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
 import { BibliographicSourceEditor } from '@/components/course/authoring/BibliographicSourceEditor'
+import { CoverageReport } from '@/components/course/authoring/CoverageReport'
 import { CourseModelPicker } from '@/components/course/CourseModelPicker'
 import { EvidenceAnchorCard } from '@/components/course/EvidenceAnchorCard'
 import {
@@ -71,10 +72,12 @@ export default function CourseOutlinePage() {
     QUERY_KEYS.courseSources(courseId),
     QUERY_KEYS.courseAnchors(courseId),
     QUERY_KEYS.courseOutline(courseId),
+    QUERY_KEYS.courseCoverage(courseId),
   ])
   const outlineStatus = useCommandStatus(outlineCommandId, [
     QUERY_KEYS.course(courseId),
     QUERY_KEYS.courseOutline(courseId),
+    QUERY_KEYS.courseCoverage(courseId),
   ])
 
   useEffect(() => {
@@ -294,6 +297,22 @@ export default function CourseOutlinePage() {
               <BibliographicSourceEditor
                 courseId={courseId}
                 sources={sources.data ?? []}
+              />
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <FileSearch className="size-5 text-teal" />
+                {t('course.coverageTitle')}
+              </CardTitle>
+              <CardDescription>{t('course.coverageDescription')}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <CoverageReport
+                courseId={courseId}
+                enabled={Boolean(course.data.outline_version_id)}
               />
             </CardContent>
           </Card>

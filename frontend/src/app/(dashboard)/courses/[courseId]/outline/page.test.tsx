@@ -30,6 +30,10 @@ vi.mock('@/components/layout/AppShell', () => ({
 vi.mock('@/components/course/authoring/BibliographicSourceEditor', () => ({
   BibliographicSourceEditor: () => <div data-testid="bibliography-editor" />,
 }))
+
+vi.mock('@/components/course/authoring/CoverageReport', () => ({
+  CoverageReport: () => <div data-testid="coverage-report" />,
+}))
 vi.mock('@/lib/hooks/use-command-status', () => ({ useCommandStatus: vi.fn() }))
 vi.mock('@/lib/hooks/use-courses', () => ({
   useApproveCourseOutline: vi.fn(),

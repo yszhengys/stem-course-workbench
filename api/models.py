@@ -905,6 +905,95 @@ class CourseBibliographicSourceResponse(BaseModel):
     updated: datetime
 
 
+class CourseCoverageLocator(BaseModel):
+    """Portable locator metadata; intentionally excludes quotes and local paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["pdf_page", "pptx_slide"]
+    index: int = Field(ge=1)
+    block_key: str = Field(min_length=1, max_length=200)
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bbox: tuple[float, float, float, float] | None
+
+    @field_validator("bbox")
+    @classmethod
+    def bbox_is_normalized(
+        cls, value: tuple[float, float, float, float] | None
+    ) -> tuple[float, float, float, float] | None:
+        if value is not None and any(point < 0 or point > 1 for point in value):
+            raise ValueError("coverage bbox coordinates must be normalized")
+        return value
+
+
+class CourseCoverageUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["concept", "chapter", "example", "exercise", "lab"]
+    key: str = Field(min_length=1, max_length=300)
+    chapter_key: str | None = Field(default=None, max_length=100)
+
+
+class CourseCoverageRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    anchor_id: str = Field(pattern=r"^anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}$")
+    source_id: str = Field(pattern=r"^source:[^:]+$")
+    source_role: Literal["PRIMARY", "SUPPLEMENT"]
+    locator: CourseCoverageLocator
+    category: Literal[
+        "definition",
+        "theorem",
+        "worked_example",
+        "exercise",
+        "answer",
+        "figure",
+        "prerequisite",
+        "unclassified",
+    ]
+    confidence: Literal["low", "medium", "high"]
+    source_number: str | None = Field(default=None, min_length=1, max_length=100)
+    usages: tuple[CourseCoverageUsage, ...] = Field(max_length=1000)
+    flags: tuple[
+        Literal[
+            "unused",
+            "low_confidence",
+            "supplement_only",
+            "missing_bibliography",
+        ],
+        ...,
+    ] = Field(max_length=4)
+
+
+class CourseCoverageSourceHash(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str = Field(pattern=r"^source:[^:]+$")
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CourseCoverageChapterFlag(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_key: str = Field(min_length=1, max_length=100)
+    flags: tuple[Literal["no_answer_source"], ...] = Field(max_length=1)
+
+
+class CourseCoverageResponse(BaseModel):
+    """Deterministic evidence-use audit, not a learner-quality score."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    course_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    source_hashes: tuple[CourseCoverageSourceHash, ...] = Field(max_length=50)
+    rows: tuple[CourseCoverageRow, ...] = Field(max_length=100_000)
+    chapter_flags: tuple[CourseCoverageChapterFlag, ...] = Field(max_length=200)
+    flags: tuple[Literal["generation_limit_exceeded"], ...] = Field(max_length=1)
+    report_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def _bounded_json_answer(value: Any) -> Any:
     try:
         encoded = json.dumps(

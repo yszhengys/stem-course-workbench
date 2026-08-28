@@ -721,6 +721,67 @@ export type CourseBibliographyUpdateRequest = z.infer<
   typeof courseBibliographyUpdateRequestSchema
 >
 
+export const courseCoverageUsageSchema = z.object({
+  kind: z.enum(['concept', 'chapter', 'example', 'exercise', 'lab']),
+  key: z.string().min(1).max(300),
+  chapter_key: z.string().min(1).max(100).nullable(),
+}).strict()
+
+export const courseCoverageRowFlagSchema = z.enum([
+  'unused',
+  'low_confidence',
+  'supplement_only',
+  'missing_bibliography',
+])
+export type CourseCoverageRowFlag = z.infer<typeof courseCoverageRowFlagSchema>
+
+export const courseCoverageRowSchema = z.object({
+  anchor_id: z.string().regex(/^anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/),
+  source_id: typedRecordId('source'),
+  source_role: sourceRoleSchema,
+  locator: z.object({
+    kind: z.enum(['pdf_page', 'pptx_slide']),
+    index: z.number().int().positive(),
+    block_key: z.string().min(1).max(200),
+    content_sha256: sha256Schema,
+    bbox: z.tuple([finiteNumber, finiteNumber, finiteNumber, finiteNumber])
+      .nullable(),
+  }).strict(),
+  category: z.enum([
+    'definition',
+    'theorem',
+    'worked_example',
+    'exercise',
+    'answer',
+    'figure',
+    'prerequisite',
+    'unclassified',
+  ]),
+  confidence: z.enum(['low', 'medium', 'high']),
+  source_number: z.string().min(1).max(100).nullable(),
+  usages: z.array(courseCoverageUsageSchema).max(1000),
+  flags: z.array(courseCoverageRowFlagSchema).max(4),
+}).strict()
+export type CourseCoverageRow = z.infer<typeof courseCoverageRowSchema>
+
+export const courseCoverageResponseSchema = z.object({
+  schema_version: z.literal(1),
+  course_id: courseRecordId,
+  course_version_id: courseVersionRecordId,
+  source_hashes: z.array(z.object({
+    source_id: typedRecordId('source'),
+    content_sha256: sha256Schema,
+  }).strict()).max(50),
+  rows: z.array(courseCoverageRowSchema).max(100_000),
+  chapter_flags: z.array(z.object({
+    chapter_key: z.string().min(1).max(100),
+    flags: z.array(z.literal('no_answer_source')).max(1),
+  }).strict()).max(200),
+  flags: z.array(z.literal('generation_limit_exceeded')).max(1),
+  report_hash: sha256Schema,
+}).strict()
+export type CourseCoverageReport = z.infer<typeof courseCoverageResponseSchema>
+
 export const courseModelOptionSchema = z.object({
   adapter: z.enum(['codex_cli', 'open_notebook', 'ollama']),
   model: z.string().min(1).nullable(),

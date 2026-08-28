@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from api.course_service import CourseConflictError, CourseService
 from api.models import (
@@ -24,6 +24,7 @@ from api.models import (
     CourseBibliographyUpdateRequest,
     CourseBundleImportResponse,
     CourseConceptResponse,
+    CourseCoverageResponse,
     CourseDraftOperationRequest,
     CourseDraftResponse,
     CourseDraftValidateRequest,
@@ -79,6 +80,7 @@ from open_notebook.course.contracts import (
     ChapterArtifact,
     CourseOutlineArtifact,
     FormulaArtifact,
+    LabSpecVariant,
 )
 from open_notebook.course.evidence_service import EvidenceService
 from open_notebook.course.learning_service import (
@@ -147,6 +149,7 @@ from open_notebook.exceptions import (
 )
 
 LabQuery = Callable[[str, dict[str, Any]], Awaitable[list[Any]]]
+LAB_SPEC_ADAPTER: TypeAdapter[LabSpecVariant] = TypeAdapter(LabSpecVariant)
 
 
 @dataclass
@@ -258,6 +261,151 @@ class CourseV2Service:
             return await self._source_quality().csl_json(course_id)
         except BibliographyConflictError as exc:
             raise CourseConflictError(str(exc)) from exc
+
+    async def coverage(self, course_id: str) -> CourseCoverageResponse:
+        """Build an exact current-version evidence-use snapshot."""
+
+        course = await CourseService.get_course(course_id)
+        version_id = course.outline_version_id
+        if version_id is None:
+            raise CourseConflictError("Course has no current outline version")
+        version = await CourseVersion.get(version_id)
+        if (
+            version.id is None
+            or str(version.id) != version_id
+            or version.course != course_id
+        ):
+            raise CourseConflictError(
+                "Course current version is outside the Course scope"
+            )
+        try:
+            outline = CourseOutlineArtifact.model_validate(version.outline_artifact)
+        except ValidationError as exc:
+            raise CourseConflictError("Current Course outline is invalid") from exc
+
+        chapter_rows = await CourseVersion.chapters(version_id)
+        chapter_artifacts: list[ChapterArtifact] = []
+        chapter_ids: dict[str, str] = {}
+        for proposal in sorted(outline.chapters, key=lambda item: item.key):
+            try:
+                chapter = await CourseWorkflowService.resolve_current_chapter(
+                    course_id=course_id,
+                    version_id=version_id,
+                    chapter_key=proposal.key,
+                    chapters=chapter_rows,
+                )
+            except NotFoundError:
+                continue
+            chapter_id = self._record_id(chapter.id, "Course chapter")
+            if (
+                chapter.course_version != version_id
+                or chapter.chapter_key != proposal.key
+                or proposal.key in chapter_ids
+            ):
+                raise CourseConflictError("Current Course chapter scope changed")
+            chapter_ids[proposal.key] = chapter_id
+            if chapter.artifact is None:
+                continue
+            try:
+                artifact = ChapterArtifact.model_validate(chapter.artifact)
+            except ValidationError as exc:
+                raise CourseConflictError(
+                    "Current Course chapter artifact is invalid"
+                ) from exc
+            if artifact.chapter_key != proposal.key:
+                raise CourseConflictError(
+                    "Current Course chapter artifact scope changed"
+                )
+            chapter_artifacts.append(artifact)
+
+        exercise_rows = await repo_query(
+            """
+            SELECT * FROM course_exercise
+            WHERE course = $course AND course_version = $version;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(version_id),
+            },
+        )
+        try:
+            exercises = tuple(
+                CourseExercise(**row)
+                for row in (exercise_rows if isinstance(exercise_rows, list) else [])
+                if isinstance(row, dict)
+                and chapter_ids.get(str(row.get("chapter_key")))
+                == str(row.get("chapter"))
+            )
+        except (TypeError, ValueError) as exc:
+            raise CourseConflictError("Current Course exercise is invalid") from exc
+        exercise_keys = [
+            (exercise.chapter_key, exercise.exercise_key) for exercise in exercises
+        ]
+        if len(exercise_keys) != len(set(exercise_keys)) or any(
+            exercise.course != course_id
+            or exercise.course_version != version_id
+            or chapter_ids.get(exercise.chapter_key) != exercise.chapter
+            for exercise in exercises
+        ):
+            raise CourseConflictError("Current Course exercise scope changed")
+
+        labs: list[tuple[str, LabSpecVariant]] = []
+        lab_keys: set[tuple[str, str]] = set()
+        chapters_by_id = {chapter_id: key for key, chapter_id in chapter_ids.items()}
+        for lab in await CourseVersion.labs(version_id):
+            chapter_key = chapters_by_id.get(lab.chapter or "")
+            if chapter_key is None:
+                continue
+            if lab.course_version != version_id:
+                raise CourseConflictError("Current Course Lab scope changed")
+            try:
+                spec = LAB_SPEC_ADAPTER.validate_python(lab.payload)
+            except ValidationError as exc:
+                raise CourseConflictError("Current Course Lab is invalid") from exc
+            identity = (chapter_key, spec.key)
+            if identity in lab_keys:
+                raise CourseConflictError("Current Course Lab key is ambiguous")
+            lab_keys.add(identity)
+            labs.append((chapter_key, spec))
+
+        expected_anchor_ids = await CourseService.list_owned_current_anchor_ids(
+            course_id
+        )
+        try:
+            anchors = await self._source_quality().load_current_anchors(
+                course_id, expected_anchor_ids
+            )
+            bibliography = await self._source_quality().list_bibliography(course_id)
+            references = self._source_quality().coverage_references(
+                outline=outline,
+                chapters=chapter_artifacts,
+                exercises=exercises,
+                labs=labs,
+            )
+            report = self._source_quality().build_coverage_report(
+                course_id=course_id,
+                course_version_id=version_id,
+                anchors=anchors,
+                bibliography=bibliography,
+                references=references,
+                chapter_keys=tuple(chapter.key for chapter in outline.chapters),
+                exercise_count=len(exercises),
+            )
+        except BibliographyConflictError as exc:
+            raise CourseConflictError(str(exc)) from exc
+
+        current_course = await CourseService.get_course(course_id)
+        current_anchor_ids = await CourseService.list_owned_current_anchor_ids(
+            course_id
+        )
+        if (
+            current_course.outline_version_id != version_id
+            or current_anchor_ids != expected_anchor_ids
+        ):
+            raise CourseConflictError(
+                "Course coverage scope changed during the read; retry"
+            )
+        return CourseCoverageResponse.model_validate(report)
 
     @staticmethod
     def _export_response(export: CourseExport) -> CourseExportResponse:

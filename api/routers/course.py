@@ -29,6 +29,7 @@ from api.models import (
     CourseChapterAttemptCreate,
     CourseChapterGenerateRequest,
     CourseChapterReviewRequest,
+    CourseCoverageResponse,
     CourseCreate,
     CourseDraftOperationRequest,
     CourseDraftResponse,
@@ -536,6 +537,35 @@ async def list_course_bibliography(course_id: str):
 )
 async def get_course_bibliography_csl_json(course_id: str):
     return await _call(course_v2_service.csl_json(course_id))
+
+
+@router.get(
+    "/courses/{course_id}/coverage",
+    response_model=CourseCoverageResponse,
+)
+async def get_course_coverage(course_id: str):
+    return await _call(course_v2_service.coverage(course_id))
+
+
+@router.get("/courses/{course_id}/coverage/export")
+async def export_course_coverage(course_id: str):
+    report = await _call(course_v2_service.coverage(course_id))
+    content = course_v2_service._source_quality().canonical_coverage_json(
+        report.model_dump(mode="json")
+    )
+    filename_id = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "-"
+        for character in course_id
+    )[:100].strip("-") or "course"
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="course-coverage-{filename_id}.json"'
+            )
+        },
+    )
 
 
 @router.get(

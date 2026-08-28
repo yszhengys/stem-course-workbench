@@ -120,15 +120,18 @@ export default function CourseChapterPage() {
     QUERY_KEYS.course(courseId),
     QUERY_KEYS.courseChapter(courseId, chapterKey),
     QUERY_KEYS.courseLabs(courseId, chapterKey),
+    QUERY_KEYS.courseCoverage(courseId),
   ])
   const reviewStatus = useCommandStatus(reviewCommandId, [
     QUERY_KEYS.course(courseId),
     QUERY_KEYS.courseChapter(courseId, chapterKey),
     QUERY_KEYS.courseFindings(courseId, chapterKey),
+    QUERY_KEYS.courseCoverage(courseId),
   ])
   useCommandStatus(exerciseCommandId, [
     QUERY_KEYS.courseExerciseBuild(courseId, chapterKey),
     QUERY_KEYS.courseFindings(courseId, chapterKey),
+    QUERY_KEYS.courseCoverage(courseId),
   ])
 
   const outlineChapter = outline.data?.outline_artifact?.chapters.find((item) => item.key === chapterKey)

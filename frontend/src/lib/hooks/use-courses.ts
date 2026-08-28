@@ -72,6 +72,15 @@ export function useCourseBibliography(courseId: string) {
   })
 }
 
+export function useCourseCoverage(courseId: string, enabled = true) {
+  return useQuery({
+    queryKey: QUERY_KEYS.courseCoverage(courseId),
+    queryFn: () => courseApi.getCoverage(courseId),
+    enabled: Boolean(courseId) && enabled,
+    retry: false,
+  })
+}
+
 export function useSaveCourseBibliography(courseId: string) {
   const client = useQueryClient()
   const feedback = useMutationFeedback()
