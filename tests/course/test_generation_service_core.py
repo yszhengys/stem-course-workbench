@@ -519,6 +519,10 @@ async def test_chapter_prompt_names_every_approved_lab_key() -> None:
     assert "citations array must contain bare anchor IDs only" in (
         adapter.calls[0].prompt
     )
+    assert "AcademicVerification fixed at L1/self_consistency" in (
+        adapter.calls[0].prompt
+    )
+    assert "never qualify as L2 or L3" in adapter.calls[0].prompt
 
 
 def test_sympy_equivalence_substitution_and_unparseable_manual_check():

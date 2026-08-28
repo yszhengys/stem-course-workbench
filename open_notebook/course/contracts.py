@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime
 from html.parser import HTMLParser
 from typing import Annotated, Generic, Literal, TypeAlias, TypeVar, Union
 
@@ -269,6 +270,100 @@ class ChapterTextAttributions(CourseContract):
     quick_reference: list[ChapterTextAttribution] = Field(max_length=100)
 
 
+class AcademicVerification(CourseContract):
+    """Honest, auditable confidence metadata for answer-bearing chapter content."""
+
+    level: Literal["L0", "L1", "L2", "L3"]
+    method: Literal[
+        "structure",
+        "self_consistency",
+        "independent_model_review",
+        "source_answer",
+        "deterministic_solver",
+        "human_review",
+    ]
+    anchor_ids: list[str] = Field(default_factory=list, max_length=100)
+    reason: str | None = Field(default=None, min_length=1, max_length=4000)
+    verified_at: datetime | None = None
+    artifact_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("anchor_ids")
+    @classmethod
+    def anchors_are_unique_and_well_formed(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("verification anchors must be unique")
+        for value in values:
+            if not re.fullmatch(r"anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}", value):
+                raise ValueError("verification anchors must use stable anchor IDs")
+        return values
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_bounded_audit_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        clean = value.strip()
+        if not clean:
+            raise ValueError("verification reason must not be blank")
+        return _validate_generated_text(clean)
+
+    @field_validator("verified_at")
+    @classmethod
+    def timestamp_is_utc_if_present(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        offset = value.utcoffset()
+        if offset is None or offset.total_seconds() != 0:
+            raise ValueError("verification timestamp must be UTC")
+        return value
+
+    @model_validator(mode="after")
+    def level_matches_provenance(self) -> "AcademicVerification":
+        if self.level == "L0":
+            if self.method != "structure":
+                raise ValueError("L0 verification requires structure method")
+            if self.anchor_ids:
+                raise ValueError("L0 verification cannot claim answer anchors")
+            if self.reason is not None:
+                raise ValueError("L0 verification cannot claim an audit reason")
+            if self.verified_at is not None:
+                raise ValueError("L0 verification cannot have a verification time")
+            if self.artifact_hash is not None:
+                raise ValueError("L0 verification cannot claim an artifact hash")
+        elif self.level == "L1":
+            if self.method not in {
+                "self_consistency",
+                "independent_model_review",
+            }:
+                raise ValueError("L1 verification requires a consistency review")
+            if self.verified_at is not None:
+                raise ValueError("L1 verification cannot have a verification time")
+        elif self.level == "L2":
+            if self.method not in {"source_answer", "deterministic_solver"}:
+                raise ValueError("L2 verification requires an independent source")
+            if not self.anchor_ids and self.reason is None:
+                raise ValueError("L2 verification requires anchors or solver provenance")
+        else:
+            if self.method != "human_review":
+                raise ValueError("L3 verification requires human review")
+            if self.reason is None:
+                raise ValueError("L3 verification requires a reason")
+            if not self.anchor_ids:
+                raise ValueError("L3 verification requires evidence anchors")
+            if self.verified_at is None:
+                raise ValueError("L3 verification requires a UTC timestamp")
+            if self.artifact_hash is None:
+                raise ValueError("L3 verification requires an artifact hash")
+        return self
+
+
+def _default_academic_verification() -> AcademicVerification:
+    return AcademicVerification(
+        level="L1",
+        method="self_consistency",
+    )
+
+
 class FormulaArtifact(ProvenancedArtifact):
     key: str = Field(min_length=1, max_length=100)
     latex: str = Field(min_length=1, max_length=4000)
@@ -278,6 +373,9 @@ class FormulaArtifact(ProvenancedArtifact):
     oracle_expression: str | None = Field(default=None, max_length=1000)
     oracle_substitutions: dict[str, FiniteFloat] = Field(
         default_factory=dict, max_length=20
+    )
+    verification: AcademicVerification = Field(
+        default_factory=_default_academic_verification
     )
 
     _safe_text = field_validator("latex", "meaning")(_validate_generated_text)
@@ -296,6 +394,9 @@ class WorkedExampleArtifact(ProvenancedArtifact):
     oracle_answer: FiniteFloat | None = None
     unit_expression: str | None = Field(default=None, max_length=500)
     oracle_unit_expression: str | None = Field(default=None, max_length=500)
+    verification: AcademicVerification = Field(
+        default_factory=_default_academic_verification
+    )
 
     _safe_text = field_validator("prompt", "answer")(_validate_generated_text)
     _safe_steps = field_validator("steps")(_validate_generated_texts)
@@ -314,6 +415,9 @@ class ExerciseArtifact(ProvenancedArtifact):
     oracle_expression: str | None = Field(default=None, max_length=1000)
     oracle_values: dict[str, FiniteFloat] = Field(default_factory=dict, max_length=20)
     oracle_answer: FiniteFloat | None = None
+    verification: AcademicVerification = Field(
+        default_factory=_default_academic_verification
+    )
 
     _safe_text = field_validator(
         "prompt", "answer", "transfer_task"

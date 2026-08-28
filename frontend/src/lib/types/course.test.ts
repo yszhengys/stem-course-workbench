@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  academicVerificationSchema,
   chapterArtifactSchema,
   courseAnswerFormatSchema,
   courseExerciseGradeResponseSchema,
@@ -27,6 +28,60 @@ import {
   exerciseVerificationSchema,
   learningEventSchema,
 } from './course'
+
+const academicArtifactHash = 'a'.repeat(64)
+
+describe('academicVerificationSchema', () => {
+  it.each([
+    { level: 'L0', method: 'structure', anchor_ids: [], reason: null, verified_at: null, artifact_hash: null },
+    { level: 'L1', method: 'self_consistency', anchor_ids: [], reason: null, verified_at: null, artifact_hash: null },
+    {
+      level: 'L2', method: 'source_answer', anchor_ids: ['anchor:answer_key'],
+      reason: null, verified_at: null, artifact_hash: academicArtifactHash,
+    },
+    {
+      level: 'L2', method: 'deterministic_solver', anchor_ids: [],
+      reason: 'SymPy reproduced the answer.', verified_at: null, artifact_hash: academicArtifactHash,
+    },
+    {
+      level: 'L3', method: 'human_review', anchor_ids: ['anchor:answer_key'],
+      reason: 'Checked line by line.', verified_at: '2026-08-29T00:00:00Z',
+      artifact_hash: academicArtifactHash,
+    },
+  ])('accepts supported verification %#', (verification) => {
+    expect(academicVerificationSchema.parse(verification).level).toBe(verification.level)
+  })
+
+  it.each([
+    { level: 'L2', method: 'source_answer', anchor_ids: [], reason: null, verified_at: null, artifact_hash: null },
+    {
+      level: 'L3', method: 'human_review', anchor_ids: [], reason: 'Checked.',
+      verified_at: '2026-08-29T00:00:00Z', artifact_hash: academicArtifactHash,
+    },
+    {
+      level: 'L3', method: 'human_review', anchor_ids: ['anchor:answer_key'], reason: null,
+      verified_at: '2026-08-29T00:00:00Z', artifact_hash: academicArtifactHash,
+    },
+    {
+      level: 'L3', method: 'human_review', anchor_ids: ['anchor:answer_key'], reason: 'Checked.',
+      verified_at: null, artifact_hash: academicArtifactHash,
+    },
+    {
+      level: 'L3', method: 'human_review', anchor_ids: ['anchor:answer_key'], reason: 'Checked.',
+      verified_at: '2026-08-29T00:00:00Z', artifact_hash: null,
+    },
+  ])('rejects unsupported verification %#', (verification) => {
+    expect(() => academicVerificationSchema.parse(verification)).toThrow()
+  })
+
+  it('adds an explicit L1 default to legacy chapter artifacts', () => {
+    const parsed = chapterArtifactSchema.parse(chapterPayload())
+
+    expect(parsed.formulas[0].verification).toMatchObject({ level: 'L1', method: 'self_consistency' })
+    expect(parsed.worked_examples[0].verification).toMatchObject({ level: 'L1', method: 'self_consistency' })
+    expect(parsed.exercises[0].verification).toMatchObject({ level: 'L1', method: 'self_consistency' })
+  })
+})
 
 const attribution = (provenance: string, anchorIds: string[] = []) => ({
   provenance,

@@ -482,7 +482,10 @@ class CourseGenerationService:
             "Do not include equality or implication "
             "commands in FormulaArtifact.latex; explain them in the meaning field. "
             "The citations array must contain bare anchor IDs only, with no labels, "
-            "quotes, roles, page text, or descriptions."
+            "quotes, roles, page text, or descriptions. Every FormulaArtifact, "
+            "WorkedExampleArtifact, and ExerciseArtifact must include an "
+            "AcademicVerification fixed at L1/self_consistency. Model generation "
+            "and second-model review never qualify as L2 or L3."
         )
         generated = await adapter.generate(
             request,

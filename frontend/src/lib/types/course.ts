@@ -265,6 +265,72 @@ export const chapterSectionSchema = z.object({
   provenance: provenanceSchema,
 }).strict().superRefine(validateProvenance)
 
+const defaultAcademicVerification = {
+  level: 'L1',
+  method: 'self_consistency',
+  anchor_ids: [],
+  reason: null,
+  verified_at: null,
+  artifact_hash: null,
+} as const
+
+export const academicVerificationSchema = z.object({
+  level: z.enum(['L0', 'L1', 'L2', 'L3']),
+  method: z.enum([
+    'structure',
+    'self_consistency',
+    'independent_model_review',
+    'source_answer',
+    'deterministic_solver',
+    'human_review',
+  ]),
+  anchor_ids: z.array(
+    z.string().regex(/^anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/),
+  ).max(100),
+  reason: z.string().trim().min(1).max(4000).nullable(),
+  verified_at: z.string().datetime({ offset: true }).nullable(),
+  artifact_hash: sha256Schema.nullable(),
+}).strict().superRefine((value, context) => {
+  const fail = (message: string, path: keyof typeof value): void => {
+    context.addIssue({ code: 'custom', path: [path], message })
+  }
+  if (new Set(value.anchor_ids).size !== value.anchor_ids.length) {
+    fail('Verification anchors must be unique', 'anchor_ids')
+  }
+  if (
+    value.verified_at !== null
+    && !/(?:Z|[+-]00:00)$/.test(value.verified_at)
+  ) {
+    fail('Verification timestamp must be UTC', 'verified_at')
+  }
+  if (value.level === 'L0') {
+    if (value.method !== 'structure') fail('L0 requires structure', 'method')
+    if (value.anchor_ids.length > 0) fail('L0 cannot claim answer anchors', 'anchor_ids')
+    if (value.reason !== null) fail('L0 cannot claim an audit reason', 'reason')
+    if (value.verified_at !== null) fail('L0 cannot have a verification time', 'verified_at')
+    if (value.artifact_hash !== null) fail('L0 cannot claim an artifact hash', 'artifact_hash')
+  } else if (value.level === 'L1') {
+    if (!['self_consistency', 'independent_model_review'].includes(value.method)) {
+      fail('L1 requires a consistency review', 'method')
+    }
+    if (value.verified_at !== null) fail('L1 cannot have a verification time', 'verified_at')
+  } else if (value.level === 'L2') {
+    if (!['source_answer', 'deterministic_solver'].includes(value.method)) {
+      fail('L2 requires an independent source', 'method')
+    }
+    if (value.anchor_ids.length === 0 && value.reason === null) {
+      fail('L2 requires anchors or solver provenance', 'anchor_ids')
+    }
+  } else {
+    if (value.method !== 'human_review') fail('L3 requires human review', 'method')
+    if (value.reason === null) fail('L3 requires a reason', 'reason')
+    if (value.anchor_ids.length === 0) fail('L3 requires evidence anchors', 'anchor_ids')
+    if (value.verified_at === null) fail('L3 requires a verification time', 'verified_at')
+    if (value.artifact_hash === null) fail('L3 requires an artifact hash', 'artifact_hash')
+  }
+})
+export type AcademicVerification = z.infer<typeof academicVerificationSchema>
+
 const formulaSchema = z.object({
   key: z.string().min(1).max(100),
   latex: z.string().min(1).max(4000),
@@ -275,6 +341,7 @@ const formulaSchema = z.object({
   provenance: provenanceSchema,
   oracle_expression: z.string().max(1000).nullable(),
   oracle_substitutions: z.record(z.string(), finiteNumber),
+  verification: academicVerificationSchema.default(defaultAcademicVerification),
 }).strict().superRefine(validateProvenance)
 const workedExampleSchema = z.object({
   key: z.string().min(1).max(100),
@@ -287,6 +354,7 @@ const workedExampleSchema = z.object({
   unit_expression: z.string().max(500).nullable(),
   oracle_unit_expression: z.string().max(500).nullable(),
   provenance: provenanceSchema,
+  verification: academicVerificationSchema.default(defaultAcademicVerification),
 }).strict().superRefine(validateProvenance)
 const exerciseSchema = z.object({
   key: z.string().min(1).max(100),
@@ -299,6 +367,7 @@ const exerciseSchema = z.object({
   oracle_expression: z.string().max(1000).nullable(),
   oracle_values: z.record(z.string(), finiteNumber), oracle_answer: finiteNumber.nullable(),
   provenance: provenanceSchema,
+  verification: academicVerificationSchema.default(defaultAcademicVerification),
 }).strict().superRefine(validateProvenance)
 
 const chapterTextAttributionSchema = z.object({
