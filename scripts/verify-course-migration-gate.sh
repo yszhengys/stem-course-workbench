@@ -10,6 +10,19 @@ TEMP_PARENT="${TMPDIR:-/tmp}"
 DATA_ROOT="$(mktemp -d "$TEMP_PARENT/stem-course-migration-gate-data.XXXXXX")"
 CONTAINER_EXISTS=0
 MAPPED_PORT=""
+UV_BIN=""
+
+resolve_uv() {
+  repository_uv="$REPOSITORY_ROOT/.tools/bin/uv"
+  if [ -x "$repository_uv" ]; then
+    UV_BIN="$repository_uv"
+  elif command -v uv >/dev/null 2>&1; then
+    UV_BIN="$(command -v uv)"
+  else
+    echo "uv is required for the Course migration gate." >&2
+    return 1
+  fi
+}
 
 validate_data_root() {
   candidate="$1"
@@ -88,7 +101,10 @@ run_verifier() {
   if [ -n "${COURSE_MIGRATION_GATE_VERIFIER:-}" ]; then
     "$COURSE_MIGRATION_GATE_VERIFIER" --phase "$phase"
   else
-    "$REPOSITORY_ROOT/.tools/bin/uv" run python \
+    if [ -z "$UV_BIN" ]; then
+      resolve_uv
+    fi
+    "$UV_BIN" run python \
       "$SCRIPT_DIR/verify-course-migration-gate.py" --phase "$phase"
   fi
 }

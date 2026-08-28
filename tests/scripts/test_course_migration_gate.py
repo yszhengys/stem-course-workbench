@@ -18,6 +18,9 @@ def test_migration_gate_owns_an_isolated_rocksdb_container() -> None:
     assert 'trap cleanup EXIT INT TERM' in source
     assert 'docker port "$CONTAINER_NAME" 8000/tcp' in source
     assert '--user "$(id -u):$(id -g)"' in source
+    assert 'command -v uv' in source
+    assert 'UV_BIN=' in source
+    assert '"$UV_BIN" run python' in source
     assert 'wait_for_health' in source
     assert 'run_verifier "seed-up"' in source
     assert 'run_verifier "restart-down-up"' in source
