@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from fractions import Fraction
 from typing import Literal, cast
+from weakref import WeakValueDictionary
 
 from pydantic import Field, ValidationError, field_validator
 
@@ -74,6 +75,9 @@ _TUTOR_OPERATION_LEASE = timedelta(minutes=2)
 _TUTOR_OPERATION_HEARTBEAT_SECONDS = 30.0
 _TUTOR_OPERATION_RENEW_TIMEOUT_SECONDS = 15.0
 _TUTOR_OPERATION_RELEASE_TIMEOUT_SECONDS = 5.0
+_OPERATION_LEASE_LOCKS: WeakValueDictionary[str, asyncio.Lock] = (
+    WeakValueDictionary()
+)
 _PROMPT_INJECTION = re.compile(
     r"(?is)(?:"
     r"ignore|disregard|override|bypass|forget"
@@ -488,45 +492,49 @@ class TutorService:
         if operation.id is None:
             raise TutorGroundingError("Tutor operation has no stable identity.")
         lease_id = self._operation_lease_record_id(operation.id)
-        try:
-            await repo_query(
-                """
-                BEGIN TRANSACTION;
-                DELETE $operation_lease WHERE expires_at <= time::now();
-                CREATE ONLY $operation_lease CONTENT {
-                    course: $course,
-                    course_version: $version,
-                    session: $tutor_session,
-                    operation: $operation,
-                    lease_token: $lease_token,
-                    expires_at: $expires_at
-                };
-                COMMIT TRANSACTION;
-                """,
-                {
-                    "operation_lease": ensure_record_id(lease_id),
-                    "course": ensure_record_id(operation.course),
-                    "version": ensure_record_id(operation.course_version),
-                    "tutor_session": ensure_record_id(operation.session),
-                    "operation": ensure_record_id(operation.id),
-                    "lease_token": lease_token,
-                    "expires_at": expires_at,
-                },
-            )
-        except RuntimeError as exc:
-            for delay in (0.0, 0.01, 0.025, 0.05):
-                if delay:
-                    await asyncio.sleep(delay)
-                rows = await repo_query(
-                    "SELECT lease_token FROM $operation_lease LIMIT 1;",
-                    {"operation_lease": ensure_record_id(lease_id)},
+        process_lock = _OPERATION_LEASE_LOCKS.setdefault(
+            lease_id, asyncio.Lock()
+        )
+        async with process_lock:
+            try:
+                await repo_query(
+                    """
+                    BEGIN TRANSACTION;
+                    DELETE $operation_lease WHERE expires_at <= time::now();
+                    CREATE ONLY $operation_lease CONTENT {
+                        course: $course,
+                        course_version: $version,
+                        session: $tutor_session,
+                        operation: $operation,
+                        lease_token: $lease_token,
+                        expires_at: $expires_at
+                    };
+                    COMMIT TRANSACTION;
+                    """,
+                    {
+                        "operation_lease": ensure_record_id(lease_id),
+                        "course": ensure_record_id(operation.course),
+                        "version": ensure_record_id(operation.course_version),
+                        "tutor_session": ensure_record_id(operation.session),
+                        "operation": ensure_record_id(operation.id),
+                        "lease_token": lease_token,
+                        "expires_at": expires_at,
+                    },
                 )
-                if rows:
-                    return False
-            raise TutorGroundingError(
-                "Tutor operation execution could not be reserved."
-            ) from exc
-        return True
+            except RuntimeError as exc:
+                for delay in (0.0, 0.01, 0.025, 0.05):
+                    if delay:
+                        await asyncio.sleep(delay)
+                    rows = await repo_query(
+                        "SELECT lease_token FROM $operation_lease LIMIT 1;",
+                        {"operation_lease": ensure_record_id(lease_id)},
+                    )
+                    if rows:
+                        return False
+                raise TutorGroundingError(
+                    "Tutor operation execution could not be reserved."
+                ) from exc
+            return True
 
     async def _default_operation_lease_renewer(
         self,
