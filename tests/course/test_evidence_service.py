@@ -204,6 +204,7 @@ def test_pdf_docling_pins_rapidocr_onnxruntime(tmp_path: Path, monkeypatch):
     assert service._extract_docling_sync(tmp_path / "lesson.pdf", "pdf") == "{}"
 
     format_options = captured["format_options"]
+    assert isinstance(format_options, dict)
     pdf_options = format_options[InputFormat.PDF].pipeline_options
     assert isinstance(pdf_options.ocr_options, RapidOcrOptions)
     assert pdf_options.ocr_options.backend == "onnxruntime"
