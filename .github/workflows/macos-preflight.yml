@@ -1,0 +1,36 @@
+name: macOS clean-clone preflight
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-preflight-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clean-clone:
+    name: Apple Silicon dependency install
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository without persisted credentials
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Confirm Apple Silicon runner and uncontaminated checkout
+        shell: bash
+        run: |
+          test "$(uname -m)" = "arm64"
+          test ! -e .tools
+          test ! -e .venv
+
+      - name: Install locked dependencies from the clean checkout
+        shell: bash
+        run: ./scripts/verify-clean-clone.sh "$GITHUB_WORKSPACE"

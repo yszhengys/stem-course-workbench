@@ -231,6 +231,16 @@ make frontend
 
 API 和 worker 使用 `.env`，worker 默认并发为 5。Course 的 Docling 与重型本地模型任务另有领域级互斥锁，因此不需要把所有 Open Notebook 后台任务全局串行化。
 
+### 维护者的干净克隆预检
+
+发布前应在一次性的全新 clone 中运行：
+
+```bash
+./scripts/verify-clean-clone.sh "$PWD"
+```
+
+该脚本只验证经过 SHA256 校验的固定 `uv` 引导、锁定的 Python 运行时依赖和前端依赖安装，不读取 `.env`、不启动 Docker/API/worker/前端，也不调用 Codex、Ollama 或其他模型。为避免把本机缓存误当作安装成功，它会拒绝已经含有 `.tools/` 或 `.venv/` 的目录；日常使用仍运行 `./scripts/course-workbench.sh`。相同预检由 GitHub Actions 的 `macos-14` Apple Silicon runner 执行。
+
 ## 数据、隐私与备份
 
 本地重要目录：

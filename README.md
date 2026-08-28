@@ -23,6 +23,16 @@ STEM Course Workbench 是一个单用户、local-first、证据可追溯的数�
 
 > **当前边界：** 这是面向本机使用的开发版本，不提供多用户权限、云部署或协作编辑，也不应把 SurrealDB、API 或前端直接暴露到公网。模型输出不能替代教师或独立学术核验。
 
+### 发布前的干净克隆预检
+
+GitHub Actions 会在 `macos-14` Apple Silicon runner 上，从不存在 `.tools/` 和 `.venv/` 的 checkout 验证固定 `uv` 引导、`uv sync --locked --no-dev` 与 `npm ci --ignore-scripts`。维护者也可在一次性的全新 clone 中运行：
+
+```bash
+./scripts/verify-clean-clone.sh "$PWD"
+```
+
+该预检会拒绝已有 `.tools/` 或 `.venv/` 的日常开发目录，且不会读取 `.env`、启动服务或调用模型。
+
 ## 基于 Open Notebook
 
 本项目是 [Open Notebook](https://github.com/lfnovo/open-notebook) `v1.14.0` 的独立维护衍生项目，保留其完整历史、MIT License、FastAPI、Next.js、SurrealDB、异步任务和多模型供应商体系。Workbench 的问题、功能建议和安全报告由本仓库接收；如问题可复现于未修改的上游版本，再由报告者或维护者转交上游。
