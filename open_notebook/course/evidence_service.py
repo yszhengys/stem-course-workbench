@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import io
 import json
+import os
 import re
+import tempfile
 import textwrap
 import zipfile
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlparse
 
 from open_notebook.config import UPLOADS_FOLDER
@@ -22,6 +25,11 @@ from open_notebook.exceptions import ConfigurationError, InvalidInputError
 
 from .locking import course_job_lock
 from .models import Course, CourseEvidenceAnchor
+from .pptx_visual_renderer import (
+    PptxVisualRejected,
+    PptxVisualRenderer,
+    PptxVisualUnavailable,
+)
 from .v2_contracts import EvidenceCategory, EvidenceClassification
 
 EvidenceKind = Literal["pdf", "pptx"]
@@ -29,10 +37,18 @@ SourceRole = Literal["PRIMARY", "SUPPLEMENT"]
 DoclingRecord = tuple[int, str, str, tuple[float, float, float, float] | None]
 
 
+class VisualRenderer(Protocol):
+    def render(
+        self, path: Path, expected_sha256: str, output_dir: Path
+    ) -> dict[int, Path]: ...
+
+
 @dataclass(frozen=True)
 class EvidencePreviewAsset:
     content: bytes
     filename: str
+    media_type: Literal["image/png", "image/svg+xml"]
+    mode: Literal["visual", "text_only"]
 
 
 @dataclass(frozen=True)
@@ -60,6 +76,10 @@ class EvidenceService:
     MAX_PREVIEW_LINE_CHARS = 96
     MAX_PREVIEW_TEXT_CHARS = MAX_PREVIEW_LINES * MAX_PREVIEW_LINE_CHARS
     MAX_PREVIEW_BYTES = 64 * 1024
+    MAX_VISUAL_PREVIEW_BYTES = PptxVisualRenderer.DEFAULT_MAX_IMAGE_BYTES
+    VISUAL_PREVIEW_WIDTH = PptxVisualRenderer.OUTPUT_WIDTH
+    MAX_VISUAL_PREVIEW_HEIGHT = PptxVisualRenderer.MAX_OUTPUT_HEIGHT
+    _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
     _ASSESSMENT_LABELS: tuple[tuple[EvidenceCategory, re.Pattern[str]], ...] = (
         (
             "prerequisite",
@@ -111,6 +131,7 @@ class EvidenceService:
         data_root: Path | None = None,
         allowed_roots: list[Path] | None = None,
         model_root: Path | None = None,
+        visual_renderer: VisualRenderer | None = None,
     ) -> None:
         self.data_root = (data_root or Path("notebook_data/course_evidence")).resolve()
         self.model_root = (
@@ -118,6 +139,7 @@ class EvidenceService:
         ).resolve()
         roots = allowed_roots if allowed_roots is not None else [Path(UPLOADS_FOLDER)]
         self.allowed_roots = [root.resolve() for root in roots]
+        self.visual_renderer = visual_renderer or PptxVisualRenderer()
 
     @staticmethod
     def normalize_text(value: str) -> str:
@@ -501,6 +523,8 @@ class EvidenceService:
         source_role: SourceRole,
         bbox: tuple[float, float, float, float] | None = None,
         preview_path: str | None = None,
+        visual_preview_path: str | None = None,
+        visual_preview_status: Literal["available", "text_only"] = "text_only",
     ) -> CourseEvidenceAnchor:
         normalized_quote = self.normalize_text(quote)
         quote_hash = self.quote_sha256(normalized_quote)
@@ -529,6 +553,8 @@ class EvidenceService:
             quote_sha256=quote_hash,
             source_role=source_role,
             preview_path=preview_path,
+            visual_preview_path=visual_preview_path,
+            visual_preview_status=visual_preview_status,
         )
 
     def manifest_path(self, course_id: str, source_id: str, source_sha256: str) -> Path:
@@ -653,6 +679,182 @@ class EvidenceService:
             previews[index] = (relative_directory / filename).as_posix()
         return previews
 
+    @classmethod
+    def _validate_png_content(cls, content: bytes) -> tuple[int, int]:
+        if (
+            len(content) < 24
+            or len(content) > cls.MAX_VISUAL_PREVIEW_BYTES
+            or not content.startswith(cls._PNG_SIGNATURE)
+        ):
+            raise EvidenceInputError("Evidence visual preview is not a bounded PNG.")
+        width = int.from_bytes(content[16:20], "big")
+        height = int.from_bytes(content[20:24], "big")
+        if (
+            width != cls.VISUAL_PREVIEW_WIDTH
+            or height <= 0
+            or height > cls.MAX_VISUAL_PREVIEW_HEIGHT
+        ):
+            raise EvidenceInputError("Evidence visual preview dimensions are invalid.")
+        try:
+            from PIL import Image
+
+            with Image.open(io.BytesIO(content)) as image:
+                if image.format != "PNG" or image.size != (width, height):
+                    raise EvidenceInputError(
+                        "Evidence visual preview dimensions are invalid."
+                    )
+                image.verify()
+        except EvidenceInputError:
+            raise
+        except Exception as exc:
+            raise EvidenceInputError(
+                "Evidence visual preview is not a valid PNG."
+            ) from exc
+        return width, height
+
+    def write_pptx_visual_previews(
+        self,
+        *,
+        path: Path,
+        course_id: str,
+        source_id: str,
+        source_sha256: str,
+        slide_count: int,
+    ) -> dict[int, str]:
+        """Render and cache one content-addressed, cache-relative PNG per slide."""
+
+        if slide_count < 1 or slide_count > self.MAX_PPTX_MEMBERS:
+            raise EvidenceInputError("The PPTX slide count is outside safe limits.")
+        relative_directory = self._preview_directory(
+            course_id, source_id, source_sha256
+        )
+        cache_directory = self._ensure_cache_directory(relative_directory)
+        with tempfile.TemporaryDirectory(prefix="course-evidence-visual-") as raw_temp:
+            stage_directory = Path(raw_temp)
+            rendered = self.visual_renderer.render(
+                path, source_sha256, stage_directory
+            )
+            expected_indices = set(range(1, slide_count + 1))
+            if set(rendered) != expected_indices:
+                raise PptxVisualRejected(
+                    "Rendered slide identities do not match the PPTX."
+                )
+            if self.sha256_file(path) != source_sha256:
+                raise PptxVisualRejected(
+                    "PPTX source changed during visual rendering."
+                )
+
+            stage_root = stage_directory.resolve(strict=True)
+            previews: dict[int, str] = {}
+            for index in range(1, slide_count + 1):
+                rendered_path = Path(rendered[index])
+                if rendered_path.is_symlink():
+                    raise PptxVisualRejected(
+                        "Rendered visual preview must not be a symbolic link."
+                    )
+                try:
+                    resolved_rendered = rendered_path.resolve(strict=True)
+                except (FileNotFoundError, OSError) as exc:
+                    raise PptxVisualRejected(
+                        "Rendered visual preview is missing."
+                    ) from exc
+                if (
+                    stage_root not in resolved_rendered.parents
+                    or not resolved_rendered.is_file()
+                ):
+                    raise PptxVisualRejected(
+                        "Rendered visual preview escaped its staging directory."
+                    )
+                if (
+                    resolved_rendered.stat().st_size <= 0
+                    or resolved_rendered.stat().st_size
+                    > self.MAX_VISUAL_PREVIEW_BYTES
+                ):
+                    raise PptxVisualRejected(
+                        "Rendered visual preview exceeds its byte limit."
+                    )
+                content = resolved_rendered.read_bytes()
+                try:
+                    self._validate_png_content(content)
+                except EvidenceInputError as exc:
+                    raise PptxVisualRejected(str(exc)) from exc
+                digest = hashlib.sha256(content).hexdigest()[:16]
+                filename = f"slide-{index:04d}-{digest}.png"
+                target = cache_directory / filename
+                if target.is_symlink():
+                    raise PptxVisualRejected(
+                        "Evidence visual cache must not contain symbolic links."
+                    )
+                if target.exists():
+                    if (
+                        not target.is_file()
+                        or target.stat().st_size != len(content)
+                        or target.stat().st_size > self.MAX_VISUAL_PREVIEW_BYTES
+                        or target.read_bytes() != content
+                    ):
+                        raise PptxVisualRejected(
+                            "Evidence visual preview identity collision."
+                        )
+                else:
+                    temporary = cache_directory / f".{filename}.tmp-{os.getpid()}"
+                    try:
+                        if temporary.exists() or temporary.is_symlink():
+                            raise PptxVisualRejected(
+                                "Evidence visual cache staging path is unsafe."
+                            )
+                        temporary.write_bytes(content)
+                        os.replace(temporary, target)
+                    finally:
+                        if temporary.exists() and not temporary.is_symlink():
+                            temporary.unlink()
+                previews[index] = (relative_directory / filename).as_posix()
+            return previews
+
+    def _read_preview_content(
+        self,
+        *,
+        stored_path: str,
+        expected_directory: Path,
+        filename_pattern: str,
+        max_bytes: int,
+        label: str,
+    ) -> bytes:
+        relative = Path(stored_path)
+        filename_match = re.fullmatch(filename_pattern, relative.name)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != stored_path
+            or relative.parent != expected_directory
+            or filename_match is None
+        ):
+            raise EvidenceInputError(f"Evidence {label} identity or path is invalid.")
+        candidate = self.data_root
+        for part in relative.parts:
+            candidate = candidate / part
+            if candidate.is_symlink():
+                raise EvidenceInputError(
+                    f"Evidence {label} must not be a symbolic link."
+                )
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (FileNotFoundError, OSError) as exc:
+            raise EvidenceInputError(f"Evidence {label} file is missing.") from exc
+        if self.data_root != resolved and self.data_root not in resolved.parents:
+            raise EvidenceInputError(
+                f"Evidence {label} path escaped its cache root."
+            )
+        if not resolved.is_file():
+            raise EvidenceInputError(f"Evidence {label} file is missing.")
+        if resolved.stat().st_size <= 0 or resolved.stat().st_size > max_bytes:
+            raise EvidenceInputError(f"Evidence {label} file has an invalid size.")
+        content = resolved.read_bytes()
+        if hashlib.sha256(content).hexdigest()[:16] != filename_match.group(1):
+            raise EvidenceInputError(
+                f"Evidence {label} identity hash does not match."
+            )
+        return content
+
     def load_preview_asset(
         self,
         anchor: CourseEvidenceAnchor,
@@ -667,42 +869,40 @@ class EvidenceService:
         )
         if anchor.locator.kind != "pptx_slide" or not anchor.preview_path:
             raise EvidenceInputError("Evidence preview is unavailable for this anchor.")
-        relative = Path(anchor.preview_path)
         expected_directory = self._preview_directory(
             course_id, anchor.source, source_hash
         )
-        filename_match = re.fullmatch(
-            rf"slide-{anchor.locator.index:04d}-([0-9a-f]{{16}})\.svg",
-            relative.name,
-        )
-        if (
-            relative.is_absolute()
-            or ".." in relative.parts
-            or relative.as_posix() != anchor.preview_path
-            or relative.parent != expected_directory
-            or filename_match is None
-        ):
-            raise EvidenceInputError("Evidence preview identity or path is invalid.")
-        candidate = self.data_root
-        for part in relative.parts:
-            candidate = candidate / part
-            if candidate.is_symlink():
+        if anchor.visual_preview_status == "available":
+            if not anchor.visual_preview_path:
                 raise EvidenceInputError(
-                    "Evidence preview must not be a symbolic link."
+                    "Evidence visual preview identity is missing."
                 )
-        try:
-            resolved = candidate.resolve(strict=True)
-        except (FileNotFoundError, OSError) as exc:
-            raise EvidenceInputError("Evidence preview file is missing.") from exc
-        if self.data_root != resolved and self.data_root not in resolved.parents:
-            raise EvidenceInputError("Evidence preview path escaped its cache root.")
-        if not resolved.is_file():
-            raise EvidenceInputError("Evidence preview file is missing.")
-        content = resolved.read_bytes()
-        if not content or len(content) > self.MAX_PREVIEW_BYTES:
-            raise EvidenceInputError("Evidence preview file has an invalid size.")
-        if hashlib.sha256(content).hexdigest()[:16] != filename_match.group(1):
-            raise EvidenceInputError("Evidence preview identity hash does not match.")
+            content = self._read_preview_content(
+                stored_path=anchor.visual_preview_path,
+                expected_directory=expected_directory,
+                filename_pattern=(
+                    rf"slide-{anchor.locator.index:04d}-([0-9a-f]{{16}})\.png"
+                ),
+                max_bytes=self.MAX_VISUAL_PREVIEW_BYTES,
+                label="visual preview",
+            )
+            self._validate_png_content(content)
+            return EvidencePreviewAsset(
+                content=content,
+                filename=f"slide-{anchor.locator.index:04d}.png",
+                media_type="image/png",
+                mode="visual",
+            )
+
+        content = self._read_preview_content(
+            stored_path=anchor.preview_path,
+            expected_directory=expected_directory,
+            filename_pattern=(
+                rf"slide-{anchor.locator.index:04d}-([0-9a-f]{{16}})\.svg"
+            ),
+            max_bytes=self.MAX_PREVIEW_BYTES,
+            label="preview",
+        )
         lowered = content.lower()
         if not content.startswith(b'<svg xmlns="http://www.w3.org/2000/svg"') or any(
             token in lowered
@@ -720,6 +920,8 @@ class EvidenceService:
         return EvidencePreviewAsset(
             content=content,
             filename=f"slide-{anchor.locator.index:04d}.svg",
+            media_type="image/svg+xml",
+            mode="text_only",
         )
 
     @staticmethod
@@ -871,6 +1073,8 @@ FOR $anchor IN $anchors {
         quote_sha256 = $anchor.quote_sha256,
         source_role = $anchor.source_role,
         preview_path = $anchor.preview_path,
+        visual_preview_path = $anchor.visual_preview_path,
+        visual_preview_status = $anchor.visual_preview_status,
         is_current = true
     WHERE course = $course_id
       AND source = $source_id
@@ -895,6 +1099,8 @@ COMMIT TRANSACTION;
                         "quote_sha256": anchor.quote_sha256,
                         "source_role": anchor.source_role,
                         "preview_path": anchor.preview_path,
+                        "visual_preview_path": anchor.visual_preview_path,
+                        "visual_preview_status": anchor.visual_preview_status,
                     }
                     for anchor in anchors
                 ],
@@ -933,17 +1139,40 @@ COMMIT TRANSACTION;
             locator_kind: Literal["pdf_page", "pptx_slide"] = (
                 "pdf_page" if kind == "pdf" else "pptx_slide"
             )
+            slide_count = self.pptx_slide_count(path) if kind == "pptx" else 0
             preview_paths = (
                 self.write_pptx_previews(
                     course_id=course_id,
                     source_id=source_id,
                     source_sha256=source_hash,
                     records=records,
-                    slide_count=self.pptx_slide_count(path),
+                    slide_count=slide_count,
                 )
                 if kind == "pptx"
                 else {}
             )
+            visual_preview_paths: dict[int, str] = {}
+            visual_preview_status: Literal["available", "text_only"] = "text_only"
+            if kind == "pptx":
+                try:
+                    visual_preview_paths = await asyncio.to_thread(
+                        self.write_pptx_visual_previews,
+                        path=path,
+                        course_id=course_id,
+                        source_id=source_id,
+                        source_sha256=source_hash,
+                        slide_count=slide_count,
+                    )
+                except PptxVisualUnavailable:
+                    visual_preview_paths = {}
+                except PptxVisualRejected as exc:
+                    raise EvidenceInputError(str(exc)) from exc
+                else:
+                    visual_preview_status = "available"
+            if self.sha256_file(path) != source_hash:
+                raise EvidenceInputError(
+                    "Course source changed during evidence extraction; rebuild it."
+                )
             anchors = [
                 self.make_anchor(
                     course_id=course_id,
@@ -956,6 +1185,8 @@ COMMIT TRANSACTION;
                     source_role=source_role,
                     bbox=bbox,
                     preview_path=preview_paths.get(index),
+                    visual_preview_path=visual_preview_paths.get(index),
+                    visual_preview_status=visual_preview_status,
                 )
                 for index, block_key, quote, bbox in records
             ]

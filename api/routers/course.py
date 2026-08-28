@@ -550,12 +550,13 @@ async def get_evidence_preview(course_id: str, anchor_id: str):
     asset = await _call(CourseService.get_evidence_preview(course_id, anchor_id))
     return Response(
         content=asset.content,
-        media_type="image/svg+xml",
+        media_type=asset.media_type,
         headers={
             "Cache-Control": "private, no-store",
             "Content-Disposition": f'inline; filename="{asset.filename}"',
             "Content-Security-Policy": "default-src 'none'; style-src 'none'; sandbox",
             "X-Content-Type-Options": "nosniff",
+            "X-Course-Preview-Mode": asset.mode,
         },
     )
 

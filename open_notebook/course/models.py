@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, Literal, TypeVar
 
 from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from surrealdb import RecordID
@@ -466,7 +466,11 @@ class CourseNote(CourseRecord):
 
 class CourseEvidenceAnchor(CourseRecord):
     table_name: ClassVar[str] = "course_evidence_anchor"
-    nullable_fields: ClassVar[set[str]] = {"evidence", "preview_path"}
+    nullable_fields: ClassVar[set[str]] = {
+        "evidence",
+        "preview_path",
+        "visual_preview_path",
+    }
 
     course: str
     source: str
@@ -476,7 +480,17 @@ class CourseEvidenceAnchor(CourseRecord):
     quote_sha256: str
     source_role: str = "PRIMARY"
     preview_path: str | None = None
+    visual_preview_path: str | None = None
+    visual_preview_status: Literal["available", "text_only"] = "text_only"
     is_current: bool = True
+
+    @model_validator(mode="after")
+    def validate_visual_preview_identity(self) -> "CourseEvidenceAnchor":
+        if self.visual_preview_status == "available" and not self.visual_preview_path:
+            raise ValueError("Available visual evidence requires a preview path")
+        if self.visual_preview_status == "text_only" and self.visual_preview_path:
+            raise ValueError("Text-only evidence must not reference a visual preview")
+        return self
 
     @field_validator("course", "source", "evidence", mode="before")
     @classmethod

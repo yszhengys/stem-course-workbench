@@ -21,9 +21,9 @@ def test_migration_29_is_registered_and_only_adds_lab_approval_fields() -> None:
     up = migration_sql("29")
     down = migration_sql("29_down")
 
-    assert len(manager.up_migrations) == 29
-    assert len(manager.down_migrations) == 29
-    assert manager.up_migrations[-1].sql == " ".join(
+    assert len(manager.up_migrations) >= 29
+    assert len(manager.down_migrations) >= 29
+    assert manager.up_migrations[28].sql == " ".join(
         line.strip()
         for line in up.splitlines()
         if line.strip() and not line.strip().startswith("--")

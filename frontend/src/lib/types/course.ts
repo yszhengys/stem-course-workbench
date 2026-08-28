@@ -179,6 +179,8 @@ export const evidenceAnchorSchema = z.object({
   quote_sha256: z.string().regex(/^[0-9a-f]{64}$/),
   source_role: sourceRoleSchema,
   preview_path: z.string().nullable(),
+  visual_preview_path: z.string().nullable(),
+  visual_preview_status: z.enum(['available', 'text_only']),
   is_current: z.boolean(),
   ...courseRecordDates,
 }).strict()

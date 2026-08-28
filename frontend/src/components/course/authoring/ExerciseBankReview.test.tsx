@@ -88,6 +88,8 @@ const anchors = [{
   quote_sha256: 'c'.repeat(64),
   source_role: 'PRIMARY' as const,
   preview_path: null,
+  visual_preview_path: null,
+  visual_preview_status: 'text_only' as const,
   is_current: true,
   locator: {
     source_id: 'source:one',

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { Download, ExternalLink } from 'lucide-react'
 
+import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { courseApi } from '@/lib/api/course'
 import { locatorKindLabel, sourceRoleLabel } from '@/lib/course/course-labels'
@@ -29,6 +30,13 @@ export function EvidenceAnchorCard({
   const [sourceFailed, setSourceFailed] = useState(false)
   const checkboxId = `evidence-${anchor.anchor_id.replace(/[^a-zA-Z0-9_-]/g, '-')}`
   const isPdf = anchor.locator.kind === 'pdf_page'
+  const bbox = anchor.locator.bbox
+  const validBbox = bbox
+    && bbox.every((value) => Number.isFinite(value) && value >= 0 && value <= 1)
+    && bbox[2] > bbox[0]
+    && bbox[3] > bbox[1]
+    ? bbox
+    : null
 
   useEffect(() => {
     setPreviewUrl(null)
@@ -51,7 +59,14 @@ export function EvidenceAnchorCard({
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [anchor.anchor_id, anchor.preview_path, courseId, isPdf])
+  }, [
+    anchor.anchor_id,
+    anchor.preview_path,
+    anchor.visual_preview_path,
+    anchor.visual_preview_status,
+    courseId,
+    isPdf,
+  ])
 
   async function loadSource(): Promise<string | null> {
     setSourcePending(true)
@@ -120,21 +135,46 @@ export function EvidenceAnchorCard({
               {t('course.sourcePreviewFailed')}
             </p>
           ) : previewUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={previewUrl}
-              alt={t('course.slidePreview', { slide: anchor.locator.index })}
-              width={640}
-              height={360}
-              loading="lazy"
-              className="h-auto w-full rounded border bg-muted"
-              onError={() => setPreviewFailed(true)}
-            />
+            <div className="relative overflow-hidden rounded border bg-muted">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={previewUrl}
+                alt={t('course.slidePreview', { slide: anchor.locator.index })}
+                width={640}
+                height={360}
+                loading="lazy"
+                className="h-auto w-full"
+                onError={() => setPreviewFailed(true)}
+              />
+              {validBbox && (
+                <svg
+                  aria-hidden="true"
+                  data-testid="evidence-bbox-overlay"
+                  viewBox="0 0 1 1"
+                  preserveAspectRatio="none"
+                  className="pointer-events-none absolute inset-0 size-full"
+                >
+                  <rect
+                    x={validBbox[0]}
+                    y={validBbox[1]}
+                    width={validBbox[2] - validBbox[0]}
+                    height={validBbox[3] - validBbox[1]}
+                    fill="rgba(250, 204, 21, 0.18)"
+                    stroke="rgb(234, 88, 12)"
+                    strokeWidth="0.006"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                </svg>
+              )}
+            </div>
           ) : (
             <div
               aria-busy="true"
               className="aspect-video w-full animate-pulse rounded border bg-muted"
             />
+          )}
+          {anchor.preview_path && anchor.visual_preview_status === 'text_only' && (
+            <Badge variant="secondary">{t('course.textOnlyPreview')}</Badge>
           )}
         </div>
       )}
