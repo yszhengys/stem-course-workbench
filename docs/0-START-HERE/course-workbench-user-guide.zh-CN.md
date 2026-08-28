@@ -283,6 +283,36 @@ API 和 worker 使用 `.env`，worker 默认并发为 5。Course 的 Docling 与
 
 该脚本只验证经过 SHA256 校验的固定 `uv` 引导、锁定的 Python 运行时依赖和前端依赖安装，不读取 `.env`、不启动 Docker/API/worker/前端，也不调用 Codex、Ollama 或其他模型。为避免把本机缓存误当作安装成功，它会拒绝已经含有 `.tools/` 或 `.venv/` 的目录；日常使用仍运行 `./scripts/course-workbench.sh`。相同预检由 GitHub Actions 的 `macos-14` Apple Silicon runner 执行。
 
+### 维护者的发布质量门
+
+仓库只提交两份为本项目原创并以 CC0-1.0 释出的教学二进制金样本：`tests/course/fixtures/gold/stem-evidence-gold.pdf`（2 页）和 `stem-evidence-gold.pptx`（3 页）。固定 SHA256、预期公式、答案、图/低文本页和 bbox 要求记录在同目录的 `manifest.json`；它们用于测试当前解析链，不代表任意教材都能正确识别。
+
+发布候选至少运行：
+
+```bash
+./.tools/bin/uv run pytest tests/ -q \
+  --cov=open_notebook --cov=api --cov-fail-under=75
+./.tools/bin/uv run ruff check .
+./.tools/bin/uv run python -m mypy .
+./.tools/bin/uv run python scripts/check_md_links.py
+./scripts/verify-course-migration-gate.sh
+
+OPEN_NOTEBOOK_RUN_REAL_DOCLING_SMOKE=1 ./.tools/bin/uv run \
+  pytest tests/course/test_real_docling_preview_smoke.py -v
+OPEN_NOTEBOOK_RUN_REAL_PPTX_VISUAL_SMOKE=1 ./.tools/bin/uv run \
+  pytest tests/course/test_pptx_visual_renderer.py -k real -v
+
+cd frontend
+npm run test:coverage
+npm run test:e2e
+npm run lint
+npm run build
+```
+
+首次在本机运行浏览器门且 Chromium 尚未安装时，先在 `frontend/` 执行 `npm run test:e2e:install`。迁移脚本只创建随机端口的临时 SurrealDB/RocksDB，验证升级、重启、降级、再升级和失败回滚；它不会连接或删除现有 `surreal_data/`。
+
+这些命令不证明学习效果、教材级知识正确性、用户材料许可或完整 WCAG 2.2 AA。自动键盘/axe 门通过后，正式无障碍声明仍需完成并记录日期的[人工清单](../7-DEVELOPMENT/course-accessibility-checklist.md)。F01–F10 的当前证据与剩余产品决策见[审查整改状态](../7-DEVELOPMENT/review-remediation-status.md)。
+
 ## 数据、隐私与备份
 
 本地重要目录：

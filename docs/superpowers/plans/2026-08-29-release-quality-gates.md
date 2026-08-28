@@ -42,11 +42,11 @@
 - Produces: manifest schema with `fixture_version`, `license`, `files[].path`, `sha256`, `kind`, `page_count`, and `expected[].index/text/category/bbox_required`.
 - Consumes: `EvidenceService._extract_docling_sync()`, `docling_records()` and `PptxVisualRenderer.render()` without changing their product contracts.
 
-- [ ] **Step 1: Write RED fixture integrity tests**
+- [x] **Step 1: Write RED fixture integrity tests**
 
 Create `test_gold_source_fixtures.py` that requires exactly one PDF and one PPTX, validates strict manifest keys, recomputes SHA256, checks PDF page count 2 and PPTX slide count 3, rejects macros/external relationships, and requires the manifest to cover formula text, a diagram/low-text slide, an answer source and at least one required bbox.
 
-- [ ] **Step 2: Confirm RED**
+- [x] **Step 2: Confirm RED**
 
 Run:
 
@@ -56,7 +56,7 @@ Run:
 
 Expected: FAIL because `fixtures/gold/manifest.json` and binaries do not exist.
 
-- [ ] **Step 3: Generate bounded original fixtures**
+- [x] **Step 3: Generate bounded original fixtures**
 
 The generator must use fixed metadata and create:
 
@@ -66,11 +66,11 @@ The generator must use fixed metadata and create:
 
 The generator must reject an output directory outside the repository when not passed explicitly, must not read `.env`, and must not download anything.
 
-- [ ] **Step 4: Point real smokes at committed fixtures**
+- [x] **Step 4: Point real smokes at committed fixtures**
 
 Replace runtime-generated sources in `test_real_docling_preview_smoke.py` with the committed files and assert index-specific token recall plus normalized bbox. Add a real renderer test over the committed PPTX and assert three bounded PNGs whose bytes differ between diagram and answer slides.
 
-- [ ] **Step 5: Verify fixtures and real local runtimes**
+- [x] **Step 5: Verify fixtures and real local runtimes**
 
 Run:
 
@@ -84,7 +84,7 @@ OPEN_NOTEBOOK_RUN_REAL_PPTX_VISUAL_SMOKE=1 ./.tools/bin/uv run \
 
 Expected: the integrity test and both real runtime gates pass; an unavailable optional renderer may skip only with the existing explicit reason.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add scripts/generate_course_gold_fixtures.py tests/course/fixtures/gold \
@@ -108,11 +108,11 @@ git commit -m "test(course): add redistributable source gold set"
 - Produces: `scripts/verify-course-migration-gate.sh`, which owns one temporary SurrealDB container and invokes the Python verifier in `seed-up` then `restart-down-up` phases.
 - Preserves: `AsyncMigrationRunner.run_all()`, `run_one_up()` and `run_one_down()` public behavior.
 
-- [ ] **Step 1: Write RED atomicity tests**
+- [x] **Step 1: Write RED atomicity tests**
 
 Use a fake async connection to assert one `connection.query()` receives `BEGIN TRANSACTION`, the migration SQL, an exact `_sbl_migrations` create/delete, and `COMMIT TRANSACTION`. Add a real `AsyncSurreal("mem://")` test with a migration that creates a record and then `THROW`s; assert both the record and target version are absent afterward.
 
-- [ ] **Step 2: Confirm RED**
+- [x] **Step 2: Confirm RED**
 
 Run:
 
@@ -122,7 +122,7 @@ Run:
 
 Expected: FAIL because the current implementation applies schema and version in separate connections.
 
-- [ ] **Step 3: Make one migration one transaction**
+- [x] **Step 3: Make one migration one transaction**
 
 Change the runner to pass explicit versions:
 
@@ -133,11 +133,11 @@ await down.run(current_version=current, target_version=current - 1)
 
 `AsyncMigration.run()` must validate `abs(target-current) == 1`, execute the migration and version row mutation in one transaction string on one `db_connection()`, use `CREATE ONLY` for an up version, delete exactly the current row for a down version, and propagate any failure without a separate bump/lower call.
 
-- [ ] **Step 4: Write RED Docker gate contract tests**
+- [x] **Step 4: Write RED Docker gate contract tests**
 
 Test the shell script text and a fake Docker executable. Require `mktemp -d`, a unique container name, loopback-only random port publishing, RocksDB storage under the temporary directory, health wait, one restart using the same directory, cleanup trap, and refusal to accept `surreal_data`, `notebook_data`, `$HOME` or `/` as its data root.
 
-- [ ] **Step 5: Implement old-data/up/down/restart verifier**
+- [x] **Step 5: Implement old-data/up/down/restart verifier**
 
 The Python verifier must:
 
@@ -148,7 +148,7 @@ The Python verifier must:
 5. migrate up 25→31 again and verify idempotent data preservation;
 6. execute an intentionally failing version-32 probe and prove both schema/data and migration version roll back.
 
-- [ ] **Step 6: Run unit and real disk gates**
+- [x] **Step 6: Run unit and real disk gates**
 
 Run:
 
@@ -161,7 +161,7 @@ bash -n scripts/verify-course-migration-gate.sh
 
 Expected: all pass; `docker ps` after the script shows no gate container and repository data directories are unchanged.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add open_notebook/database/async_migrate.py tests/test_atomic_migrations.py \
@@ -189,7 +189,7 @@ git commit -m "fix(database): make Course migrations atomic"
 - Produces: a Playwright API fixture that responds only to the exact Course/config endpoints requested by the real routes.
 - Consumes: `/courses/new`, `/courses/course%3Aa11y/learn`, and `/courses/course%3Aa11y/learn/vectors`.
 
-- [ ] **Step 1: Add pinned browser-test dependencies**
+- [x] **Step 1: Add pinned browser-test dependencies**
 
 Add direct dev dependencies `@playwright/test` and `@axe-core/playwright`, regenerate only `frontend/package-lock.json`, and add scripts:
 
@@ -198,7 +198,7 @@ Add direct dev dependencies `@playwright/test` and `@axe-core/playwright`, regen
 "test:e2e:install": "playwright install chromium"
 ```
 
-- [ ] **Step 2: Write RED browser tests**
+- [x] **Step 2: Write RED browser tests**
 
 Configure a Next.js dev server on loopback port 3100. The API fixture must return strict Zod-valid Course, published chapter, source, note, exercise, mastery and Lab payloads. Tests must:
 
@@ -217,15 +217,15 @@ npm run test:e2e
 
 Expected: RED until dependencies/config/fixtures exist, then any real accessibility violations remain visible by rule and selector.
 
-- [ ] **Step 3: Fix only demonstrated accessibility failures**
+- [x] **Step 3: Fix only demonstrated accessibility failures**
 
 Use semantic labels, headings, focus order, dialog focus restoration, live regions and visible focus styles in the existing product components. Do not add a test-only page, hide controls from axe, disable color-contrast globally or replace keyboard checks with direct DOM calls.
 
-- [ ] **Step 4: Add manual release checklist**
+- [x] **Step 4: Add manual release checklist**
 
 Document macOS VoiceOver navigation, 200% zoom/reflow, light/dark contrast, reduced motion, all five Lab table alternatives, hint/reveal focus, error announcements and source-preview alternative text. State that WCAG 2.2 AA must not be claimed in a Release until the dated manual checklist is recorded.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 Run:
 
@@ -261,11 +261,11 @@ git commit -m "test(course-ui): add keyboard and axe release gate"
 - Produces: frontend Vitest thresholds `{statements:55, branches:58, functions:50, lines:55}`.
 - Produces: PR workflow jobs `Gold source runtime`, `Course migration disk gate`, and `Course browser accessibility`.
 
-- [ ] **Step 1: Write RED configuration contract**
+- [x] **Step 1: Write RED configuration contract**
 
 Parse workflow/config source and assert the exact thresholds, Chromium install, `npm run test:e2e`, real Docling environment switch, gold fixture test, and temporary migration gate command are present. Assert neither workflow references repository `surreal_data/` nor uses a credential-bearing checkout.
 
-- [ ] **Step 2: Confirm RED**
+- [x] **Step 2: Confirm RED**
 
 Run:
 
@@ -275,11 +275,11 @@ Run:
 
 Expected: FAIL because thresholds and release workflow are absent.
 
-- [ ] **Step 3: Enforce measured coverage floors**
+- [x] **Step 3: Enforce measured coverage floors**
 
 Change backend CI to include `--cov-fail-under=75`. Add Vitest `coverage.thresholds` for statements 55, branches 58, functions 50 and lines 55. These are below the verified baselines (backend lines 76.72%; frontend statements 57.71%, branches 60.75%, functions 52.14%, lines 58.58%) and therefore detect regressions without pretending to be aspirational quality scores.
 
-- [ ] **Step 4: Add isolated release jobs**
+- [x] **Step 4: Add isolated release jobs**
 
 On PRs to `main`, run:
 
@@ -289,11 +289,11 @@ On PRs to `main`, run:
 
 Use `persist-credentials: false`, concurrency cancellation and 30-minute job timeouts. Upload Playwright report only on failure and never upload source materials outside the two CC0 gold files.
 
-- [ ] **Step 5: Document the evidence boundary**
+- [x] **Step 5: Document the evidence boundary**
 
 README and maintainer docs must distinguish unit coverage, source/parser correctness, UI accessibility and learning effectiveness. Explicitly state that these gates do not prove improved learning, copyright permission for user materials or full WCAG conformance without the manual checklist.
 
-- [ ] **Step 6: Verify and commit**
+- [x] **Step 6: Verify and commit**
 
 Run:
 
@@ -326,7 +326,7 @@ git commit -m "ci(course): enforce release quality gates"
 - Produces: one evidence table for F01–F10 with status, commit/file/test evidence, remaining product evidence and release effect.
 - Produces: a pre-release checklist that leaves GitHub Release and learner study explicitly outside automated claims.
 
-- [ ] **Step 1: Write the evidence matrix**
+- [x] **Step 1: Write the evidence matrix**
 
 For every F01–F10 use exactly one current status: `已解决`, `工程门已解决/产品证据待补`, or `需产品决策`. Link to current files/tests, record direct local/CI verification separately from source inference, and identify these non-code boundaries:
 
@@ -335,7 +335,7 @@ For every F01–F10 use exactly one current status: `已解决`, `工程门已�
 - no formal Release while Workbench version remains `2.0.0-dev`;
 - user-provided source licensing remains the user's responsibility.
 
-- [ ] **Step 2: Run all local release gates**
+- [x] **Step 2: Run all local release gates**
 
 Run:
 
@@ -360,7 +360,7 @@ npm run build
 
 Also run `git diff --check`, tracked-data/credential-pattern scans, and verify the Workbench launcher/status without deleting user data.
 
-- [ ] **Step 3: Update checklist and final commit**
+- [x] **Step 3: Update checklist and final commit**
 
 Mark only directly verified plan steps complete and update the Chinese guide with the gold-source, migration and browser gate commands.
 
@@ -376,4 +376,3 @@ Push `HEAD:feat/course-mode-v2`, update existing Draft PR #2 without creating an
 - [ ] **Step 5: Final state audit**
 
 Verify local and remote SHA match, worktree is clean, PR remains Draft targeting `main`, repository remains public, `origin`/`upstream` are unchanged, all CI checks are terminal with no failures, and no local data/cache/model/source other than the two declared CC0 gold fixtures is tracked.
-
