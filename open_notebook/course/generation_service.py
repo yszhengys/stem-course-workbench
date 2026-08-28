@@ -486,6 +486,12 @@ class CourseGenerationService:
             "WorkedExampleArtifact, and ExerciseArtifact must include an "
             "AcademicVerification fixed at L1/self_consistency. Model generation "
             "and second-model review never qualify as L2 or L3."
+            " Every generated LabSpec must include a complete pedagogy object with "
+            "bounded learning_objectives, prerequisite_concepts, variables, a "
+            "prediction_prompt, steps, expected_observations, student_submission, "
+            "rubric, error_boundaries, and an accessible_alternative. The "
+            "accessible alternative must explain how to use the data table and must "
+            "not contain HTML or executable code."
         )
         generated = await adapter.generate(
             request,
@@ -705,6 +711,12 @@ class CourseGenerationService:
             raise ValueError(
                 "Lab set does not match the approved outline: "
                 + ", ".join(sorted(unapproved | missing_approved))
+            )
+        missing_pedagogy = [lab.key for lab in artifact.labs if lab.pedagogy is None]
+        if missing_pedagogy:
+            raise ValueError(
+                "Every generated Lab requires complete pedagogy: "
+                + ", ".join(sorted(missing_pedagogy))
             )
         if not 1 <= len(artifact.exercises) <= 3:
             raise ValueError("Select between one and three exercises")

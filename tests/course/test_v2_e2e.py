@@ -74,6 +74,23 @@ REVIEW_MODEL = ModelSelection(
 )
 
 
+def _lab_pedagogy() -> dict[str, object]:
+    return {
+        "learning_objectives": ["Connect input values to the graph."],
+        "prerequisite_concepts": ["Cartesian coordinates"],
+        "variables": [
+            {"key": "x", "label": "Input", "unit": None, "range": [-2, 2]}
+        ],
+        "prediction_prompt": "Predict the graph before interacting.",
+        "steps": ["Record a prediction.", "Inspect the graph."],
+        "expected_observations": ["The output follows the input."],
+        "student_submission": "Submit a prediction and observation.",
+        "rubric": ["Prediction is testable.", "Observation cites the graph."],
+        "error_boundaries": ["Stay within the displayed domain."],
+        "accessible_alternative": "Use the data table below the graph.",
+    }
+
+
 def _fixture() -> dict[str, Any]:
     return cast(dict[str, Any], json.loads(FIXTURE.read_text(encoding="utf-8")))
 
@@ -149,6 +166,7 @@ def _chapter(anchor_id: str) -> ChapterArtifact:
                 expressions=["x+2"],
                 anchor_ids=[],
                 provenance="pedagogical",
+                pedagogy=_lab_pedagogy(),
             )
         ],
         citations=[anchor_id],

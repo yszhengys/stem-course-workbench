@@ -72,6 +72,86 @@ export function LabRenderer({ spec: rawSpec }: { spec: unknown }) {
         <p className="text-xs text-muted-foreground">{t('course.safeLabNotice')}</p>
       </div>
 
+      {result.spec.pedagogy && (
+        <div className="grid gap-4 rounded-md border bg-muted/20 p-4 text-sm">
+          <section className="space-y-1">
+            <h5 className="font-semibold">{t('course.labLearningObjectives')}</h5>
+            <ul className="list-disc space-y-1 pl-5">
+              {result.spec.pedagogy.learning_objectives.map((objective, index) => (
+                <li key={`${index}:${objective}`}>{objective}</li>
+              ))}
+            </ul>
+          </section>
+          {result.spec.pedagogy.prerequisite_concepts.length > 0 && (
+            <section className="space-y-1">
+              <h5 className="font-semibold">{t('course.labPrerequisiteConcepts')}</h5>
+              <ul className="list-disc space-y-1 pl-5">
+                {result.spec.pedagogy.prerequisite_concepts.map((concept, index) => (
+                  <li key={`${index}:${concept}`}>{concept}</li>
+                ))}
+              </ul>
+            </section>
+          )}
+          {result.spec.pedagogy.variables.length > 0 && (
+            <section className="space-y-1">
+              <h5 className="font-semibold">{t('course.labVariables')}</h5>
+              <ul className="list-disc space-y-1 pl-5">
+                {result.spec.pedagogy.variables.map((variable) => (
+                  <li key={variable.key}>
+                    {variable.label} ({variable.key}): [{variable.range[0]}, {variable.range[1]}]
+                    {variable.unit ? ` ${variable.unit}` : ''}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          <section className="space-y-1">
+            <h5 className="font-semibold">{t('course.labPrediction')}</h5>
+            <p>{result.spec.pedagogy.prediction_prompt}</p>
+          </section>
+          <section className="space-y-1">
+            <h5 className="font-semibold">{t('course.labProcedure')}</h5>
+            <ol className="list-decimal space-y-1 pl-5">
+              {result.spec.pedagogy.steps.map((step, index) => (
+                <li key={`${index}:${step}`}>{step}</li>
+              ))}
+            </ol>
+          </section>
+          <section className="space-y-1">
+            <h5 className="font-semibold">{t('course.labExpectedObservations')}</h5>
+            <ul className="list-disc space-y-1 pl-5">
+              {result.spec.pedagogy.expected_observations.map((observation, index) => (
+                <li key={`${index}:${observation}`}>{observation}</li>
+              ))}
+            </ul>
+          </section>
+          <section className="space-y-1">
+            <h5 className="font-semibold">{t('course.labStudentSubmission')}</h5>
+            <p>{result.spec.pedagogy.student_submission}</p>
+          </section>
+          <section className="space-y-1">
+            <h5 className="font-semibold">{t('course.labRubric')}</h5>
+            <ul className="list-disc space-y-1 pl-5">
+              {result.spec.pedagogy.rubric.map((criterion, index) => (
+                <li key={`${index}:${criterion}`}>{criterion}</li>
+              ))}
+            </ul>
+          </section>
+          <section className="space-y-1">
+            <h5 className="font-semibold">{t('course.labErrorBoundaries')}</h5>
+            <ul className="list-disc space-y-1 pl-5">
+              {result.spec.pedagogy.error_boundaries.map((boundary, index) => (
+                <li key={`${index}:${boundary}`}>{boundary}</li>
+              ))}
+            </ul>
+          </section>
+          <section className="space-y-1">
+            <h5 className="font-semibold">{t('course.labAccessibleAlternative')}</h5>
+            <p>{result.spec.pedagogy.accessible_alternative}</p>
+          </section>
+        </div>
+      )}
+
       {result.spec.controls.map((control) => {
         const value = controlValues[control.key] ?? control.value
         const controlId = `lab-control-${instanceId}-${result.spec.key}-${control.key}`

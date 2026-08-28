@@ -41,6 +41,23 @@ def _chapter_text_attributions(
     }
 
 
+def _lab_pedagogy() -> dict[str, object]:
+    return {
+        "learning_objectives": ["Connect input values to the graph."],
+        "prerequisite_concepts": ["Cartesian coordinates"],
+        "variables": [
+            {"key": "x", "label": "Input", "unit": None, "range": [-2, 2]}
+        ],
+        "prediction_prompt": "Predict the graph before interacting.",
+        "steps": ["Record a prediction.", "Inspect the graph."],
+        "expected_observations": ["The output follows the input."],
+        "student_submission": "Submit a prediction and observation.",
+        "rubric": ["Prediction is testable.", "Observation cites the graph."],
+        "error_boundaries": ["Stay within the displayed domain."],
+        "accessible_alternative": "Use the data table below the graph.",
+    }
+
+
 class _FakeQueueStore:
     def __init__(self) -> None:
         self.runs: dict[str, dict[str, object]] = {}
@@ -589,6 +606,7 @@ async def test_lab_save_failure_keeps_last_successful_chapter_current(
                 expressions=["x"],
                 anchor_ids=[],
                 provenance="pedagogical",
+                pedagogy=_lab_pedagogy(),
             )
         ],
         pitfalls=["Check the domain."],
@@ -3128,6 +3146,7 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
                 expressions=["x"],
                 anchor_ids=[],
                 provenance="pedagogical",
+                pedagogy=_lab_pedagogy(),
             )
         ],
         pitfalls=["Check the domain."],

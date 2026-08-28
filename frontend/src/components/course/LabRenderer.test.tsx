@@ -15,6 +15,19 @@ const base = {
   key: 'lab', title: 'Lab', anchor_ids: [], provenance: 'pedagogical', controls: [], objects: [],
 }
 
+const pedagogy = {
+  learning_objectives: ['Relate a parameter to the graph.'],
+  prerequisite_concepts: ['Cartesian coordinates'],
+  variables: [{ key: 'a', label: 'Slope', unit: null, range: [-2, 2] as [number, number] }],
+  prediction_prompt: 'Predict how the graph changes.',
+  steps: ['Record a prediction.', 'Move the slider.'],
+  expected_observations: ['The slope increases with a.'],
+  student_submission: 'Submit a prediction and an observation.',
+  rubric: ['States the direction of change.', 'Uses graph evidence.'],
+  error_boundaries: ['Only claim behavior inside the displayed domain.'],
+  accessible_alternative: 'Use the data table to compare values.',
+}
+
 describe('LabRenderer', () => {
   it.each([
     { kind: 'function_plot', expressions: ['x^2'], domain: { x: [-2, 2] } },
@@ -92,5 +105,31 @@ describe('LabRenderer', () => {
     expect(screen.getByRole('region', { name: 'course.labScrollableData' })).toHaveAttribute(
       'tabindex', '0',
     )
+  })
+
+  it('renders the prediction, procedure, rubric and accessible pedagogy as text', () => {
+    render(<LabRenderer spec={{
+      ...base, kind: 'function_plot', expressions: ['a*x'], domain: { x: [-2, 2] },
+      controls: [{ key: 'a', label: 'Slope', min: -2, max: 2, value: 1 }],
+      pedagogy,
+    }} />)
+
+    expect(screen.getByText('Predict how the graph changes.')).toBeVisible()
+    expect(screen.getByText('Record a prediction.')).toBeVisible()
+    expect(screen.getByText('The slope increases with a.')).toBeVisible()
+    expect(screen.getByText('Submit a prediction and an observation.')).toBeVisible()
+    expect(screen.getByText('States the direction of change.')).toBeVisible()
+    expect(screen.getByText('Use the data table to compare values.')).toBeVisible()
+    expect(screen.getByText('course.labPrediction')).toBeVisible()
+  })
+
+  it('fails closed instead of rendering executable pedagogy markup', () => {
+    render(<LabRenderer spec={{
+      ...base, kind: 'function_plot', expressions: ['x'], domain: { x: [-2, 2] },
+      pedagogy: { ...pedagogy, accessible_alternative: '<script>alert(1)</script>' },
+    }} />)
+
+    expect(screen.getByText('course.invalidLab')).toBeVisible()
+    expect(document.querySelector('script')).not.toBeInTheDocument()
   })
 })

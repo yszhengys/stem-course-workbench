@@ -14,6 +14,30 @@ const timestamp = z.string().nullable().optional()
 const finiteNumber = z.number().finite()
 const provenanceSchema = z.enum(['verbatim', 'adapted', 'derived', 'pedagogical', '补充'])
 const groundedProvenance = new Set(['verbatim', 'adapted', '补充'])
+const commonMarkFence = /^[ \t]{0,3}(?:`{3,}|~{3,})/m
+const standardSingleLetterHtmlTags = new Set(['a', 'b', 'i', 'p', 'q', 's'])
+
+function isMathAngleToken(token: string): boolean {
+  const inner = token.slice(1, -1).trim()
+  if (/^[A-Za-z]$/.test(inner)) return !standardSingleLetterHtmlTags.has(inner.toLowerCase())
+  return (
+    /^[A-Za-z][A-Za-z0-9_]*(?:\s*[,|]\s*[A-Za-z][A-Za-z0-9_]*)+$/.test(inner) ||
+    /^[A-Za-z][A-Za-z0-9_]*\([A-Za-z0-9_+*/^.,|\- \t]*\)$/.test(inner)
+  )
+}
+
+function containsHtml(value: string): boolean {
+  const tokens = value.match(/<[^<>\r\n]+>/g) ?? []
+  return tokens.some((token) => !isMathAngleToken(token))
+}
+
+function safeGeneratedText(maxLength: number) {
+  return z.string().trim().min(1).max(maxLength).superRefine((value, context) => {
+    if (commonMarkFence.test(value) || value.toLowerCase().includes('javascript:') || containsHtml(value)) {
+      context.addIssue({ code: 'custom', message: 'Generated text must not contain executable code or HTML' })
+    }
+  })
+}
 
 function validateProvenance(
   value: { provenance: string; anchor_ids: string[] },
@@ -170,6 +194,41 @@ export const labControlSchema = z.object({
 }).strict().refine((control) => control.min < control.max, 'Invalid control bounds')
   .refine((control) => control.value >= control.min && control.value <= control.max, 'Control value outside bounds')
 
+export const labVariableSchema = z.object({
+  key: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,49}$/),
+  label: safeGeneratedText(200),
+  unit: safeGeneratedText(100).nullable().optional(),
+  range: z.tuple([
+    finiteNumber.min(-1_000_000).max(1_000_000),
+    finiteNumber.min(-1_000_000).max(1_000_000),
+  ]),
+}).strict().refine((variable) => variable.range[0] < variable.range[1], {
+  path: ['range'],
+  message: 'Invalid Lab variable range',
+})
+
+const labPedagogyTextList = (maximum: number, minimum = 1) => z.array(
+  safeGeneratedText(2000),
+).min(minimum).max(maximum)
+
+export const labPedagogySchema = z.object({
+  learning_objectives: labPedagogyTextList(10),
+  prerequisite_concepts: labPedagogyTextList(20, 0),
+  variables: z.array(labVariableSchema).max(8),
+  prediction_prompt: safeGeneratedText(2000),
+  steps: labPedagogyTextList(20),
+  expected_observations: labPedagogyTextList(20),
+  student_submission: safeGeneratedText(2000),
+  rubric: labPedagogyTextList(10),
+  error_boundaries: labPedagogyTextList(10),
+  accessible_alternative: safeGeneratedText(4000),
+}).strict().superRefine((pedagogy, context) => {
+  const keys = pedagogy.variables.map((variable) => variable.key)
+  if (new Set(keys).size !== keys.length) {
+    context.addIssue({ code: 'custom', path: ['variables'], message: 'Lab variable keys must be unique' })
+  }
+})
+
 const labDomainSchema = z.record(
   z.string().min(1).max(100),
   z.tuple([finiteNumber, finiteNumber])
@@ -230,6 +289,7 @@ const labBase = {
   domain: labDomainSchema,
   controls: z.array(labControlSchema).max(8),
   objects: labObjectsSchema,
+  pedagogy: labPedagogySchema.nullable().optional(),
 }
 
 export const labSpecSchema = z.discriminatedUnion('kind', [

@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest'
 
 import { evaluateSafeExpression, sampleLab, validateLabSpec } from './safe-lab'
 
+const pedagogy = {
+  learning_objectives: ['Relate a parameter to the graph.'],
+  prerequisite_concepts: ['Cartesian coordinates'],
+  variables: [{ key: 'a', label: 'Slope', unit: null, range: [-2, 2] as [number, number] }],
+  prediction_prompt: 'Predict how the graph changes.',
+  steps: ['Record a prediction.', 'Move the slider.'],
+  expected_observations: ['The slope increases with a.'],
+  student_submission: 'Submit a prediction and an observation.',
+  rubric: ['States the direction of change.', 'Uses graph evidence.'],
+  error_boundaries: ['Only claim behavior inside the displayed domain.'],
+  accessible_alternative: 'Use the data table to compare values.',
+}
+
 describe('safe Lab expression interpreter', () => {
   it('evaluates only declared variables, arithmetic and allowlisted functions', () => {
     expect(evaluateSafeExpression('sin(x)^2 + cos(x)^2', { x: 0.5 })).toBeCloseTo(1)
@@ -61,5 +74,43 @@ describe('safe Lab expression interpreter', () => {
 
     expect(sampled.totalSamples).toBe(sampled.paths.flat().length)
     expect(sampled.totalSamples).toBeLessThan(250)
+  })
+
+  it('accepts the complete pedagogy contract while preserving legacy Labs', () => {
+    const enhanced = validateLabSpec({
+      kind: 'function_plot', key: 'enhanced', title: 'Enhanced', anchor_ids: [],
+      provenance: 'pedagogical', expressions: ['a*x'], domain: { x: [-1, 1] },
+      controls: [{ key: 'a', label: 'Slope', min: -2, max: 2, value: 1 }],
+      objects: [], pedagogy,
+    })
+    const legacy = validateLabSpec({
+      kind: 'function_plot', key: 'legacy', title: 'Legacy', anchor_ids: [],
+      provenance: 'pedagogical', expressions: ['x'], domain: { x: [-1, 1] },
+      controls: [], objects: [],
+    })
+
+    expect(enhanced.pedagogy?.prediction_prompt).toBe(pedagogy.prediction_prompt)
+    expect(legacy.pedagogy).toBeUndefined()
+  })
+
+  it('rejects incomplete, unsafe or unbounded pedagogy', () => {
+    const spec = {
+      kind: 'function_plot', key: 'unsafe-pedagogy', title: 'Unsafe', anchor_ids: [],
+      provenance: 'pedagogical', expressions: ['x'], domain: { x: [-1, 1] },
+      controls: [], objects: [], pedagogy,
+    }
+
+    expect(() => validateLabSpec({
+      ...spec, pedagogy: { ...pedagogy, prediction_prompt: '   ' },
+    })).toThrow()
+    expect(() => validateLabSpec({
+      ...spec, pedagogy: {
+        ...pedagogy,
+        accessible_alternative: '<img src=x onerror=alert(1)>',
+      },
+    })).toThrow()
+    expect(() => validateLabSpec({
+      ...spec, pedagogy: { ...pedagogy, steps: Array.from({ length: 21 }, () => 'Step') },
+    })).toThrow()
   })
 })

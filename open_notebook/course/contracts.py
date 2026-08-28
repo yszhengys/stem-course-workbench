@@ -477,6 +477,101 @@ class LabControl(CourseContract):
         return _validate_optional_generated_text(value)
 
 
+class LabVariable(CourseContract):
+    """A bounded learner-facing variable, never an executable binding."""
+
+    key: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_]{0,49}$")
+    label: str = Field(min_length=1, max_length=200)
+    unit: str | None = Field(
+        default=None,
+        max_length=100,
+        exclude_if=lambda value: value is None,
+    )
+    range: tuple[FiniteFloat, FiniteFloat]
+
+    @field_validator("label")
+    @classmethod
+    def label_is_safe_and_nonblank(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("lab variable label must not be blank")
+        return _validate_generated_text(clean)
+
+    @field_validator("unit")
+    @classmethod
+    def unit_is_safe(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        clean = value.strip()
+        if not clean:
+            raise ValueError("lab variable unit must not be blank")
+        return _validate_generated_text(clean)
+
+    @field_validator("range")
+    @classmethod
+    def range_is_bounded(
+        cls, value: tuple[FiniteFloat, FiniteFloat]
+    ) -> tuple[FiniteFloat, FiniteFloat]:
+        if value[0] >= value[1] or any(abs(point) > 1_000_000 for point in value):
+            raise ValueError("lab variable range is invalid")
+        return value
+
+
+class LabPedagogy(CourseContract):
+    """Complete, bounded teaching intent for a declarative interactive Lab."""
+
+    learning_objectives: list[str] = Field(min_length=1, max_length=10)
+    prerequisite_concepts: list[str] = Field(default_factory=list, max_length=20)
+    variables: list[LabVariable] = Field(default_factory=list, max_length=8)
+    prediction_prompt: str = Field(min_length=1, max_length=2000)
+    steps: list[str] = Field(min_length=1, max_length=20)
+    expected_observations: list[str] = Field(min_length=1, max_length=20)
+    student_submission: str = Field(min_length=1, max_length=2000)
+    rubric: list[str] = Field(min_length=1, max_length=10)
+    error_boundaries: list[str] = Field(min_length=1, max_length=10)
+    accessible_alternative: str = Field(min_length=1, max_length=4000)
+
+    @field_validator(
+        "prediction_prompt",
+        "student_submission",
+        "accessible_alternative",
+    )
+    @classmethod
+    def required_text_is_safe_and_nonblank(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("required Lab pedagogy text must not be blank")
+        return _validate_generated_text(clean)
+
+    @field_validator(
+        "learning_objectives",
+        "prerequisite_concepts",
+        "steps",
+        "expected_observations",
+        "rubric",
+        "error_boundaries",
+    )
+    @classmethod
+    def text_lists_are_safe_and_nonblank(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for value in values:
+            clean = value.strip()
+            if not clean:
+                raise ValueError("Lab pedagogy list items must not be blank")
+            if len(clean) > 2000:
+                raise ValueError("Lab pedagogy list item is too long")
+            cleaned.append(_validate_generated_text(clean))
+        return cleaned
+
+    @field_validator("variables")
+    @classmethod
+    def variable_keys_are_unique(cls, values: list[LabVariable]) -> list[LabVariable]:
+        keys = [value.key for value in values]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Lab pedagogy variable keys must be unique")
+        return values
+
+
 class LabSpec(ProvenancedArtifact):
     """Common bounded, declarative lab payload; never contains executable code."""
 
@@ -489,6 +584,10 @@ class LabSpec(ProvenancedArtifact):
     domain: dict[str, tuple[float, float]] = Field(default_factory=dict, max_length=8)
     controls: list[LabControl] = Field(default_factory=list, max_length=8)
     objects: list[dict[str, object]] = Field(default_factory=list, max_length=8)
+    pedagogy: LabPedagogy | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     _safe_title = field_validator("title")(_validate_generated_text)
 

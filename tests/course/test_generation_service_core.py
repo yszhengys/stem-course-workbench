@@ -13,6 +13,8 @@ from open_notebook.course.contracts import (
     FormulaArtifact,
     FunctionPlotLabSpec,
     LabControl,
+    LabPedagogy,
+    LabVariable,
     ModelSelection,
     ReviewArtifact,
     ValidationFinding,
@@ -110,6 +112,25 @@ def _chapter() -> ChapterArtifact:
                 provenance="pedagogical",
                 expressions=["x^2"],
                 domain={"x": (-2, 2)},
+                pedagogy=LabPedagogy(
+                    learning_objectives=["Connect input values to the graph."],
+                    prerequisite_concepts=["Cartesian coordinates"],
+                    variables=[
+                        LabVariable(
+                            key="x",
+                            label="Input",
+                            unit=None,
+                            range=(-2, 2),
+                        )
+                    ],
+                    prediction_prompt="Predict the graph before interacting.",
+                    steps=["Record a prediction.", "Inspect the graph."],
+                    expected_observations=["The graph is symmetric."],
+                    student_submission="Submit a prediction and observation.",
+                    rubric=["Prediction is testable.", "Observation cites the graph."],
+                    error_boundaries=["Stay within the displayed domain."],
+                    accessible_alternative="Use the data table below the graph.",
+                ),
             )
         ],
         pitfalls=["Do not substitute across a discontinuity."],
@@ -483,6 +504,17 @@ def test_chapter_composition_requires_core_four_hints_and_declared_lab():
         service.validate_chapter_composition(_chapter(), approved_lab_keys=set())
 
 
+def test_chapter_composition_requires_complete_lab_pedagogy() -> None:
+    service = CourseGenerationService()
+    legacy = _chapter()
+    legacy.labs[0].pedagogy = None
+
+    with pytest.raises(ValueError, match="pedagogy"):
+        service.validate_chapter_composition(
+            legacy, approved_lab_keys={"limit-plot"}
+        )
+
+
 @pytest.mark.asyncio
 async def test_chapter_prompt_names_every_approved_lab_key() -> None:
     adapter = FakeCourseModelAdapter(_chapter())
@@ -510,6 +542,19 @@ async def test_chapter_prompt_names_every_approved_lab_key() -> None:
     assert "Never use assignments or named intermediate variables" in (
         adapter.calls[0].prompt
     )
+    for required_field in (
+        "learning_objectives",
+        "prerequisite_concepts",
+        "variables",
+        "prediction_prompt",
+        "steps",
+        "expected_observations",
+        "student_submission",
+        "rubric",
+        "error_boundaries",
+        "accessible_alternative",
+    ):
+        assert required_field in adapter.calls[0].prompt
     assert "Formula latex must contain one parseable expression" in (
         adapter.calls[0].prompt
     )
