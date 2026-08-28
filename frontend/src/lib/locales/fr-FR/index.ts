@@ -227,6 +227,8 @@ export const frFR = {
     settings: "Paramètres",
     advanced: "Avancé",
     nav: "Navigation",
+    expandSidebar: "Développer la barre latérale",
+    collapseSidebar: "Réduire la barre latérale",
     language: "Changer de langue",
     theme: "Thème",
     ask: "Demander",

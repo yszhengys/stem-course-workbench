@@ -32,6 +32,8 @@ describe('AppSidebar', () => {
 
     render(<AppSidebar />)
 
+    expect(screen.getByRole('button', { name: 'navigation.collapseSidebar' }))
+      .toBeInTheDocument()
     fireEvent.click(screen.getByTestId('sidebar-toggle'))
 
     expect(toggleCollapse).toHaveBeenCalled()
@@ -47,5 +49,7 @@ describe('AppSidebar', () => {
 
     // In collapsed mode, app name shouldn't be visible (as text)
     expect(screen.queryByText('common.appName')).toBeNull()
+    expect(screen.getByRole('button', { name: 'navigation.expandSidebar' }))
+      .toBeInTheDocument()
   })
 })

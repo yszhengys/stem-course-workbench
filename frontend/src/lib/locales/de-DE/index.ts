@@ -230,6 +230,8 @@ export const deDE = {
     settings: "Einstellungen",
     advanced: "Erweitert",
     nav: "Navigation",
+    expandSidebar: "Seitenleiste erweitern",
+    collapseSidebar: "Seitenleiste einklappen",
     language: "Sprache wechseln",
     theme: "Design",
     ask: "Fragen",

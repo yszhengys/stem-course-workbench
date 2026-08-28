@@ -227,6 +227,8 @@ export const esES = {
     settings: "Configuración",
     advanced: "Avanzado",
     nav: "Navegación",
+    expandSidebar: "Expandir barra lateral",
+    collapseSidebar: "Contraer barra lateral",
     language: "Cambiar idioma",
     theme: "Tema",
     ask: "Preguntar",

@@ -227,6 +227,8 @@ export const bnIN = {
     settings: "সেটিংস",
     advanced: "উন্নত",
     nav: "নেভিগেশন",
+    expandSidebar: "সাইডবার প্রসারিত করুন",
+    collapseSidebar: "সাইডবার সংকুচিত করুন",
     language: "ভাষা টগল",
     theme: "থিম",
     ask: "জিজ্ঞাসা",

@@ -227,6 +227,8 @@ export const caES = {
     settings: "Configuració",
     advanced: "Avançat",
     nav: "Navegació",
+    expandSidebar: "Amplia la barra lateral",
+    collapseSidebar: "Redueix la barra lateral",
     language: "Canvia l'idioma",
     theme: "Tema",
     ask: "Pregunta",

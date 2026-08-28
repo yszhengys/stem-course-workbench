@@ -227,6 +227,8 @@ export const zhCN = {
     settings: "设置",
     advanced: "高级",
     nav: "导航",
+    expandSidebar: "展开侧边栏",
+    collapseSidebar: "收起侧边栏",
     language: "切换语言",
     theme: "主题",
     ask: "提问",

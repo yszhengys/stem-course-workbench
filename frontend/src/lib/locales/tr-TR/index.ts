@@ -227,6 +227,8 @@ export const trTR = {
     settings: "Ayarlar",
     advanced: "Gelişmiş",
     nav: "Gezinme",
+    expandSidebar: "Kenar çubuğunu genişlet",
+    collapseSidebar: "Kenar çubuğunu daralt",
     language: "Dili değiştir",
     theme: "Tema",
     ask: "Sor",

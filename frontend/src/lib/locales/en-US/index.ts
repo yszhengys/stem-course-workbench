@@ -226,6 +226,8 @@ export const enUS = {
     settings: "Settings",
     advanced: "Advanced",
     nav: "Navigation",
+    expandSidebar: "Expand sidebar",
+    collapseSidebar: "Collapse sidebar",
     language: "Toggle language",
     theme: "Theme",
     ask: "Ask",
