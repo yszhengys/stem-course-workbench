@@ -17,7 +17,15 @@ from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.exceptions import InvalidInputError
 
 from .assessment_service import AssessmentService
-from .contracts import ChapterArtifact, CourseOutlineArtifact, ValidationFinding
+from .contracts import (
+    AcademicVerification,
+    ChapterArtifact,
+    CourseOutlineArtifact,
+    ExerciseArtifact,
+    FormulaArtifact,
+    ValidationFinding,
+    WorkedExampleArtifact,
+)
 from .generation_service import CourseGenerationService
 from .models import Chapter, Course, CourseGenerationRun, CourseVersion
 from .task_backend import CourseTaskBackend
@@ -33,6 +41,7 @@ from .v2_contracts import (
     Sha256,
     V2Contract,
     ValidationCheck,
+    VerifyAcademicArtifactOperation,
 )
 from .v2_models import CourseDraftRevision, CourseExercise
 from .workflow_service import _artifact_hash, artifact_replay_hash
@@ -46,6 +55,7 @@ _INVALIDATED_CHECKS: dict[str, tuple[ValidationCheck, ...]] = {
     "replace_exercise": ("unit", "numeric", "physics", "citation", "structure"),
     "replace_transfer": ("unit", "numeric", "physics", "citation", "structure"),
     "replace_lab": ("physics", "citation", "structure"),
+    "verify_academic_artifact": (),
 }
 _VALIDATION_CHECK_ORDER: tuple[ValidationCheck, ...] = (
     "formula",
@@ -150,12 +160,15 @@ class DraftState(V2Contract):
 
     @property
     def revision_token(self) -> Sha256:
+        return self.token_for_snapshot(self.revision_no, self.artifact_hash)
+
+    def token_for_snapshot(self, revision_no: int, artifact_hash: str) -> Sha256:
         payload = (
             self.scope.course_id,
             self.scope.course_version_id,
             self.scope.chapter_id,
-            self.revision_no,
-            self.artifact_hash,
+            revision_no,
+            artifact_hash,
         )
         return cast(
             Sha256,
@@ -185,6 +198,10 @@ class DraftValidationResult(V2Contract):
 
 def _human_provenance(anchor_ids: tuple[str, ...]) -> str:
     return "adapted" if anchor_ids else "pedagogical"
+
+
+def _unverified_academic_artifact() -> AcademicVerification:
+    return AcademicVerification(level="L0", method="structure")
 
 
 def _ensure_anchor_subset(scope: DraftScope, anchor_ids: tuple[str, ...]) -> None:
@@ -585,6 +602,27 @@ class AuthoringService:
         return tuple(keys)
 
     @staticmethod
+    def academic_target(
+        artifact: ChapterArtifact,
+        target_kind: str,
+        target_key: str,
+    ) -> FormulaArtifact | WorkedExampleArtifact | ExerciseArtifact:
+        collections: dict[
+            str,
+            list[FormulaArtifact] | list[WorkedExampleArtifact] | list[ExerciseArtifact],
+        ] = {
+            "formula": artifact.formulas,
+            "worked_example": artifact.worked_examples,
+            "legacy_exercise": artifact.exercises,
+        }
+        collection = collections.get(target_kind)
+        if collection is None:
+            raise DraftConflictError("Academic artifact kind is not supported.")
+        matches = [item for item in collection if item.key == target_key]
+        AuthoringService._require_unique_target(len(matches), "academic artifact")
+        return matches[0]
+
+    @staticmethod
     def _replace_text(
         artifact: ChapterArtifact,
         operation: ReplaceTextOperation,
@@ -656,6 +694,7 @@ class AuthoringService:
                 changes: dict[str, object] = {
                     "anchor_ids": list(operation.anchor_ids),
                     "provenance": provenance,
+                    "verification": _unverified_academic_artifact(),
                 }
                 if step_index is None:
                     changes[field_name] = operation.text
@@ -684,6 +723,7 @@ class AuthoringService:
                 changes = {
                     "anchor_ids": list(operation.anchor_ids),
                     "provenance": provenance,
+                    "verification": _unverified_academic_artifact(),
                 }
                 if hint_index is None:
                     changes[field_name] = operation.text
@@ -714,6 +754,7 @@ class AuthoringService:
                     "latex": operation.latex,
                     "anchor_ids": list(operation.anchor_ids),
                     "provenance": _human_provenance(operation.anchor_ids),
+                    "verification": _unverified_academic_artifact(),
                 }
             )
             return ChapterArtifact.model_validate(updated.model_dump(mode="json"))
@@ -794,6 +835,49 @@ class AuthoringService:
                 return ChapterArtifact.model_validate(updated.model_dump(mode="json"))
         raise DraftConflictError("Draft Lab block does not exist.")
 
+    @staticmethod
+    def _verify_academic_artifact(
+        artifact: ChapterArtifact,
+        operation: VerifyAcademicArtifactOperation,
+    ) -> ChapterArtifact:
+        target = AuthoringService.academic_target(
+            artifact,
+            operation.target_kind,
+            operation.target_key,
+        )
+        displayed_value = (
+            target.latex if isinstance(target, FormulaArtifact) else target.answer
+        )
+        if displayed_value != operation.exact_value:
+            raise DraftConflictError("Academic artifact exact displayed value changed.")
+        updated = artifact.model_copy(deep=True)
+        if operation.target_kind == "formula":
+            for index, formula in enumerate(updated.formulas):
+                if formula.key == operation.target_key:
+                    updated.formulas[index] = formula.model_copy(
+                        update={"verification": operation.verification}
+                    )
+        elif operation.target_kind == "worked_example":
+            for index, example in enumerate(updated.worked_examples):
+                if example.key == operation.target_key:
+                    updated.worked_examples[index] = example.model_copy(
+                        update={"verification": operation.verification}
+                    )
+        else:
+            for index, exercise in enumerate(updated.exercises):
+                if exercise.key == operation.target_key:
+                    updated.exercises[index] = exercise.model_copy(
+                        update={"verification": operation.verification}
+                    )
+        verified = AuthoringService.academic_target(
+            updated,
+            operation.target_kind,
+            operation.target_key,
+        )
+        if verified.verification != operation.verification:
+            raise DraftConflictError("Draft academic artifact block does not exist.")
+        return ChapterArtifact.model_validate(updated.model_dump(mode="json"))
+
     def apply_operation(
         self,
         draft: DraftState,
@@ -818,6 +902,10 @@ class AuthoringService:
             anchor_ids = operation.transfer_task.anchor_ids
         elif isinstance(operation, ReplaceLabOperation):
             anchor_ids = tuple(operation.lab_spec.as_lab_spec().anchor_ids)
+        elif isinstance(operation, VerifyAcademicArtifactOperation):
+            anchor_ids = tuple(operation.verification.anchor_ids)
+            if operation.verification.artifact_hash != draft.artifact_hash:
+                raise DraftConflictError("Academic verification artifact hash is stale.")
         _ensure_anchor_subset(draft.scope, anchor_ids)
 
         artifact = draft.artifact
@@ -834,6 +922,8 @@ class AuthoringService:
             exercises = self._replace_transfer(exercises, operation)
         elif isinstance(operation, ReplaceLabOperation):
             artifact = self._replace_lab(artifact, operation)
+        elif isinstance(operation, VerifyAcademicArtifactOperation):
+            artifact = self._verify_academic_artifact(artifact, operation)
 
         invalidated = set(_INVALIDATED_CHECKS[operation.kind])
         if draft.revision_status == "draft":

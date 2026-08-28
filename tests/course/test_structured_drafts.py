@@ -22,6 +22,7 @@ from open_notebook.course.authoring_service import (
     DraftState,
 )
 from open_notebook.course.contracts import (
+    AcademicVerification,
     ChapterArtifact,
     ChapterSection,
     FormulaArtifact,
@@ -169,6 +170,9 @@ def test_formula_edit_invalidates_only_formula_unit_and_numeric_checks() -> None
     assert change.revision.invalidated_checks == ("formula", "unit", "numeric")
     assert change.draft.artifact.formulas[0].latex == "v=2*d/t"
     assert change.draft.artifact.formulas[0].provenance == "adapted"
+    assert change.draft.artifact.formulas[0].verification == AcademicVerification(
+        level="L0", method="structure"
+    )
     assert change.revision.base_artifact_hash == draft.artifact_hash
     assert change.revision.artifact_hash == change.draft.artifact_hash
     assert draft.artifact.formulas[0].latex == "v=d/t"

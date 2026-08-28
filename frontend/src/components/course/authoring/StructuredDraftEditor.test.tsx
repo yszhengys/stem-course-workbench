@@ -21,6 +21,14 @@ vi.mock('@/lib/hooks/use-translation', () => ({
 const save = vi.fn()
 const validate = vi.fn()
 const refetch = vi.fn()
+const academicL1 = {
+  level: 'L1' as const,
+  method: 'self_consistency' as const,
+  anchor_ids: [],
+  reason: null,
+  verified_at: null,
+  artifact_hash: null,
+}
 
 const draft: CourseDraft = {
   chapter_key: 'limits',
@@ -44,7 +52,7 @@ const draft: CourseDraft = {
       key: 'limit-law', latex: 'x+0=x', meaning: 'Identity',
       anchor_ids: ['anchor:formula'], unit_expression: null,
       oracle_unit_expression: null, provenance: 'adapted',
-      oracle_expression: null, oracle_substitutions: {},
+      oracle_expression: null, oracle_substitutions: {}, verification: academicL1,
     }],
     worked_examples: [],
     labs: [{

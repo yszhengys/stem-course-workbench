@@ -7,6 +7,7 @@ import { ArrowLeft, Beaker, BookCheck, FileWarning, NotebookPen } from 'lucide-r
 
 import { AppShell } from '@/components/layout/AppShell'
 import { ExerciseBankReview } from '@/components/course/authoring/ExerciseBankReview'
+import { AcademicVerificationReview } from '@/components/course/authoring/AcademicVerificationReview'
 import { StructuredDraftEditor } from '@/components/course/authoring/StructuredDraftEditor'
 import { ChapterPublicationGate } from '@/components/course/ChapterPublicationGate'
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
@@ -388,6 +389,8 @@ export default function CourseChapterPage() {
           ) : (
             <>
               <StructuredDraftEditor courseId={courseId} chapterKey={chapterKey} />
+
+              <AcademicVerificationReview courseId={courseId} chapterKey={chapterKey} />
 
               <ExerciseBankReview
                 status={exerciseBuild.data}

@@ -4,6 +4,8 @@ import { apiClient } from '@/lib/api/client'
 import { SAFE_LAB_PROPOSAL_KEYS } from '@/lib/course/lab-proposals'
 import {
   BuildEvidenceRequest,
+  AcademicArtifactKind,
+  courseAcademicVerificationRequestSchema,
   courseDraftOperationRequestSchema,
   courseDraftResponseSchema,
   courseDraftValidationResponseSchema,
@@ -50,6 +52,7 @@ import {
   CourseExerciseRevealRequest,
   CourseExerciseVerificationRequest,
   CourseDraftOperationRequest,
+  CourseAcademicVerificationRequest,
   CourseLearningEventRequest,
   CourseLearningUpgradeRequest,
   CourseLearnerNoteCreateRequest,
@@ -404,6 +407,22 @@ export const courseApi = {
         revision_token: parsed.revision_token,
         operation: parsed.operation,
       },
+    )
+    return courseDraftResponseSchema.parse(response.data)
+  },
+
+  async verifyAcademicArtifact(
+    courseId: string,
+    chapterKey: string,
+    targetKind: AcademicArtifactKind,
+    targetKey: string,
+    request: CourseAcademicVerificationRequest,
+  ) {
+    const parsed = courseAcademicVerificationRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}`
+      + `/artifacts/${pathId(targetKind)}/${pathId(targetKey)}/verify`,
+      parsed,
     )
     return courseDraftResponseSchema.parse(response.data)
   },

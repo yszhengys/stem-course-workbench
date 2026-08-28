@@ -56,6 +56,11 @@ vi.mock('@/components/course/authoring/StructuredDraftEditor', () => ({
     <section>{`draft-editor:${courseId}:${chapterKey}`}</section>
   ),
 }))
+vi.mock('@/components/course/authoring/AcademicVerificationReview', () => ({
+  AcademicVerificationReview: ({ courseId, chapterKey }: { courseId: string; chapterKey: string }) => (
+    <section>{`academic-review:${courseId}:${chapterKey}`}</section>
+  ),
+}))
 vi.mock('@/components/course/CourseExercises', () => ({ CourseExercises: () => <div /> }))
 vi.mock('@/components/course/LabRenderer', () => ({ LabRenderer: () => <div /> }))
 vi.mock('@/components/ui/markdown-renderer', () => ({
@@ -190,6 +195,7 @@ describe('CourseChapterPage review models', () => {
     render(<CourseChapterPage />)
 
     expect(screen.getByText('draft-editor:course:one:limits')).toBeInTheDocument()
+    expect(screen.getByText('academic-review:course:one:limits')).toBeInTheDocument()
 
     await waitFor(() => {
       expect(document.querySelector('#course-content-model')).toHaveValue('codex_cli|gpt-5.6-sol')

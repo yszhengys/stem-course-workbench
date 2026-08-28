@@ -45,11 +45,14 @@ from sympy import (
     tan,
 )
 
-from .contracts import LabSpecVariant, _validate_generated_text
+from .contracts import AcademicVerification, LabSpecVariant, _validate_generated_text
 
 StableKey: TypeAlias = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,99}$")]
 DraftTargetKey: TypeAlias = Annotated[str, Field(min_length=1, max_length=300)]
 Sha256: TypeAlias = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+AcademicArtifactKind: TypeAlias = Literal[
+    "formula", "worked_example", "legacy_exercise"
+]
 AnswerType: TypeAlias = Literal[
     "numeric",
     "symbolic",
@@ -1009,6 +1012,35 @@ class ReplaceLabOperation(V2Contract):
     lab_spec: FrozenLabSpec
 
 
+class VerifyAcademicArtifactOperation(V2Contract):
+    """Server-owned L3 attestation bound to one exact chapter value."""
+
+    kind: Literal["verify_academic_artifact"]
+    target_kind: AcademicArtifactKind
+    target_key: DraftTargetKey
+    exact_value: str = Field(min_length=1, max_length=4000)
+    verification: AcademicVerification
+
+    _safe_exact_value = field_validator("exact_value")(_validate_generated_text)
+
+    @model_validator(mode="after")
+    def verification_is_human_owned_l3(self) -> "VerifyAcademicArtifactOperation":
+        if self.verification.level != "L3" or self.verification.method != "human_review":
+            raise ValueError("academic verification operations require human-owned L3")
+        return self
+
+
+EditableDraftOperation: TypeAlias = Annotated[
+    Union[
+        ReplaceTextOperation,
+        ReplaceFormulaOperation,
+        ReplaceExerciseOperation,
+        ReplaceTransferOperation,
+        ReplaceLabOperation,
+    ],
+    Field(discriminator="kind"),
+]
+
 DraftOperation: TypeAlias = Annotated[
     Union[
         ReplaceTextOperation,
@@ -1016,6 +1048,7 @@ DraftOperation: TypeAlias = Annotated[
         ReplaceExerciseOperation,
         ReplaceTransferOperation,
         ReplaceLabOperation,
+        VerifyAcademicArtifactOperation,
     ],
     Field(discriminator="kind"),
 ]
@@ -1066,6 +1099,7 @@ class CourseBundleManifest(V2Contract):
 
 __all__ = [
     "AdvisoryGraderSpec",
+    "AcademicArtifactKind",
     "AnswerType",
     "BundleFileManifest",
     "BundleRecordCount",
@@ -1075,6 +1109,7 @@ __all__ = [
     "DraftOperation",
     "DraftRevision",
     "DraftTargetKey",
+    "EditableDraftOperation",
     "EvidenceCategory",
     "EvidenceClassification",
     "ExerciseBankArtifact",
@@ -1120,4 +1155,5 @@ __all__ = [
     "VectorGraderSpec",
     "VerificationLevel",
     "VerificationMethod",
+    "VerifyAcademicArtifactOperation",
 ]

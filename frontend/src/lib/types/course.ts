@@ -266,13 +266,13 @@ export const chapterSectionSchema = z.object({
 }).strict().superRefine(validateProvenance)
 
 const defaultAcademicVerification = {
-  level: 'L1',
-  method: 'self_consistency',
-  anchor_ids: [],
+  level: 'L1' as const,
+  method: 'self_consistency' as const,
+  anchor_ids: [] as string[],
   reason: null,
   verified_at: null,
   artifact_hash: null,
-} as const
+}
 
 export const academicVerificationSchema = z.object({
   level: z.enum(['L0', 'L1', 'L2', 'L3']),
@@ -1570,6 +1570,31 @@ export const courseDraftOperationRequestSchema = z.object({
   operation: draftOperationSchema,
 }).strict()
 export type CourseDraftOperationRequest = z.input<typeof courseDraftOperationRequestSchema>
+
+export const academicArtifactKindSchema = z.enum([
+  'formula', 'worked_example', 'legacy_exercise',
+])
+export type AcademicArtifactKind = z.infer<typeof academicArtifactKindSchema>
+
+export const courseAcademicVerificationRequestSchema = z.object({
+  revision_token: sha256Schema,
+  exact_value_confirmation: z.string().min(1).max(4000),
+  reason: z.string().trim().min(1).max(4000),
+  anchor_ids: z.array(
+    z.string().regex(/^anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/),
+  ).min(1).max(100),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.anchor_ids).size !== value.anchor_ids.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['anchor_ids'],
+      message: 'Verification anchors must be unique',
+    })
+  }
+})
+export type CourseAcademicVerificationRequest = z.input<
+  typeof courseAcademicVerificationRequestSchema
+>
 
 export const courseDraftResponseSchema = z.object({
   chapter_key: stableCourseKeySchema,

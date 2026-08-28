@@ -601,6 +601,40 @@ export function useApplyCourseChapterDraftOperation(
   })
 }
 
+export function useVerifyCourseAcademicArtifact(
+  courseId: string,
+  chapterKey: string,
+) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: ({
+      targetKind,
+      targetKey,
+      request,
+    }: {
+      targetKind: Parameters<typeof courseApi.verifyAcademicArtifact>[2]
+      targetKey: string
+      request: Parameters<typeof courseApi.verifyAcademicArtifact>[4]
+    }) => courseApi.verifyAcademicArtifact(
+      courseId,
+      chapterKey,
+      targetKind,
+      targetKey,
+      request,
+    ),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseChapterDraft(courseId, chapterKey) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseChapter(courseId, chapterKey) }),
+      ])
+      feedback.success()
+    },
+    onError: feedback.error,
+    retry: false,
+  })
+}
+
 export function useValidateCourseChapterDraft(
   courseId: string,
   chapterKey: string,

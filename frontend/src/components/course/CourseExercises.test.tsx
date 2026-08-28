@@ -15,6 +15,14 @@ const exercise = {
   oracle_values: {},
   oracle_answer: null,
   provenance: 'derived' as const,
+  verification: {
+    level: 'L1' as const,
+    method: 'self_consistency' as const,
+    anchor_ids: [],
+    reason: null,
+    verified_at: null,
+    artifact_hash: null,
+  },
 }
 
 describe('CourseExercises', () => {

@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
@@ -17,7 +18,7 @@ from open_notebook.course.v2_contracts import (
     ConceptMastery,
     CourseBundleManifest,
     DifficultyVector,
-    DraftOperation,
+    EditableDraftOperation,
     ExerciseBlueprint,
     ExerciseVerification,
     GradeResult,
@@ -1258,7 +1259,35 @@ class CourseTutorMessageResponse(BaseModel):
 
 class CourseDraftOperationRequest(StrictCourseRequest):
     revision_token: Sha256
-    operation: DraftOperation
+    operation: EditableDraftOperation
+
+
+class CourseAcademicVerificationRequest(StrictCourseRequest):
+    revision_token: Sha256
+    exact_value_confirmation: str = Field(min_length=1, max_length=4000)
+    reason: str = Field(min_length=1, max_length=4000)
+    anchor_ids: tuple[str, ...] = Field(min_length=1, max_length=100)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_not_blank(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("verification reason must not be blank")
+        return clean
+
+    @field_validator("anchor_ids")
+    @classmethod
+    def anchors_are_stable_and_unique(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)):
+            raise ValueError("verification anchors must be unique")
+        if any(
+            re.fullmatch(r"anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}", value)
+            is None
+            for value in values
+        ):
+            raise ValueError("verification anchors must use stable anchor IDs")
+        return values
 
 
 class CourseDraftValidateRequest(StrictCourseRequest):

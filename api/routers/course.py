@@ -21,6 +21,7 @@ from api.models import (
     ChapterCreate,
     ChapterPublish,
     ChapterUpdate,
+    CourseAcademicVerificationRequest,
     CourseActivityEventRequest,
     CourseBundleImportResponse,
     CourseChapterAttemptCreate,
@@ -72,7 +73,12 @@ from api.models import (
     LabCreate,
     ProgressUpdate,
 )
-from open_notebook.course.v2_contracts import ReviewQueueItem, StableKey
+from open_notebook.course.v2_contracts import (
+    AcademicArtifactKind,
+    DraftTargetKey,
+    ReviewQueueItem,
+    StableKey,
+)
 from open_notebook.domain.base import ObjectModel
 from open_notebook.exceptions import InvalidInputError, NotFoundError, OpenNotebookError
 
@@ -356,6 +362,29 @@ async def apply_chapter_draft_operation(
     return await _call(
         course_v2_service.apply_chapter_draft_operation(
             course_id, chapter_key, request
+        )
+    )
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/artifacts/"
+    "{target_kind}/{target_key}/verify",
+    response_model=CourseDraftResponse,
+)
+async def verify_academic_artifact(
+    course_id: str,
+    chapter_key: StableKey,
+    target_kind: AcademicArtifactKind,
+    target_key: DraftTargetKey,
+    request: CourseAcademicVerificationRequest,
+):
+    return await _call(
+        course_v2_service.verify_academic_artifact(
+            course_id,
+            chapter_key,
+            target_kind,
+            target_key,
+            request,
         )
     )
 

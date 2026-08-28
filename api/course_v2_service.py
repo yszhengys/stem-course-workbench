@@ -12,8 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from pydantic import ValidationError
+
 from api.course_service import CourseConflictError, CourseService
 from api.models import (
+    CourseAcademicVerificationRequest,
     CourseActivityEventRequest,
     CourseAnswerFormat,
     CourseBundleImportResponse,
@@ -66,7 +69,12 @@ from open_notebook.course.authoring_service import (
     DraftState,
     LearningUpgradeConflictError,
 )
-from open_notebook.course.contracts import ChapterArtifact, CourseOutlineArtifact
+from open_notebook.course.contracts import (
+    AcademicVerification,
+    ChapterArtifact,
+    CourseOutlineArtifact,
+    FormulaArtifact,
+)
 from open_notebook.course.evidence_service import EvidenceService
 from open_notebook.course.learning_service import (
     REVIEW_INTERVAL_DAYS,
@@ -86,6 +94,7 @@ from open_notebook.course.tutor_service import (
     TutorService,
 )
 from open_notebook.course.v2_contracts import (
+    AcademicArtifactKind,
     AdvisoryGraderSpec,
     AnswerType,
     ExerciseVerification,
@@ -103,6 +112,7 @@ from open_notebook.course.v2_contracts import (
     TutorTurn,
     UnitGraderSpec,
     VectorGraderSpec,
+    VerifyAcademicArtifactOperation,
 )
 from open_notebook.course.v2_models import (
     CourseExercise,
@@ -998,6 +1008,104 @@ class CourseV2Service:
             )
         except (DraftConflictError, DraftImmutableError) as exc:
             raise CourseConflictError(str(exc)) from exc
+        return self._draft_response(saved)
+
+    @staticmethod
+    def _verification_replay_matches(
+        draft: DraftState,
+        *,
+        target_kind: AcademicArtifactKind,
+        target_key: str,
+        request: CourseAcademicVerificationRequest,
+    ) -> bool:
+        try:
+            target = AuthoringService.academic_target(
+                draft.artifact, target_kind, target_key
+            )
+        except DraftConflictError:
+            return False
+        displayed = target.latex if isinstance(target, FormulaArtifact) else target.answer
+        verification = target.verification
+        if (
+            draft.revision_no < 1
+            or verification.level != "L3"
+            or verification.method != "human_review"
+            or verification.artifact_hash is None
+        ):
+            return False
+        previous_token = draft.token_for_snapshot(
+            draft.revision_no - 1,
+            verification.artifact_hash,
+        )
+        return (
+            secrets.compare_digest(request.revision_token, previous_token)
+            and secrets.compare_digest(request.exact_value_confirmation, displayed)
+            and request.reason == verification.reason
+            and tuple(request.anchor_ids) == tuple(verification.anchor_ids)
+        )
+
+    async def verify_academic_artifact(
+        self,
+        course_id: str,
+        chapter_key: str,
+        target_kind: AcademicArtifactKind,
+        target_key: str,
+        request: CourseAcademicVerificationRequest,
+    ) -> CourseDraftResponse:
+        try:
+            draft = await self._authoring().get_draft(
+                await self._draft_scope(course_id, chapter_key)
+            )
+            if request.revision_token != draft.revision_token:
+                if self._verification_replay_matches(
+                    draft,
+                    target_kind=target_kind,
+                    target_key=target_key,
+                    request=request,
+                ):
+                    return self._draft_response(draft)
+                raise DraftConflictError("Draft revision token is stale.")
+            target = AuthoringService.academic_target(
+                draft.artifact, target_kind, target_key
+            )
+            displayed = (
+                target.latex if isinstance(target, FormulaArtifact) else target.answer
+            )
+            if not secrets.compare_digest(
+                request.exact_value_confirmation,
+                displayed,
+            ):
+                raise InvalidInputError(
+                    "Exact displayed value does not match the current artifact."
+                )
+            occurred_at = self.clock()
+            if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
+                raise CourseConflictError("Academic verification clock is invalid.")
+            operation = VerifyAcademicArtifactOperation(
+                kind="verify_academic_artifact",
+                target_kind=target_kind,
+                target_key=target_key,
+                exact_value=displayed,
+                verification=AcademicVerification(
+                    level="L3",
+                    method="human_review",
+                    anchor_ids=list(request.anchor_ids),
+                    reason=request.reason,
+                    verified_at=occurred_at.astimezone(timezone.utc),
+                    artifact_hash=draft.artifact_hash,
+                ),
+            )
+            saved = await self._authoring().save_operation(
+                draft,
+                operation,
+                expected_revision=request.revision_token,
+            )
+        except (DraftConflictError, DraftImmutableError) as exc:
+            raise CourseConflictError(str(exc)) from exc
+        except ValidationError as exc:
+            raise InvalidInputError("Academic verification request is invalid.") from exc
+        except InvalidInputError:
+            raise
         return self._draft_response(saved)
 
     async def validate_chapter_draft(

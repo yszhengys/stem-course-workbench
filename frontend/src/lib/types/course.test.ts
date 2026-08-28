@@ -27,6 +27,7 @@ import {
   gradeResultSchema,
   exerciseVerificationSchema,
   learningEventSchema,
+  courseAcademicVerificationRequestSchema,
 } from './course'
 
 const academicArtifactHash = 'a'.repeat(64)
@@ -80,6 +81,24 @@ describe('academicVerificationSchema', () => {
     expect(parsed.formulas[0].verification).toMatchObject({ level: 'L1', method: 'self_consistency' })
     expect(parsed.worked_examples[0].verification).toMatchObject({ level: 'L1', method: 'self_consistency' })
     expect(parsed.exercises[0].verification).toMatchObject({ level: 'L1', method: 'self_consistency' })
+  })
+})
+
+describe('courseAcademicVerificationRequestSchema', () => {
+  const request = {
+    revision_token: 'a'.repeat(64),
+    exact_value_confirmation: 'x+0',
+    reason: 'Checked against the cited source.',
+    anchor_ids: ['anchor:one'],
+  }
+
+  it('accepts only human-entered evidence and confirmation fields', () => {
+    expect(courseAcademicVerificationRequestSchema.parse(request)).toEqual(request)
+    expect(() => courseAcademicVerificationRequestSchema.parse({
+      ...request,
+      level: 'L3',
+      verified_at: '2026-08-29T00:00:00Z',
+    })).toThrow()
   })
 })
 
