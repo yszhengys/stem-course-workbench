@@ -26,6 +26,8 @@ import {
   courseLabSchema,
   courseLearningEventResponseSchema,
   courseLearningEventRequestSchema,
+  courseLearningUpgradeRequestSchema,
+  courseLearningUpgradeResponseSchema,
   courseLearningOverviewSchema,
   courseLearnerChapterResponseSchema,
   courseLearnerNoteCreateRequestSchema,
@@ -49,6 +51,7 @@ import {
   CourseExerciseVerificationRequest,
   CourseDraftOperationRequest,
   CourseLearningEventRequest,
+  CourseLearningUpgradeRequest,
   CourseLearnerNoteCreateRequest,
   CourseTransferGradeRequest,
   CourseTutorMessageRequest,
@@ -93,6 +96,18 @@ export const courseApi = {
   async get(courseId: string) {
     const response = await apiClient.get(`/courses/${pathId(courseId)}`)
     return courseSchema.parse(response.data)
+  },
+
+  async prepareLearningUpgrade(
+    courseId: string,
+    request: CourseLearningUpgradeRequest,
+  ) {
+    const parsed = courseLearningUpgradeRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/versions/prepare-learning-upgrade`,
+      parsed,
+    )
+    return courseLearningUpgradeResponseSchema.parse(response.data)
   },
 
   async create(request: CreateCourseRequest) {

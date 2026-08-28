@@ -1,0 +1,10 @@
+REMOVE INDEX IF EXISTS course_version_upgrade_source_idx ON TABLE course_version;
+
+UPDATE course_version UNSET
+    upgrade_source_version,
+    upgrade_idempotency_key,
+    upgrade_confirmation;
+
+REMOVE FIELD IF EXISTS upgrade_source_version ON TABLE course_version;
+REMOVE FIELD IF EXISTS upgrade_idempotency_key ON TABLE course_version;
+REMOVE FIELD IF EXISTS upgrade_confirmation ON TABLE course_version;

@@ -1340,6 +1340,22 @@ class CourseLearningOverviewResponse(BaseModel):
     review_queue: tuple[ReviewQueueItem, ...]
 
 
+class CourseLearningUpgradeRequest(StrictCourseRequest):
+    confirmation: Literal["创建学习升级版本"]
+    idempotency_key: StableKey
+
+
+class CourseLearningUpgradeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    source_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    version_no: int = Field(ge=1)
+    status: Literal["generating", "published"]
+    chapter_keys: tuple[StableKey, ...] = Field(min_length=1, max_length=500)
+
+
 class CourseJobRequest(StrictCourseRequest):
     prompt_version: str = Field("v1", min_length=1, max_length=100)
     force: bool = False

@@ -15,6 +15,7 @@ import {
   useGradeCourseExercise,
   useGradeCourseTransfer,
   useNextCourseExerciseHint,
+  usePrepareCourseLearningUpgrade,
   useRevealCourseExerciseAnswer,
 } from '@/lib/hooks/use-courses'
 
@@ -56,6 +57,7 @@ vi.mock('@/lib/hooks/use-courses', () => ({
   useGradeCourseExercise: vi.fn(),
   useGradeCourseTransfer: vi.fn(),
   useNextCourseExerciseHint: vi.fn(),
+  usePrepareCourseLearningUpgrade: vi.fn(),
   useRevealCourseExerciseAnswer: vi.fn(),
 }))
 
@@ -191,6 +193,7 @@ describe('CourseLearnChapterPage', () => {
   const hint = mutationResult()
   const reveal = mutationResult()
   const createNote = mutationResult()
+  const prepareUpgrade = mutationResult()
   const courseQuery = queryResult({ id: 'course:abc', title: 'Calculus', status: 'ready' })
   const overviewQuery = queryResult(overviewData())
   const chapterQuery = queryResult(chapterData())
@@ -238,6 +241,15 @@ describe('CourseLearnChapterPage', () => {
     vi.mocked(useNextCourseExerciseHint).mockReturnValue(hint as never)
     vi.mocked(useRevealCourseExerciseAnswer).mockReturnValue(reveal as never)
     vi.mocked(useCreateCourseLearningNote).mockReturnValue(createNote as never)
+    prepareUpgrade.mutateAsync.mockResolvedValue({
+      course_id: 'course:abc',
+      source_version_id: 'course_version:published',
+      version_id: 'course_version:upgrade',
+      version_no: 2,
+      status: 'generating',
+      chapter_keys: ['limits'],
+    })
+    vi.mocked(usePrepareCourseLearningUpgrade).mockReturnValue(prepareUpgrade as never)
     vi.mocked(useCourse).mockReturnValue(courseQuery as never)
     vi.mocked(useCourseLearningOverview).mockReturnValue(overviewQuery as never)
     vi.mocked(useCourseLearningChapter).mockReturnValue(chapterQuery as never)
@@ -570,5 +582,85 @@ describe('CourseLearnChapterPage', () => {
       expect(positions).toHaveLength(2)
       expect(positions[0].idempotency_key).not.toBe(positions[1].idempotency_key)
     })
+  })
+
+  it('offers an explicit immutable upgrade instead of an empty mastery state', async () => {
+    vi.mocked(useCourseExercises).mockReturnValue(queryResult([]) as never)
+    render(<CourseLearnChapterPage />)
+
+    expect(screen.getByText('course.learningUpgradeRequired')).toBeVisible()
+    expect(screen.getByText('创建学习升级版本')).toBeVisible()
+    expect(screen.queryByText('course.chapterTutor')).not.toBeInTheDocument()
+    const submit = screen.getByRole('button', { name: 'course.createLearningUpgrade' })
+    expect(submit).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText('course.learningUpgradeConfirmation'), {
+      target: { value: '创建学习升级版本' },
+    })
+    fireEvent.click(submit)
+
+    await waitFor(() => expect(prepareUpgrade.mutateAsync).toHaveBeenCalledWith({
+      confirmation: '创建学习升级版本',
+      idempotency_key: expect.stringMatching(/^learning-upgrade-/),
+    }))
+    expect(await screen.findByRole('link', {
+      name: 'course.openLearningUpgradeBuild',
+    })).toHaveAttribute(
+      'href',
+      '/courses/course%3Aabc/chapters/limits',
+    )
+  })
+
+  it('blocks all mastery controls when the legacy bank is below L2', () => {
+    vi.mocked(useCourseExercises).mockReturnValue(queryResult([{
+      ...exercise,
+      verification: {
+        level: 'L1', method: 'self_consistency', anchor_ids: [],
+        reason: null, verified_at: null,
+      },
+      learning_blocked_reason: 'verification_required',
+    }]) as never)
+
+    render(<CourseLearnChapterPage />)
+
+    expect(screen.getByText('course.learningUpgradeRequired')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'course.checkAnswer' })).not.toBeInTheDocument()
+    expect(screen.queryByText('course.chapterTutor')).not.toBeInTheDocument()
+  })
+
+  it('keeps verified core learning available when an auxiliary exercise is below L2', () => {
+    const verifiedCore = {
+      ...exercise,
+      verification: {
+        level: 'L3', method: 'human_verified', anchor_ids: ['anchor:limits'],
+        reason: 'Checked against the source.', verified_at: '2026-08-29T00:00:00Z',
+      },
+      learning_blocked_reason: null,
+    }
+    const blockedAuxiliary = {
+      ...exercise,
+      key: 'limits-source-practice',
+      exercise_type: 'source_practice',
+      is_core: false,
+      is_gating: false,
+      verification: {
+        level: 'L1', method: 'self_consistency', anchor_ids: [],
+        reason: null, verified_at: null,
+      },
+      learning_blocked_reason: 'verification_required',
+    }
+    vi.mocked(useCourseExercises).mockReturnValue(queryResult([
+      verifiedCore,
+      blockedAuxiliary,
+    ]) as never)
+
+    render(<CourseLearnChapterPage />)
+
+    expect(screen.queryByText('course.learningUpgradeRequired')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'course.checkAnswer' })).toHaveLength(1)
+    expect(screen.getByText('course.chapterTutor')).toBeVisible()
+    expect(tutorCapture.current).toEqual(expect.objectContaining({
+      exercises: [verifiedCore],
+    }))
   })
 })

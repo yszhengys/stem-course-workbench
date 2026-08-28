@@ -23,6 +23,8 @@ import {
 import { AppShell } from '@/components/layout/AppShell'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   useAppendCourseLearningEvent,
   useCourse,
@@ -32,6 +34,7 @@ import {
   useCourseLearningNotes,
   useCourseLearningOverview,
   useCourseLearningSources,
+  usePrepareCourseLearningUpgrade,
 } from '@/lib/hooks/use-courses'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import {
@@ -58,13 +61,17 @@ export default function CourseLearnChapterPage() {
   const exercises = useCourseExercises(courseId, chapterKey)
   const labs = useCourseLabs(courseId, chapterKey, Boolean(chapter.data))
   const appendEvent = useAppendCourseLearningEvent(courseId)
+  const prepareUpgrade = usePrepareCourseLearningUpgrade(courseId)
   const openedKey = useRef(sessionKey('chapter-open'))
+  const upgradeKey = useRef(sessionKey('learning-upgrade'))
   const readingKeys = useRef(new Map<string, string>())
   const opened = useRef(false)
   const recordedBlocks = useRef(new Set<string>())
   const [tutorAttempts, setTutorAttempts] = useState<
     Record<string, TutorAttemptScope>
   >({})
+  const [upgradeConfirmation, setUpgradeConfirmation] = useState('')
+  const [upgradeCreated, setUpgradeCreated] = useState(false)
   const append = appendEvent.mutateAsync
 
   const updateTutorAttempt = useCallback((attempt: TutorAttemptScope) => {
@@ -185,6 +192,19 @@ export default function CourseLearnChapterPage() {
     Boolean(sources.data && sources.data.snapshot_token !== chapter.data.snapshot_token)
     || Boolean(notes.data && notes.data.snapshot_token !== chapter.data.snapshot_token)
   )
+  const learningExercises = (exercises.data ?? []).filter(
+    (exercise) => exercise.learning_blocked_reason !== 'verification_required',
+  )
+  const needsLearningUpgrade = (
+    !exercises.isLoading
+    && !exercises.isError
+    && (
+      (exercises.data ?? []).length === 0
+      || !learningExercises.some(
+        (exercise) => exercise.is_core && exercise.is_gating,
+      )
+    )
+  )
 
   return (
     <AppShell>
@@ -237,11 +257,54 @@ export default function CourseLearnChapterPage() {
             </h2>
             {exercises.isLoading ? <CourseInlineLoading /> : exercises.isError ? (
               <CourseInlineError onRetry={() => void exercises.refetch()} />
-            ) : (exercises.data ?? []).length === 0 ? (
-              <p className="rounded-md border p-4 text-sm text-muted-foreground">
-                {t('course.noLearningExercises')}
-              </p>
-            ) : (exercises.data ?? []).map((exercise) => {
+            ) : needsLearningUpgrade ? (
+              <Alert>
+                <AlertTitle>{t('course.learningUpgradeRequired')}</AlertTitle>
+                <AlertDescription className="space-y-4">
+                  <p>{t('course.learningUpgradeDescription')}</p>
+                  {upgradeCreated ? (
+                    <div className="space-y-3">
+                      <p>{t('course.learningUpgradeCreated')}</p>
+                      <Button asChild variant="outline">
+                        <Link href={`/courses/${encodeURIComponent(courseId)}/chapters/${encodeURIComponent(chapterKey)}`}>
+                          <Hammer aria-hidden="true" />
+                          {t('course.openLearningUpgradeBuild')}
+                        </Link>
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="max-w-xl space-y-2">
+                      <Label htmlFor="learning-upgrade-confirmation">
+                        {t('course.learningUpgradeConfirmation')}
+                      </Label>
+                      <p className="font-mono text-sm">创建学习升级版本</p>
+                      <Input
+                        id="learning-upgrade-confirmation"
+                        value={upgradeConfirmation}
+                        placeholder={t('course.learningUpgradeConfirmationHint')}
+                        onChange={(event) => setUpgradeConfirmation(event.target.value)}
+                        autoComplete="off"
+                      />
+                      <Button
+                        type="button"
+                        disabled={
+                          upgradeConfirmation !== '创建学习升级版本'
+                          || prepareUpgrade.isPending
+                        }
+                        onClick={() => {
+                          void prepareUpgrade.mutateAsync({
+                            confirmation: '创建学习升级版本',
+                            idempotency_key: upgradeKey.current,
+                          }).then(() => setUpgradeCreated(true)).catch(() => undefined)
+                        }}
+                      >
+                        {t('course.createLearningUpgrade')}
+                      </Button>
+                    </div>
+                  )}
+                </AlertDescription>
+              </Alert>
+            ) : learningExercises.map((exercise) => {
               const selectedConcept = selectExerciseConcept(exercise, overview.data)
               if (!selectedConcept) return null
               const mastery = overview.data.masteries.find(
@@ -275,19 +338,21 @@ export default function CourseLearnChapterPage() {
             })}
           </section>
 
-          <ChapterTutor
-            courseId={courseId}
-            courseVersionId={chapter.data.course_version_id}
-            chapterKey={chapterKey}
-            snapshotToken={chapter.data.snapshot_token}
-            exercises={exercises.data ?? []}
-            concepts={overview.data.concepts}
-            attempts={Object.values(tutorAttempts).filter((attempt) => (
-              (exercises.data ?? []).some(
-                (exercise) => exercise.key === attempt.exerciseKey,
-              )
-            ))}
-          />
+          {!needsLearningUpgrade && (
+            <ChapterTutor
+              courseId={courseId}
+              courseVersionId={chapter.data.course_version_id}
+              chapterKey={chapterKey}
+              snapshotToken={chapter.data.snapshot_token}
+              exercises={learningExercises}
+              concepts={overview.data.concepts}
+              attempts={Object.values(tutorAttempts).filter((attempt) => (
+                learningExercises.some(
+                  (exercise) => exercise.key === attempt.exerciseKey,
+                )
+              ))}
+            />
+          )}
 
           {notes.isLoading ? <CourseInlineLoading /> : notes.isError ? (
             <CourseInlineError onRetry={() => void notes.refetch()} />

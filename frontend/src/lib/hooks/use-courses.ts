@@ -11,6 +11,7 @@ import type {
   CourseExerciseRevealRequest,
   CourseExerciseVerificationRequest,
   CourseLearningEventRequest,
+  CourseLearningUpgradeRequest,
   CourseTransferGradeRequest,
   CourseTutorMessageRequest,
   CourseTutorSessionCreateRequest,
@@ -148,6 +149,31 @@ export function useCourseLearningOverview(courseId: string) {
     retry: false,
     staleTime: 0,
     refetchOnWindowFocus: true,
+  })
+}
+
+export function usePrepareCourseLearningUpgrade(courseId: string) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: (request: CourseLearningUpgradeRequest) =>
+      courseApi.prepareLearningUpgrade(courseId, request),
+    onSuccess: async (result) => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: QUERY_KEYS.course(courseId) }),
+        ...result.chapter_keys.flatMap((chapterKey) => [
+          client.invalidateQueries({
+            queryKey: QUERY_KEYS.courseChapter(courseId, chapterKey),
+          }),
+          client.invalidateQueries({
+            queryKey: QUERY_KEYS.courseExerciseBuild(courseId, chapterKey),
+          }),
+        ]),
+      ])
+      feedback.success()
+    },
+    onError: feedback.error,
+    retry: false,
   })
 }
 

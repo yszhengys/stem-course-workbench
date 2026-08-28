@@ -144,7 +144,8 @@ class Course(CourseRecord):
 class CourseVersion(CourseRecord):
     table_name: ClassVar[str] = "course_version"
     nullable_fields: ClassVar[set[str]] = {
-        "outline_hash", "published_at", "outline_artifact", "input_hash", "approved_at", "confirmation"
+        "outline_hash", "published_at", "outline_artifact", "input_hash", "approved_at", "confirmation",
+        "upgrade_source_version", "upgrade_idempotency_key", "upgrade_confirmation",
     }
 
     course: str
@@ -156,14 +157,19 @@ class CourseVersion(CourseRecord):
     input_hash: str | None = None
     approved_at: datetime | None = None
     confirmation: str | None = None
+    upgrade_source_version: str | None = None
+    upgrade_idempotency_key: str | None = None
+    upgrade_confirmation: str | None = None
 
-    @field_validator("course", mode="before")
+    @field_validator("course", "upgrade_source_version", mode="before")
     @classmethod
     def record_as_string(cls, value: Any) -> Any:
         return _string_id(value)
 
     def _prepare_save_data(self) -> dict[str, Any]:
-        return _record_fields(super()._prepare_save_data(), "course")
+        return _record_fields(
+            super()._prepare_save_data(), "course", "upgrade_source_version"
+        )
 
     async def transition_to(self, target: str) -> None:
         self.status = sm.transition("version", self.status, target)

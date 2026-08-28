@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import pytest
 from surrealdb import AsyncSurreal
@@ -30,9 +30,9 @@ def test_migration_27_is_registered_after_26_and_only_extends_exercises() -> Non
     up = migration_sql("27")
     down = migration_sql("27_down")
 
-    assert len(manager.up_migrations) == 27
-    assert len(manager.down_migrations) == 27
-    assert manager.up_migrations[-1].sql == " ".join(
+    assert len(manager.up_migrations) >= 27
+    assert len(manager.down_migrations) >= 27
+    assert manager.up_migrations[26].sql == " ".join(
         line.strip()
         for line in up.splitlines()
         if line.strip() and not line.strip().startswith("--")
@@ -83,7 +83,10 @@ async def test_migration_27_round_trip_preserves_migration_26_exercise() -> None
         before = await exercise_snapshot(database)
 
         await database.query(migration_sql("27"))
-        table_info = await database.query("INFO FOR TABLE course_exercise;")
+        table_info = cast(
+            dict[str, Any],
+            await database.query("INFO FOR TABLE course_exercise;"),
+        )
         assert "course_exercise_generation_run_idx" in table_info["indexes"]
         migrated = await exercise_snapshot(database)
         assert isinstance(migrated, list) and len(migrated) == 1

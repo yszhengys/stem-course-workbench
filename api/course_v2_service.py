@@ -47,6 +47,8 @@ from api.models import (
     CourseLearningEventRequest,
     CourseLearningEventResponse,
     CourseLearningOverviewResponse,
+    CourseLearningUpgradeRequest,
+    CourseLearningUpgradeResponse,
     CourseTransferGradeRequest,
     CourseTransferTaskResponse,
     CourseTutorMessageRequest,
@@ -62,6 +64,7 @@ from open_notebook.course.authoring_service import (
     DraftImmutableError,
     DraftScope,
     DraftState,
+    LearningUpgradeConflictError,
 )
 from open_notebook.course.contracts import ChapterArtifact, CourseOutlineArtifact
 from open_notebook.course.evidence_service import EvidenceService
@@ -1094,6 +1097,34 @@ class CourseV2Service:
         )
         return ExerciseVerificationResponse.model_validate(
             persisted.verification
+        )
+
+    async def prepare_learning_upgrade(
+        self,
+        course_id: str,
+        request: CourseLearningUpgradeRequest,
+    ) -> CourseLearningUpgradeResponse:
+        try:
+            result = await self._authoring().prepare_learning_upgrade(
+                course_id=course_id,
+                confirmation=request.confirmation,
+                idempotency_key=request.idempotency_key,
+            )
+        except LearningUpgradeConflictError as exc:
+            raise CourseConflictError(str(exc)) from exc
+        except ValueError as exc:
+            raise InvalidInputError(str(exc)) from exc
+        if result.version.id is None:
+            raise OpenNotebookError("Learning upgrade version has no identity")
+        return CourseLearningUpgradeResponse(
+            course_id=course_id,
+            source_version_id=result.source_version_id,
+            version_id=str(result.version.id),
+            version_no=result.version.version_no,
+            status=result.version.status,
+            chapter_keys=tuple(
+                chapter.chapter_key for chapter in result.chapters
+            ),
         )
 
     async def get_learning_overview(

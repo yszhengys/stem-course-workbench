@@ -53,6 +53,8 @@ from api.models import (
     CourseLearnerSourcesResponse,
     CourseLearningEventResponse,
     CourseLearningOverviewResponse,
+    CourseLearningUpgradeRequest,
+    CourseLearningUpgradeResponse,
     CourseNoteCreate,
     CourseNoteReattach,
     CourseOutlineApproval,
@@ -124,6 +126,20 @@ async def _call(operation: Awaitable[ResultT]) -> ResultT:
 async def create_course(request: CourseCreate):
     course = await _call(CourseService.create_course(**request.model_dump()))
     return _body(course)
+
+
+@router.post(
+    "/courses/{course_id}/versions/prepare-learning-upgrade",
+    response_model=CourseLearningUpgradeResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def prepare_course_learning_upgrade(
+    course_id: str,
+    request: CourseLearningUpgradeRequest,
+):
+    return await _call(
+        course_v2_service.prepare_learning_upgrade(course_id, request)
+    )
 
 
 @router.post(

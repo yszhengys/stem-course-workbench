@@ -104,7 +104,7 @@ _MODEL_BY_TABLE: dict[str, type[BaseModel]] = {
 }
 _RECORD_FIELDS: dict[str, tuple[str, ...]] = {
     "course": ("notebook", "outline_version_id"),
-    "course_version": ("course",),
+    "course_version": ("course", "upgrade_source_version"),
     "chapter": ("course_version",),
     "evidence": ("course", "source"),
     "course_evidence_anchor": ("course", "source", "evidence"),

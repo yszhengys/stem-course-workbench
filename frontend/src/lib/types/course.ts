@@ -621,6 +621,27 @@ export interface CreateCourseAttemptRequest {
 }
 
 export const stableCourseKeySchema = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,99}$/)
+
+export const courseLearningUpgradeRequestSchema = z.object({
+  confirmation: z.literal('创建学习升级版本'),
+  idempotency_key: stableCourseKeySchema,
+}).strict()
+export type CourseLearningUpgradeRequest = z.input<
+  typeof courseLearningUpgradeRequestSchema
+>
+
+export const courseLearningUpgradeResponseSchema = z.object({
+  course_id: courseRecordId,
+  source_version_id: courseVersionRecordId,
+  version_id: courseVersionRecordId,
+  version_no: z.number().int().positive(),
+  status: z.enum(['generating', 'published']),
+  chapter_keys: z.array(stableCourseKeySchema).min(1).max(500),
+}).strict()
+export type CourseLearningUpgradeResponse = z.infer<
+  typeof courseLearningUpgradeResponseSchema
+>
+
 export const masteryStatusSchema = z.enum([
   'not_started',
   'learning',

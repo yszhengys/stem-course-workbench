@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -16,9 +17,9 @@ from open_notebook.database.repository import ensure_record_id, repo_query
 from open_notebook.exceptions import InvalidInputError
 
 from .assessment_service import AssessmentService
-from .contracts import ChapterArtifact, ValidationFinding
+from .contracts import ChapterArtifact, CourseOutlineArtifact, ValidationFinding
 from .generation_service import CourseGenerationService
-from .models import Chapter, CourseVersion
+from .models import Chapter, Course, CourseGenerationRun, CourseVersion
 from .task_backend import CourseTaskBackend
 from .v2_contracts import (
     DraftOperation,
@@ -34,6 +35,7 @@ from .v2_contracts import (
     ValidationCheck,
 )
 from .v2_models import CourseDraftRevision, CourseExercise
+from .workflow_service import _artifact_hash, artifact_replay_hash
 
 RevisionStatus = Literal["draft", "validated"]
 _EDITABLE_CHAPTER_STATES = frozenset({"reviewing", "blocked"})
@@ -61,6 +63,19 @@ class DraftConflictError(InvalidInputError):
 
 class DraftImmutableError(InvalidInputError):
     """Raised when an approved or published artifact is edited."""
+
+
+class LearningUpgradeConflictError(InvalidInputError):
+    """Raised when a learning upgrade is stale or another upgrade is active."""
+
+
+@dataclass(frozen=True, slots=True)
+class LearningUpgradeResult:
+    """One immutable Course-version upgrade prepared for exercise regeneration."""
+
+    source_version_id: str
+    version: CourseVersion
+    chapters: tuple[Chapter, ...]
 
 
 class DraftScope(V2Contract):
@@ -183,6 +198,341 @@ class AuthoringService:
 
     task_backend: CourseTaskBackend | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
+
+    @staticmethod
+    def _upgrade_id(table: str, *parts: str) -> str:
+        digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()[:48]
+        return f"{table}:{digest}"
+
+    @staticmethod
+    async def _learning_upgrade_result(
+        course_id: str,
+        version: CourseVersion,
+    ) -> LearningUpgradeResult:
+        if (
+            version.id is None
+            or version.course != course_id
+            or version.upgrade_source_version is None
+            or version.upgrade_confirmation != "创建学习升级版本"
+            or version.upgrade_idempotency_key is None
+        ):
+            raise LearningUpgradeConflictError(
+                "Learning upgrade version lineage is incomplete."
+            )
+        chapters = tuple(
+            sorted(
+                await CourseVersion.chapters(str(version.id)),
+                key=lambda chapter: (chapter.chapter_no, chapter.chapter_key),
+            )
+        )
+        if not chapters or any(
+            chapter.course_version != str(version.id) for chapter in chapters
+        ):
+            raise LearningUpgradeConflictError(
+                "Learning upgrade chapters are incomplete."
+            )
+        return LearningUpgradeResult(
+            source_version_id=version.upgrade_source_version,
+            version=version,
+            chapters=chapters,
+        )
+
+    async def prepare_learning_upgrade(
+        self,
+        *,
+        course_id: str,
+        confirmation: str,
+        idempotency_key: str,
+    ) -> LearningUpgradeResult:
+        """Clone published authoring state without copying any learner state."""
+
+        if confirmation != "创建学习升级版本":
+            raise ValueError("Type exactly 创建学习升级版本 to continue.")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,99}", idempotency_key):
+            raise ValueError("Learning upgrade idempotency key is invalid.")
+
+        course = await Course.get(course_id)
+        if course.id is None or str(course.id) != course_id:
+            raise LearningUpgradeConflictError("Course identity changed.")
+        if course.outline_version_id is None:
+            raise LearningUpgradeConflictError(
+                "Course has no published version to upgrade."
+            )
+        pointed = await CourseVersion.get(course.outline_version_id)
+        if pointed.course != course_id or pointed.id is None:
+            raise LearningUpgradeConflictError(
+                "Course current version does not belong to the Course."
+            )
+        if (
+            pointed.upgrade_idempotency_key == idempotency_key
+            and pointed.upgrade_confirmation == confirmation
+            and pointed.upgrade_source_version is not None
+        ):
+            return await self._learning_upgrade_result(course_id, pointed)
+        if pointed.status != "published":
+            raise LearningUpgradeConflictError(
+                "A different learning upgrade or authoring version is already active."
+            )
+
+        source_version = pointed
+        source_version_id = str(source_version.id)
+        if (
+            source_version.outline_artifact is None
+            or source_version.outline_hash
+            != _artifact_hash(source_version.outline_artifact)
+            or source_version.approved_at is None
+            or source_version.confirmation != "确认大纲"
+        ):
+            raise LearningUpgradeConflictError(
+                "Published Course outline approval is invalid."
+            )
+        outline = CourseOutlineArtifact.model_validate(
+            source_version.outline_artifact
+        )
+        source_chapters = [
+            chapter
+            for chapter in await CourseVersion.chapters(source_version_id)
+            if chapter.course_version == source_version_id
+            and chapter.status == "published"
+        ]
+        by_key: dict[str, Chapter] = {}
+        for chapter in source_chapters:
+            if chapter.chapter_key in by_key:
+                raise LearningUpgradeConflictError(
+                    "Published Course chapter keys are ambiguous."
+                )
+            if chapter.id is None or chapter.artifact is None:
+                raise LearningUpgradeConflictError(
+                    "Published Course chapter artifact is incomplete."
+                )
+            artifact = ChapterArtifact.model_validate(chapter.artifact)
+            if artifact.chapter_key != chapter.chapter_key:
+                raise LearningUpgradeConflictError(
+                    "Published Course chapter artifact is invalid."
+                )
+            by_key[chapter.chapter_key] = chapter
+        expected_keys = {proposal.key for proposal in outline.chapters}
+        if set(by_key) != expected_keys:
+            raise LearningUpgradeConflictError(
+                "Published Course chapters do not match the approved outline."
+            )
+
+        new_version_id = self._upgrade_id(
+            "course_version", course_id, source_version_id, idempotency_key
+        )
+        version_content = {
+            "course": ensure_record_id(course_id),
+            "version_no": source_version.version_no + 1,
+            "status": "generating",
+            "outline_hash": source_version.outline_hash,
+            "published_at": None,
+            "outline_artifact": source_version.outline_artifact,
+            "input_hash": source_version.input_hash,
+            "approved_at": source_version.approved_at,
+            "confirmation": source_version.confirmation,
+            "upgrade_source_version": ensure_record_id(source_version_id),
+            "upgrade_idempotency_key": idempotency_key,
+            "upgrade_confirmation": confirmation,
+        }
+        chapter_records: list[dict[str, object]] = []
+        source_to_target_chapter: dict[str, str] = {}
+        for proposal in sorted(outline.chapters, key=lambda item: item.key):
+            source_chapter = by_key[proposal.key]
+            source_chapter_id = str(source_chapter.id)
+            chapter_id = self._upgrade_id(
+                "chapter", new_version_id, source_chapter_id
+            )
+            run_id = self._upgrade_id(
+                "course_generation_run", new_version_id, source_chapter_id
+            )
+            logical_input_hash = hashlib.sha256(
+                (
+                    f"learning-upgrade\0{source_version_id}\0"
+                    f"{source_chapter_id}\0{idempotency_key}"
+                ).encode("utf-8")
+            ).hexdigest()
+            run = CourseGenerationRun(
+                id=run_id,
+                course=course_id,
+                course_version=new_version_id,
+                chapter=chapter_id,
+                chapter_key=source_chapter.chapter_key,
+                stage="chapter_content",
+                adapter="open_notebook",
+                model="learning-upgrade-clone",
+                status="succeeded",
+                prompt_version="learning-upgrade-v1",
+                input_hash=logical_input_hash,
+                output_hash=_artifact_hash(
+                    {"output": source_chapter.artifact or {}}
+                ),
+            )
+            chapter_records.append(
+                {
+                    "id": ensure_record_id(chapter_id),
+                    "content": {
+                        "course_version": ensure_record_id(new_version_id),
+                        "chapter_no": source_chapter.chapter_no,
+                        "title": source_chapter.title,
+                        "chapter_key": source_chapter.chapter_key,
+                        "version_no": 1,
+                        "artifact": source_chapter.artifact,
+                        "input_hash": artifact_replay_hash(run),
+                        "status": "ready",
+                        "published_at": None,
+                        "content": source_chapter.content,
+                        "review_status": "passed",
+                        "validation_status": "passed",
+                        "citations": source_chapter.citations,
+                    },
+                    "run_id": ensure_record_id(run_id),
+                    "run_content": {
+                        "course": ensure_record_id(course_id),
+                        "course_version": ensure_record_id(new_version_id),
+                        "chapter": ensure_record_id(chapter_id),
+                        "chapter_key": source_chapter.chapter_key,
+                        "stage": "chapter_content",
+                        "adapter": "open_notebook",
+                        "model": "learning-upgrade-clone",
+                        "reasoning_effort": None,
+                        "status": "succeeded",
+                        "prompt_version": "learning-upgrade-v1",
+                        "input_hash": logical_input_hash,
+                        "output_hash": run.output_hash,
+                        "command": None,
+                        "error_message": None,
+                    },
+                    "source_id": ensure_record_id(source_chapter_id),
+                    "source_updated": source_chapter.updated,
+                }
+            )
+            source_to_target_chapter[source_chapter_id] = chapter_id
+
+        lab_records: list[dict[str, object]] = []
+        for source_lab in await CourseVersion.labs(source_version_id):
+            if source_lab.id is None:
+                raise LearningUpgradeConflictError(
+                    "Published Course Lab has no identity."
+                )
+            target_chapter = (
+                source_to_target_chapter.get(source_lab.chapter)
+                if source_lab.chapter is not None
+                else None
+            )
+            if source_lab.chapter is not None and target_chapter is None:
+                raise LearningUpgradeConflictError(
+                    "Published Course Lab belongs to an unknown chapter."
+                )
+            lab_id = self._upgrade_id(
+                "lab", new_version_id, str(source_lab.id)
+            )
+            lab_records.append(
+                {
+                    "id": ensure_record_id(lab_id),
+                    "content": {
+                        "course_version": ensure_record_id(new_version_id),
+                        "chapter": (
+                            ensure_record_id(target_chapter)
+                            if target_chapter is not None
+                            else None
+                        ),
+                        "lab_type": source_lab.lab_type,
+                        "prompt": source_lab.prompt,
+                        "payload": source_lab.payload,
+                        "answer": source_lab.answer,
+                    },
+                }
+            )
+
+        try:
+            await repo_query(
+                """
+                BEGIN TRANSACTION;
+                LET $current_course = (
+                    SELECT VALUE id FROM $course
+                    WHERE outline_version_id = $source_version
+                      AND status = 'ready'
+                );
+                IF array::len($current_course) != 1 {
+                    THROW 'Learning upgrade Course changed'
+                };
+                LET $source = (
+                    SELECT VALUE id FROM $source_version
+                    WHERE course = $course AND status = 'published'
+                      AND time::micros(updated) = time::micros($source_updated)
+                );
+                IF array::len($source) != 1 {
+                    THROW 'Learning upgrade source version changed'
+                };
+                LET $active = (
+                    SELECT VALUE id FROM course_version
+                    WHERE course = $course AND status IN ['draft', 'generating']
+                );
+                IF array::len($active) != 0 {
+                    THROW 'A learning upgrade is already active'
+                };
+                FOR $chapter IN $chapters {
+                    LET $source_chapter = (
+                        SELECT VALUE id FROM $chapter.source_id
+                        WHERE course_version = $source_version
+                          AND status = 'published'
+                          AND time::micros(updated) = time::micros($chapter.source_updated)
+                    );
+                    IF array::len($source_chapter) != 1 {
+                        THROW 'Learning upgrade source chapter changed'
+                    };
+                };
+                CREATE ONLY $new_version_id CONTENT $version_content;
+                FOR $chapter IN $chapters {
+                    CREATE ONLY $chapter.id CONTENT $chapter.content;
+                    CREATE ONLY $chapter.run_id CONTENT $chapter.run_content;
+                };
+                FOR $lab IN $labs {
+                    CREATE ONLY $lab.id CONTENT $lab.content;
+                };
+                LET $promoted = (
+                    UPDATE $course SET
+                        outline_version_id = $new_version_id,
+                        status = 'generating', error_message = NONE
+                    WHERE outline_version_id = $source_version
+                      AND status = 'ready'
+                    RETURN VALUE id
+                );
+                IF array::len($promoted) != 1 {
+                    THROW 'Learning upgrade Course promotion conflict'
+                };
+                COMMIT TRANSACTION;
+                """,
+                {
+                    "course": ensure_record_id(course_id),
+                    "source_version": ensure_record_id(source_version_id),
+                    "source_updated": source_version.updated,
+                    "new_version_id": ensure_record_id(new_version_id),
+                    "version_content": version_content,
+                    "chapters": chapter_records,
+                    "labs": lab_records,
+                },
+            )
+        except RuntimeError as exc:
+            refreshed_course = await Course.get(course_id)
+            if refreshed_course.outline_version_id is not None:
+                candidate = await CourseVersion.get(
+                    refreshed_course.outline_version_id
+                )
+                if (
+                    candidate.upgrade_source_version == source_version_id
+                    and candidate.upgrade_idempotency_key == idempotency_key
+                    and candidate.upgrade_confirmation == confirmation
+                ):
+                    return await self._learning_upgrade_result(
+                        course_id, candidate
+                    )
+            raise LearningUpgradeConflictError(
+                "A different learning upgrade or authoring version is already active."
+            ) from exc
+
+        created = await CourseVersion.get(new_version_id)
+        return await self._learning_upgrade_result(course_id, created)
 
     @staticmethod
     def _assert_editable(draft: DraftState) -> None:
