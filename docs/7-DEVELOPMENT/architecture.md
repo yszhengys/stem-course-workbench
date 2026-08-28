@@ -806,6 +806,18 @@ Async job submission (source processing, podcast generation) prevents request ti
 - **Content-core library** extracts text from 50+ file types
 - **Large files** may block API briefly (sync content extraction)
 
+### STEM Course Workbench verification boundary
+
+The isolated `open_notebook/course/` module adds an immutable Build → Publish → Learn boundary without changing the upstream `Source` model:
+
+- Chapter formulas and displayed answers carry `AcademicVerification`. L0 is structure-only, L1 is internal or independent-model consistency, L2 requires a source answer or deterministic solver, and L3 requires a human reason, UTC timestamp, evidence anchors, and the exact artifact SHA256. A second model review remains L1.
+- Structured edits create a new draft revision. Editing a formula or answer resets that target to L0; the server is the only component allowed to construct L3 metadata.
+- Every newly generated declarative Lab includes bounded pedagogical fields in addition to its safe visual specification. The canonical complete proposal is SHA256-hashed; approval is an atomic conditional update that binds a server timestamp and reason to that exact hash.
+- Chapter publication rechecks the current structured revision, verified exercise bank, persisted Lab set and `approved_hash == proposal_hash`. Missing, legacy, edited, stale-version, or partially approved data fails closed.
+- Reading progress and chapter completion are not mastery. Mastery is reduced only from immutable, idempotent, snapshot-bound assessment events.
+
+Migrations 27–29 add exercise provenance, immutable upgrade lineage, and Lab approval metadata. They are append-only compatibility boundaries with explicit down migrations; do not revise older migration files.
+
 ---
 
 ## Performance Considerations

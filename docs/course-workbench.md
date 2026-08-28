@@ -14,6 +14,7 @@ PDF/PPTX Source
   -> immutable chapter version + declarative labs
   -> independent review/escalation + deterministic validators
   -> structured draft operations + revision/validation gate
+  -> exact academic verification + exact Lab proposal approval
   -> human chapter publish; the final current chapter runs whole-Course promotion
   -> Learn reader + deterministic assessment + cited tutor
   -> event-reduced mastery + spaced review
@@ -23,7 +24,7 @@ PDF/PPTX Source
 - Docker 只运行 SurrealDB（`127.0.0.1:8000`）。
 - API（`5055`）、worker 和 Next.js（`3000`）运行在宿主机。
 - Course 重型本地任务使用领域级互斥锁；上游 worker 默认并发保持 5。
-- 已落地的 migration 24/25 保持不可变；教材学习闭环的增量结构位于 migration 26。migration 26 只新增表/字段并扩展级联，支持 25→26→25 往返，不覆盖 V1 记录；导师请求先写入不可变的 `course_tutor_operation` 预约，再通过有时限的执行租约产生学习事件或调用模型，避免并发重试重复计费。
+- 已落地的 migration 24–29 保持不可变：26 建立学习闭环，27 保存题库生成/审查与验证来源，28 保存不可变学习升级谱系，29 为 Lab 增加方案哈希和人工审批审计。每个增量迁移都有对应回滚文件且不覆盖旧记录；导师请求先写入不可变的 `course_tutor_operation` 预约，再通过有时限的执行租约产生学习事件或调用模型，避免并发重试重复计费。
 
 ## 代码边界
 
@@ -44,8 +45,8 @@ PDF/PPTX Source
 4. 大纲批准要求当前版本、服务端 artifact hash、合法 DAG 和精确确认短语 `确认大纲`。
 5. 已批准/已发布 artifact 不可变；`force` 或终态重试创建 run-scoped 的下一版本，同一 run 重放不重复创建。
 6. 章节发布必须属于当前完整批准大纲、是最新版本，并且没有未解决的 error/high/manual blocker；最后一个当前章节发布后复用整本证据与原子竞态门自动晋级 Course version。
-7. finding、公式、单位、数值、物理规则、引用和 Lab 都 fail closed；人工处理需要状态和原因。
-8. Lab 只接受五种严格 JSON 联合类型；任何 JavaScript/HTML/可执行内容均拒绝。
+7. finding、公式、单位、数值、物理规则、引用和 Lab 都 fail closed；公式与显示答案使用诚实的 L0–L3 来源级别，人工 L3 必须绑定当前 artifact hash、UTC 时间、证据锚点和理由。
+8. Lab 只接受五种严格 JSON 联合类型；每个新 Lab 必须包含完整教学方案。人工审批绑定规范化方案的 SHA256，任何方案编辑都会原子清空旧审批；任何 JavaScript/HTML/可执行内容均拒绝。
 9. 笔记、进度和练习使用稳定 chapter/block/exercise/lab key；历史记录不因重新生成而覆盖。
 10. 真实模型必须由用户显式选择；不自动降级、不自动 fallback、不记录凭据。
 11. 客观评分与掌握计算是确定性的；证明/解释只能给建议，模型不能授予掌握。
@@ -68,11 +69,22 @@ Course facade 返回 HTTP 202 和 command/run ID。相同 canonical 输入且已
 
 生成结果同时由 Pydantic 与前端 Zod 解析。验证层使用 SymPy、Pint、数值 oracle、物理规则和引用完整性检查。审查 escalation 作为父 review 内联执行的独立持久 run，仅发送合格 finding 与必需证据，不发送无关整章内容；其原始结果只用于审计，页面与发布门只读取当前 review 的合并结果。
 
+学术内容的验证级别不等同于“模型信心”：
+
+| 级别 | 含义 | 允许来源 |
+|---|---|---|
+| L0 | 仅结构、安全或可解析 | `structure`；编辑公式或答案后自动降级 |
+| L1 | 同一生成物内部自洽 | `self_consistency` 或独立模型审查；第二个模型仍不能证明知识正确 |
+| L2 | 有独立、可复现的正确性依据 | 教材答案锚点 `source_answer` 或确定性求解器 `deterministic_solver` |
+| L3 | 人工核对当前精确快照 | `human_review`，必须记录理由、UTC 时间、锚点和 artifact SHA256 |
+
+旧 artifact 在兼容解析时显式视为 L1，而不是悄悄当作已验证。人工核验通过结构化修订保存；目标值、公式或答案一旦改变，原 L3 不会沿用。
+
 ## V2 服务边界
 
 | 服务 | 责任与失败语义 |
 |---|---|
-| `PublicationService` | 冻结发布快照；完整验证、当前版本和并发条件任一不满足即拒绝。 |
+| `PublicationService` | 冻结发布快照；结构化草稿、练习题库、完整 Lab 教学方案及其精确人工审批、当前版本和并发条件任一不满足即拒绝。 |
 | `AuthoringService` | 接收判别联合的单个结构化操作；修订令牌冲突返回 409，改动后局部检查失效。 |
 | `AssessmentService` | 校验来源/核心/挑战/深迁移题库、难度向量和 grader；表面改写或不确定迁移题标为人工检查。 |
 | `LearningService` | 追加幂等学习事件，确定性评分、归约掌握度和复习队列；旧 snapshot fail closed。 |
@@ -83,9 +95,11 @@ Course facade 返回 HTTP 202 和 command/run ID。相同 canonical 输入且已
 
 `ExerciseBlueprint` 的答案类型为数值、符号、单位、向量、集合、多部分、证明或解释；前六类由服务器 grader 评分，后两类只允许建议性反馈。掌握状态为 `not_started → learning → practiced → mastered → review_due`。同一概念需至少两道不同教材级题正确且至少一道未揭示答案；用尽提示最多到 `practiced`。答案揭示创建深迁移门，完成前不推进掌握。复习间隔固定为 1/3/7/14/30 天，全部结果从 `LearningEvent` 重放。
 
+阅读位置、章节完成标记与掌握度是不同记录。阅读或把章节标为完成不会授予 `practiced`/`mastered`；只有符合上述确定性练习与迁移规则的不可变学习事件才能推进掌握。
+
 ### 发布、编辑与学习快照
 
-发布服务在一个明确快照上绑定 Course version、chapter artifact、题库、Lab、证据和验证状态。结构化编辑只修改服务器允许的稳定 block/exercise/lab key；任意 Markdown/HTML/脚本不构成操作类型。Learn 的读接口只返回发布快照，所有事件、笔记和 Tutor 会话都携带版本或 snapshot token，避免重新生成期间把数据写入错误版本。
+发布服务在一个明确快照上绑定 Course version、chapter artifact、题库、Lab、证据和验证状态。每个 Lab 的规范化完整方案生成 `proposal_hash`；只有服务器记录的 `approved_hash == proposal_hash` 且审批时间、理由齐全时才可发布。`replace_lab` 在同一事务更新方案哈希并清空审批，必须重新输入精确短语 `确认实验方案`。结构化编辑只修改服务器允许的稳定 block/exercise/lab key；任意 Markdown/HTML/脚本不构成操作类型。Learn 的读接口只返回发布快照，所有事件、笔记和 Tutor 会话都携带版本或 snapshot token，避免重新生成期间把数据写入错误版本。
 
 ### `.stemcourse` 安全边界
 
@@ -111,10 +125,10 @@ npm run lint
 npm run build
 ```
 
-另外运行 `bash -n scripts/course-workbench.sh`、`git diff --check`，并做真实 SurrealDB migration 25→26、Docling PDF/PPTX、`.stemcourse` 往返、重启恢复和浏览器 Build/Learn 验收。真实 Codex/Ollama 冒烟必须显式启用；CI 使用 fake adapters。
+另外运行 `bash -n scripts/course-workbench.sh`、`git diff --check`，并做真实 SurrealDB migration 28→29→28、Docling PDF/PPTX、`.stemcourse` 往返、重启恢复和浏览器 Build/Learn 验收。真实 Codex/Ollama 冒烟必须显式启用；CI 使用 fake adapters。
 
 ## 上游同步
 
-`origin` 应始终指向公开源代码仓库 `yszhengys/stem-course-workbench`，`upstream` 指向 `lfnovo/open-notebook`。先获取上游并在功能分支集成；migration 24/25、增量 migration 26 及 Course facade 是兼容边界，不得改写已发布迁移。保留 MIT License 和上游历史；课程原文、证据缓存、数据库、模型缓存和凭据继续只留在 Git 忽略的本地目录。
+`origin` 应始终指向公开源代码仓库 `yszhengys/stem-course-workbench`，`upstream` 指向 `lfnovo/open-notebook`。先获取上游并在功能分支集成；migration 24–29 及 Course facade 是兼容边界，不得改写已发布迁移。保留 MIT License 和上游历史；课程原文、证据缓存、数据库、模型缓存和凭据继续只留在 Git 忽略的本地目录。
 
 用户入口见[中文使用说明](0-START-HERE/course-workbench-user-guide.zh-CN.md)，上游通用架构见[开发文档](7-DEVELOPMENT/index.md)。
