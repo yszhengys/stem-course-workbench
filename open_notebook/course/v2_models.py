@@ -10,12 +10,13 @@ from pydantic import Field, field_validator, model_validator
 from open_notebook.exceptions import InvalidInputError
 
 from .contracts import ModelSelection
-from .models import CourseRecord, _record_fields, _string_id
+from .models import CourseRecord, _record_arrays, _record_fields, _string_id
 from .v2_contracts import (
     CourseBundleManifest,
     DifficultyVector,
     DraftOperation,
     ExerciseBlueprint,
+    ExerciseVerification,
     GraderSpec,
     LearningEvent,
     LearningEventKind,
@@ -48,6 +49,7 @@ class AppendOnlyCourseRecord(CourseRecord):
 
 class CourseExercise(CourseRecord):
     table_name: ClassVar[str] = "course_exercise"
+    nullable_fields: ClassVar[set[str]] = {"generation_run"}
 
     course: str
     course_version: str
@@ -61,11 +63,25 @@ class CourseExercise(CourseRecord):
     is_core: bool = False
     is_gating: bool = False
     is_source_level: bool = False
+    verification: ExerciseVerification = Field(
+        default_factory=lambda: ExerciseVerification(
+            level="L1", method="self_consistency"
+        )
+    )
+    generation_run: str | None = None
+    review_run_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
 
-    @field_validator("course", "course_version", "chapter", mode="before")
+    @field_validator(
+        "course", "course_version", "chapter", "generation_run", mode="before"
+    )
     @classmethod
     def records_as_strings(cls, value: Any) -> Any:
         return _string_id(value)
+
+    @field_validator("review_run_ids", mode="before")
+    @classmethod
+    def record_array_as_strings(cls, values: Any) -> Any:
+        return tuple(_string_id(value) for value in (values or ()))
 
     @model_validator(mode="after")
     def denormalized_fields_match_blueprint(self) -> "CourseExercise":
@@ -93,12 +109,18 @@ class CourseExercise(CourseRecord):
 
     def _prepare_save_data(self) -> dict[str, Any]:
         data = _record_fields(
-            super()._prepare_save_data(), "course", "course_version", "chapter"
+            super()._prepare_save_data(),
+            "course",
+            "course_version",
+            "chapter",
+            "generation_run",
         )
+        data = _record_arrays(data, "review_run_ids")
         data["blueprint"] = self.blueprint.model_dump(mode="json")
         data["difficulty"] = self.difficulty.model_dump(mode="json")
         data["grader"] = self.grader.model_dump(mode="json")
         data["source_anchor_ids"] = list(self.source_anchor_ids)
+        data["verification"] = self.verification.model_dump(mode="json")
         return data
 
 

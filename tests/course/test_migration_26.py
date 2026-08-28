@@ -18,10 +18,10 @@ V2_TABLES = (
 def test_migration_26_is_registered_after_25() -> None:
     manager = AsyncMigrationManager()
 
-    assert len(manager.up_migrations) == 26
-    assert len(manager.down_migrations) == 26
-    assert "course_exercise" in manager.up_migrations[-1].sql
-    assert "REMOVE TABLE IF EXISTS course_exercise" in manager.down_migrations[-1].sql
+    assert len(manager.up_migrations) >= 26
+    assert len(manager.down_migrations) >= 26
+    assert "course_exercise" in manager.up_migrations[25].sql
+    assert "REMOVE TABLE IF EXISTS course_exercise" in manager.down_migrations[25].sql
 
 
 def test_migration_26_is_additive_and_down_preserves_v1_tables() -> None:

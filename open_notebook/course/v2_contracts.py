@@ -60,6 +60,15 @@ AnswerType: TypeAlias = Literal[
     "proof",
     "explanation",
 ]
+VerificationLevel: TypeAlias = Literal["L0", "L1", "L2", "L3"]
+VerificationMethod: TypeAlias = Literal[
+    "structure",
+    "self_consistency",
+    "independent_model_review",
+    "source_answer",
+    "deterministic_solver",
+    "human_review",
+]
 _SAFE_SYMBOLIC_EXPRESSION = re.compile(r"[A-Za-z0-9_+\-*/^()., \t]+")
 _SAFE_SYMBOLIC_FUNCTIONS = frozenset(
     {"abs", "acos", "asin", "atan", "cos", "exp", "log", "sin", "sqrt", "tan"}
@@ -170,6 +179,82 @@ class V2Contract(BaseModel):
     """Public V2 data uses immutable models and tuple collections."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, from_attributes=True)
+
+
+class ExerciseVerification(V2Contract):
+    """Auditable provenance for whether an exercise answer may grant mastery."""
+
+    level: VerificationLevel
+    method: VerificationMethod
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    reason: str | None = Field(default=None, min_length=1, max_length=4000)
+    verified_at: datetime | None = None
+
+    @field_validator("anchor_ids")
+    @classmethod
+    def anchors_are_unique_and_well_formed(
+        cls, values: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        if len(values) != len(set(values)):
+            raise ValueError("verification anchors must be unique")
+        for value in values:
+            if not re.fullmatch(r"anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}", value):
+                raise ValueError("verification anchors must use stable anchor IDs")
+        return values
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_bounded_audit_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        clean = value.strip()
+        if not clean:
+            raise ValueError("verification reason must not be blank")
+        _validate_generated_text(clean)
+        return clean
+
+    @field_validator("verified_at")
+    @classmethod
+    def timestamp_is_utc_if_present(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        offset = value.utcoffset()
+        if offset is None or offset.total_seconds() != 0:
+            raise ValueError("verification timestamp must be UTC")
+        return value
+
+    @model_validator(mode="after")
+    def level_matches_provenance(self) -> "ExerciseVerification":
+        if self.level == "L0":
+            if self.method != "structure":
+                raise ValueError("L0 verification requires structure method")
+            if self.anchor_ids:
+                raise ValueError("L0 verification cannot claim answer anchors")
+            if self.verified_at is not None:
+                raise ValueError("L0 verification cannot have a verification time")
+        elif self.level == "L1":
+            if self.method not in {
+                "self_consistency",
+                "independent_model_review",
+            }:
+                raise ValueError("L1 verification requires a consistency review")
+            if self.verified_at is not None:
+                raise ValueError("L1 verification cannot have a verification time")
+        elif self.level == "L2":
+            if self.method not in {"source_answer", "deterministic_solver"}:
+                raise ValueError("L2 verification requires an independent source")
+            if not self.anchor_ids and self.reason is None:
+                raise ValueError("L2 verification requires anchors or solver provenance")
+        elif self.level == "L3":
+            if self.method != "human_review":
+                raise ValueError("L3 verification requires human review")
+            if self.reason is None or self.verified_at is None:
+                raise ValueError("L3 verification requires a reason and UTC timestamp")
+        return self
+
+    @property
+    def mastery_eligible(self) -> bool:
+        return self.level in {"L2", "L3"}
 
 
 class DifficultyVector(V2Contract):
@@ -994,6 +1079,7 @@ __all__ = [
     "EvidenceClassification",
     "ExerciseBankArtifact",
     "ExerciseBlueprint",
+    "ExerciseVerification",
     "FrozenLabSpec",
     "GradeFeedbackCode",
     "GradeResult",
@@ -1032,4 +1118,6 @@ __all__ = [
     "V2Contract",
     "ValidationCheck",
     "VectorGraderSpec",
+    "VerificationLevel",
+    "VerificationMethod",
 ]

@@ -24,6 +24,7 @@ import {
   courseTutorMessageResponseSchema,
   courseTutorSessionSchema,
   gradeResultSchema,
+  exerciseVerificationSchema,
   learningEventSchema,
 } from './course'
 
@@ -278,6 +279,31 @@ const learnerExercise = () => ({
 })
 
 describe('learner-safe Course V2 schemas', () => {
+  it('validates exercise verification provenance independently of mastery claims', () => {
+    expect(exerciseVerificationSchema.parse({
+      level: 'L2',
+      method: 'source_answer',
+      anchor_ids: ['anchor:answer'],
+      reason: null,
+      verified_at: null,
+    }).level).toBe('L2')
+
+    expect(() => exerciseVerificationSchema.parse({
+      level: 'L1',
+      method: 'independent_model_review',
+      anchor_ids: [],
+      reason: null,
+      verified_at: '2026-08-28T00:00:00Z',
+    })).toThrow()
+    expect(() => exerciseVerificationSchema.parse({
+      level: 'L3',
+      method: 'human_review',
+      anchor_ids: [],
+      reason: null,
+      verified_at: '2026-08-28T00:00:00Z',
+    })).toThrow()
+  })
+
   it('accepts learner exercise metadata but rejects hidden grading material', () => {
     expect(courseExerciseSchema.parse(learnerExercise()).key).toBe('limits-core')
 

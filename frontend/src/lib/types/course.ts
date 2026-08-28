@@ -1360,6 +1360,50 @@ export const exerciseBlueprintSchema = z.object({
 })
 export type ExerciseBlueprint = z.infer<typeof exerciseBlueprintSchema>
 
+export const exerciseVerificationSchema = z.object({
+  level: z.enum(['L0', 'L1', 'L2', 'L3']),
+  method: z.enum([
+    'structure',
+    'self_consistency',
+    'independent_model_review',
+    'source_answer',
+    'deterministic_solver',
+    'human_review',
+  ]),
+  anchor_ids: z.array(z.string().regex(/^anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/)).max(100),
+  reason: z.string().trim().min(1).max(4000).nullable(),
+  verified_at: z.string().datetime({ offset: true }).nullable(),
+}).strict().superRefine((value, context) => {
+  const fail = (message: string, path: string): void => {
+    context.addIssue({ code: 'custom', path: [path], message })
+  }
+  if (new Set(value.anchor_ids).size !== value.anchor_ids.length) {
+    fail('Verification anchors must be unique', 'anchor_ids')
+  }
+  if (value.level === 'L0') {
+    if (value.method !== 'structure') fail('L0 requires structure', 'method')
+    if (value.anchor_ids.length > 0) fail('L0 cannot claim answer anchors', 'anchor_ids')
+    if (value.verified_at !== null) fail('L0 cannot have a verification time', 'verified_at')
+  } else if (value.level === 'L1') {
+    if (!['self_consistency', 'independent_model_review'].includes(value.method)) {
+      fail('L1 requires a consistency review', 'method')
+    }
+    if (value.verified_at !== null) fail('L1 cannot have a verification time', 'verified_at')
+  } else if (value.level === 'L2') {
+    if (!['source_answer', 'deterministic_solver'].includes(value.method)) {
+      fail('L2 requires an independent source', 'method')
+    }
+    if (value.anchor_ids.length === 0 && value.reason === null) {
+      fail('L2 requires anchors or solver provenance', 'anchor_ids')
+    }
+  } else {
+    if (value.method !== 'human_review') fail('L3 requires human review', 'method')
+    if (value.reason === null) fail('L3 requires a reason', 'reason')
+    if (value.verified_at === null) fail('L3 requires a verification time', 'verified_at')
+  }
+})
+export type ExerciseVerification = z.infer<typeof exerciseVerificationSchema>
+
 const draftTargetKeySchema = z.string().min(1).max(300)
 
 export const draftOperationSchema = z.discriminatedUnion('kind', [

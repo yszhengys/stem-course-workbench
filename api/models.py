@@ -19,6 +19,7 @@ from open_notebook.course.v2_contracts import (
     DifficultyVector,
     DraftOperation,
     ExerciseBlueprint,
+    ExerciseVerification,
     GradeResult,
     LearningEvent,
     LearningEventPayload,
@@ -1010,6 +1011,10 @@ class CourseTransferTaskResponse(BaseModel):
     answer_format: CourseAnswerFormat
     difficulty: DifficultyVector
     anchor_ids: tuple[str, ...]
+
+
+class ExerciseVerificationResponse(ExerciseVerification):
+    """Public exercise verification provenance shared by Build and Learn."""
 
 
 class CourseExerciseResponse(BaseModel):

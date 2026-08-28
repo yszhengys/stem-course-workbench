@@ -1,0 +1,8 @@
+-- Roll back only migration 27 exercise provenance fields.
+
+REMOVE INDEX IF EXISTS course_exercise_generation_run_idx ON TABLE course_exercise;
+REMOVE FIELD IF EXISTS review_run_ids ON TABLE course_exercise;
+REMOVE FIELD IF EXISTS generation_run ON TABLE course_exercise;
+REMOVE FIELD IF EXISTS verification ON TABLE course_exercise;
+
+UPDATE course_exercise UNSET review_run_ids, generation_run, verification;
