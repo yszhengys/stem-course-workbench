@@ -279,9 +279,13 @@ class CourseWorkflowService:
             source_hashes=source_hashes,
             course_version_id=run.course_version,
             # A chapter-content run binds its output Chapter only after the
-            # immutable request claim has been created. Review runs, by
-            # contrast, claim one pre-existing Chapter as an input.
-            chapter_id=run.chapter if run.stage == "review" else None,
+            # immutable request claim has been created. Review and exercise
+            # runs, by contrast, claim one pre-existing Chapter as an input.
+            chapter_id=(
+                run.chapter
+                if run.stage in {"review", "exercise_bank"}
+                else None
+            ),
             chapter_key=run.chapter_key,
         )
         if run.input_hash != expected:

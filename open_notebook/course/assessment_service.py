@@ -1479,15 +1479,20 @@ class AssessmentService:
         transfer_reviews: dict[str, tuple[ValidationFinding, ...]] = {}
         for exercise in artifact.exercises:
             if exercise.is_core and exercise.transfer_task is not None:
-                transfer_reviews[exercise.key] = (
-                    await generation.review_exercise_transfer(
-                        course_id=course_id,
-                        chapter_key=chapter_key,
-                        core=exercise,
-                        evidence_by_anchor=evidence_by_anchor,
-                        model=review_model,
+                if self.transfer_reviewer is not None:
+                    transfer_reviews[exercise.key] = await self.transfer_reviewer(
+                        exercise, exercise.transfer_task
                     )
-                )
+                else:
+                    transfer_reviews[exercise.key] = (
+                        await generation.review_exercise_transfer(
+                            course_id=course_id,
+                            chapter_key=chapter_key,
+                            core=exercise,
+                            evidence_by_anchor=evidence_by_anchor,
+                            model=review_model,
+                        )
+                    )
 
         refreshed_loaded = await anchor_loader(course_id, version_id, selected_ids)
         if any(
