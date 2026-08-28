@@ -61,6 +61,11 @@ vi.mock('@/components/course/authoring/AcademicVerificationReview', () => ({
     <section>{`academic-review:${courseId}:${chapterKey}`}</section>
   ),
 }))
+vi.mock('@/components/course/authoring/LabProposalReview', () => ({
+  LabProposalReview: ({ courseId, chapterKey }: { courseId: string; chapterKey: string }) => (
+    <section>{`lab-proposal-review:${courseId}:${chapterKey}`}</section>
+  ),
+}))
 vi.mock('@/components/course/CourseExercises', () => ({ CourseExercises: () => <div /> }))
 vi.mock('@/components/course/LabRenderer', () => ({ LabRenderer: () => <div /> }))
 vi.mock('@/components/ui/markdown-renderer', () => ({
@@ -122,6 +127,39 @@ const options = [sol, luna].map((selection) => ({
   configured: true,
   selectable: true,
 }))
+const approvedLabHash = 'a'.repeat(64)
+const approvedLab = {
+  id: 'lab:one',
+  lab_key: 'limits-plot',
+  lab_type: 'function_plot',
+  proposal_hash: approvedLabHash,
+  approved_hash: approvedLabHash,
+  approved_at: '2026-08-29T02:00:00Z',
+  approval_reason: 'Checked every teaching field.',
+  spec: {
+    kind: 'function_plot',
+    key: 'limits-plot',
+    title: 'Limits plot',
+    anchor_ids: [],
+    provenance: 'pedagogical',
+    expressions: ['x'],
+    domain: { x: [-2, 2] },
+    controls: [],
+    objects: [],
+    pedagogy: {
+      learning_objectives: ['Interpret a graph.'],
+      prerequisite_concepts: [],
+      variables: [],
+      prediction_prompt: 'Predict the graph.',
+      steps: ['Inspect the graph.'],
+      expected_observations: ['The graph is continuous.'],
+      student_submission: 'Record one observation.',
+      rubric: ['Uses graph evidence.'],
+      error_boundaries: ['Use the displayed domain.'],
+      accessible_alternative: 'Read the data table.',
+    },
+  },
+}
 
 describe('CourseChapterPage review models', () => {
   const reviewMutation = mutationResult()
@@ -249,6 +287,7 @@ describe('CourseChapterPage review models', () => {
         verification: { level: 'L2' },
       }],
     }) as never)
+    vi.mocked(useCourseLabs).mockReturnValue(queryResult([approvedLab]) as never)
 
     render(<CourseChapterPage />)
 

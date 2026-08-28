@@ -326,7 +326,9 @@ async def test_facade_constructs_server_owned_l3_and_replays_immediate_duplicate
     first = await service.verify_academic_artifact(
         "course:one", "limits", "formula", "limit-law", request
     )
-    operation = cast(VerifyAcademicArtifactOperation, save.await_args.args[1])
+    call = save.await_args
+    assert call is not None
+    operation = cast(VerifyAcademicArtifactOperation, call.args[1])
     assert operation.verification == AcademicVerification(
         level="L3",
         method="human_review",

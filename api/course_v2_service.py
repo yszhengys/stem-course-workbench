@@ -7,10 +7,11 @@ import hashlib
 import json
 import re
 import secrets
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -36,6 +37,8 @@ from api.models import (
     CourseExerciseRevealResponse,
     CourseExerciseVerificationRequest,
     CourseExportResponse,
+    CourseLabApprovalRequest,
+    CourseLabApprovalResponse,
     CourseLearnerChapterArtifact,
     CourseLearnerChapterResponse,
     CourseLearnerChapterSection,
@@ -80,11 +83,19 @@ from open_notebook.course.learning_service import (
     REVIEW_INTERVAL_DAYS,
     LearningService,
 )
-from open_notebook.course.models import Chapter, CourseNote, CourseVersion
+from open_notebook.course.models import (
+    Chapter,
+    CourseNote,
+    CourseVersion,
+    Lab,
+    canonical_lab_proposal_hash,
+    canonical_lab_proposal_payload,
+)
 from open_notebook.course.portability_service import PortabilityService
 from open_notebook.course.publication_service import (
     DraftPublicationError,
     ExercisePublicationError,
+    LabPublicationError,
     PublicationService,
 )
 from open_notebook.course.tutor_service import (
@@ -121,7 +132,14 @@ from open_notebook.course.v2_models import (
     CourseTutorTurn,
 )
 from open_notebook.course.workflow_service import CourseWorkflowService
-from open_notebook.exceptions import InvalidInputError, OpenNotebookError
+from open_notebook.database.repository import ensure_record_id, repo_query
+from open_notebook.exceptions import (
+    InvalidInputError,
+    NotFoundError,
+    OpenNotebookError,
+)
+
+LabQuery = Callable[[str, dict[str, Any]], Awaitable[list[Any]]]
 
 
 @dataclass
@@ -134,6 +152,7 @@ class CourseV2Service:
     authoring_service: AuthoringService | None = None
     publication_service: PublicationService | None = None
     portability_service: PortabilityService | None = None
+    lab_query: LabQuery = repo_query
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
     def _tutor(self) -> TutorService:
@@ -978,6 +997,158 @@ class CourseV2Service:
             exercises=draft.exercises,
         )
 
+    @staticmethod
+    def _lab_approval_response(lab: Lab) -> CourseLabApprovalResponse:
+        if lab.id is None:
+            raise OpenNotebookError("Course Lab has no identity")
+        payload = canonical_lab_proposal_payload(lab.payload)
+        lab_key = payload.get("key")
+        if not isinstance(lab_key, str):
+            raise OpenNotebookError("Course Lab has no stable key")
+        return CourseLabApprovalResponse(
+            id=str(lab.id),
+            lab_key=lab_key,
+            lab_type=lab.lab_type,  # type: ignore[arg-type]
+            spec=payload,
+            proposal_hash=lab.proposal_hash,
+            approved_hash=lab.approved_hash,
+            approved_at=lab.approved_at,
+            approval_reason=lab.approval_reason,
+        )
+
+    async def approve_lab_proposal(
+        self,
+        course_id: str,
+        chapter_key: str,
+        lab_key: str,
+        request: CourseLabApprovalRequest,
+    ) -> CourseLabApprovalResponse:
+        """Atomically bind human approval to one exact current Lab proposal."""
+
+        scope = await self._draft_scope(course_id, chapter_key)
+        if (
+            scope.version_status not in {"draft", "generating"}
+            or scope.chapter_status not in {"reviewing", "blocked", "ready"}
+        ):
+            raise CourseConflictError("The current Course Lab is immutable.")
+        rows = await self.lab_query(
+            """
+            SELECT * FROM lab
+            WHERE course_version = $version AND chapter = $chapter
+              AND payload.key = $lab_key;
+            """,
+            {
+                "version": ensure_record_id(scope.course_version_id),
+                "chapter": ensure_record_id(scope.chapter_id),
+                "lab_key": lab_key,
+            },
+        )
+        if len(rows) != 1 or not isinstance(rows[0], dict):
+            raise NotFoundError("Course Lab not found")
+        try:
+            lab = Lab(**rows[0])
+            payload = canonical_lab_proposal_payload(lab.payload)
+            expected_hash = canonical_lab_proposal_hash(payload)
+        except ValidationError as exc:
+            raise InvalidInputError("The current Lab proposal is invalid.") from exc
+        if (
+            lab.course_version != scope.course_version_id
+            or lab.chapter != scope.chapter_id
+            or payload.get("key") != lab_key
+        ):
+            raise NotFoundError("Course Lab not found")
+        if payload.get("pedagogy") is None:
+            raise CourseConflictError(
+                "The current Lab has no complete pedagogy proposal."
+            )
+        if lab.proposal_hash is None or not secrets.compare_digest(
+            lab.proposal_hash, expected_hash
+        ):
+            raise CourseConflictError("The current Lab proposal hash is invalid.")
+        if not secrets.compare_digest(request.proposal_hash, expected_hash):
+            raise CourseConflictError("The submitted Lab proposal hash is stale.")
+        if lab.approved_hash is not None:
+            if (
+                secrets.compare_digest(lab.approved_hash, expected_hash)
+                and lab.approval_reason == request.reason
+                and lab.approved_at is not None
+            ):
+                return self._lab_approval_response(lab)
+            raise CourseConflictError(
+                "The Lab proposal already has different approval provenance."
+            )
+        approved_at = self.clock()
+        if approved_at.utcoffset() is None:
+            raise CourseConflictError("The Lab approval clock is invalid.")
+        approved_at = approved_at.astimezone(timezone.utc)
+        try:
+            await self.lab_query(
+                """
+                BEGIN TRANSACTION;
+                LET $mutable_version = (
+                    SELECT VALUE id FROM $version
+                    WHERE course = $course AND status IN ['draft', 'generating']
+                    LIMIT 1
+                );
+                IF array::len($mutable_version) != 1 {
+                    THROW 'Course version is immutable'
+                };
+                LET $mutable_chapter = (
+                    SELECT VALUE id FROM $chapter
+                    WHERE course_version = $version AND chapter_key = $chapter_key
+                      AND status IN ['reviewing', 'blocked', 'ready'] LIMIT 1
+                );
+                IF array::len($mutable_chapter) != 1 {
+                    THROW 'Course chapter is immutable'
+                };
+                LET $approved = (
+                    UPDATE $lab SET
+                        approved_hash = $proposal_hash,
+                        approved_at = $approved_at,
+                        approval_reason = $approval_reason,
+                        updated = time::now()
+                    WHERE course_version = $version AND chapter = $chapter
+                      AND payload.key = $lab_key
+                      AND proposal_hash = $proposal_hash
+                      AND approved_hash = NONE
+                    RETURN VALUE id
+                );
+                IF array::len($approved) != 1 {
+                    THROW 'Lab proposal approval changed'
+                };
+                COMMIT TRANSACTION;
+                """,
+                {
+                    "course": ensure_record_id(course_id),
+                    "version": ensure_record_id(scope.course_version_id),
+                    "chapter": ensure_record_id(scope.chapter_id),
+                    "chapter_key": scope.chapter_key,
+                    "lab": ensure_record_id(str(lab.id)),
+                    "lab_key": lab_key,
+                    "proposal_hash": expected_hash,
+                    "approved_at": approved_at,
+                    "approval_reason": request.reason,
+                },
+            )
+        except RuntimeError as exc:
+            raise CourseConflictError(
+                "The Lab proposal changed before approval could be saved."
+            ) from exc
+        refreshed = await self.lab_query(
+            "SELECT * FROM $lab;",
+            {"lab": ensure_record_id(str(lab.id))},
+        )
+        if len(refreshed) != 1 or not isinstance(refreshed[0], dict):
+            raise CourseConflictError("The approved Lab could not be reloaded.")
+        saved = Lab(**refreshed[0])
+        if (
+            saved.approved_hash != expected_hash
+            or saved.approved_at != approved_at
+            or saved.approval_reason != request.reason
+        ):
+            raise CourseConflictError("The Lab approval snapshot changed.")
+        return self._lab_approval_response(saved)
+
     async def get_chapter_draft(
         self,
         course_id: str,
@@ -1141,10 +1312,12 @@ class CourseV2Service:
         try:
             await self._publication().assert_draft_ready(scope)
             await self._publication().assert_exercises_ready(scope)
+            await self._publication().assert_labs_ready(scope)
         except (
             DraftConflictError,
             DraftPublicationError,
             ExercisePublicationError,
+            LabPublicationError,
         ) as exc:
             raise CourseConflictError(str(exc)) from exc
         return await CourseService.publish_current_chapter(course_id, chapter_key)

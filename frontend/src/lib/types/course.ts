@@ -624,8 +624,19 @@ export const courseLabSchema = z.object({
   lab_key: z.string().min(1),
   lab_type: z.enum(['function_plot', 'parametric_curve', 'vector_field', 'geometry', 'kinematics']),
   spec: labSpecSchema,
+  proposal_hash: sha256Schema.nullable(),
+  approved_hash: sha256Schema.nullable(),
+  approved_at: z.string().datetime({ offset: true }).nullable(),
+  approval_reason: z.string().nullable(),
 }).strict()
 export type CourseLab = z.infer<typeof courseLabSchema>
+
+export const courseLabApprovalRequestSchema = z.object({
+  confirmation: z.literal('确认实验方案'),
+  proposal_hash: sha256Schema,
+  reason: z.string().trim().min(1).max(4000),
+}).strict()
+export type CourseLabApprovalRequest = z.input<typeof courseLabApprovalRequestSchema>
 
 export const courseAttemptSchema = z.object({
   id: recordId,

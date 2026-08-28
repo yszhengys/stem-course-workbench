@@ -1380,6 +1380,10 @@ async def test_publish_chapter_succeeds_after_every_gate_passes(monkeypatch):
     monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
     monkeypatch.setattr("api.course_service.repo_query", AsyncMock(return_value=[]))
     monkeypatch.setattr(
+        "api.course_service.PublicationService.assert_labs_ready",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
         "api.course_service.CourseWorkflowService.authoritative_review_findings",
         AsyncMock(return_value=(None, [])),
     )

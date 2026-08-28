@@ -25,6 +25,7 @@ import {
   courseExerciseSchema,
   courseFindingSchema,
   courseJobSchema,
+  courseLabApprovalRequestSchema,
   courseLabSchema,
   courseLearningEventResponseSchema,
   courseLearningEventRequestSchema,
@@ -54,6 +55,7 @@ import {
   CourseDraftOperationRequest,
   CourseAcademicVerificationRequest,
   CourseLearningEventRequest,
+  CourseLabApprovalRequest,
   CourseLearningUpgradeRequest,
   CourseLearnerNoteCreateRequest,
   CourseTransferGradeRequest,
@@ -557,6 +559,20 @@ export const courseApi = {
       `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/labs`
     )
     return z.array(courseLabSchema).parse(response.data)
+  },
+
+  async approveLabProposal(
+    courseId: string,
+    chapterKey: string,
+    labKey: string,
+    request: CourseLabApprovalRequest,
+  ) {
+    const payload = courseLabApprovalRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/labs/${pathId(labKey)}/approve`,
+      payload,
+    )
+    return courseLabSchema.parse(response.data)
   },
 
   async listChapterAttempts(courseId: string, chapterKey: string) {

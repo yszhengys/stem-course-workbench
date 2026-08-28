@@ -24,9 +24,9 @@ def test_migration_28_is_registered_and_only_adds_upgrade_lineage() -> None:
     up = migration_sql("28")
     down = migration_sql("28_down")
 
-    assert len(manager.up_migrations) == 28
-    assert len(manager.down_migrations) == 28
-    assert manager.up_migrations[-1].sql == " ".join(
+    assert len(manager.up_migrations) >= 28
+    assert len(manager.down_migrations) >= 28
+    assert manager.up_migrations[27].sql == " ".join(
         line.strip()
         for line in up.splitlines()
         if line.strip() and not line.strip().startswith("--")

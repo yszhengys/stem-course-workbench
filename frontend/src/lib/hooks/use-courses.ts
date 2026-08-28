@@ -10,6 +10,7 @@ import type {
   CourseExerciseHintRequest,
   CourseExerciseRevealRequest,
   CourseExerciseVerificationRequest,
+  CourseLabApprovalRequest,
   CourseLearningEventRequest,
   CourseLearningUpgradeRequest,
   CourseTransferGradeRequest,
@@ -128,6 +129,30 @@ export function useCourseLabs(courseId: string, chapterKey: string, enabled = tr
     queryKey: QUERY_KEYS.courseLabs(courseId, chapterKey),
     queryFn: () => courseApi.listChapterLabs(courseId, chapterKey),
     enabled: Boolean(courseId && chapterKey) && enabled,
+    retry: false,
+  })
+}
+
+export function useApproveCourseLab(courseId: string, chapterKey: string) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: ({
+      labKey,
+      request,
+    }: {
+      labKey: string
+      request: CourseLabApprovalRequest
+    }) => courseApi.approveLabProposal(courseId, chapterKey, labKey, request),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseLabs(courseId, chapterKey) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseChapter(courseId, chapterKey) }),
+        client.invalidateQueries({ queryKey: QUERY_KEYS.courseChapterDraft(courseId, chapterKey) }),
+      ])
+      feedback.success()
+    },
+    onError: feedback.error,
     retry: false,
   })
 }

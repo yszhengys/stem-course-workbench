@@ -201,6 +201,10 @@ def _patch_records(monkeypatch, course, version, chapter) -> None:
         "api.course_service.PublicationService.assert_exercises_ready",
         AsyncMock(),
     )
+    monkeypatch.setattr(
+        "api.course_service.PublicationService.assert_labs_ready",
+        AsyncMock(),
+    )
 
 
 @pytest.mark.asyncio

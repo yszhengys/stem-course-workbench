@@ -47,6 +47,8 @@ from api.models import (
     CourseExportResponse,
     CourseFindingUpdate,
     CourseJobResponse,
+    CourseLabApprovalRequest,
+    CourseLabApprovalResponse,
     CourseLearnerChapterResponse,
     CourseLearnerNoteCreateRequest,
     CourseLearnerNoteResponse,
@@ -693,6 +695,26 @@ async def get_current_chapter(course_id: str, chapter_key: str):
 @router.get("/courses/{course_id}/chapters/{chapter_key}/labs")
 async def list_current_chapter_labs(course_id: str, chapter_key: str):
     return await _call(CourseService.list_chapter_labs(course_id, chapter_key))
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/labs/{lab_key}/approve",
+    response_model=CourseLabApprovalResponse,
+)
+async def approve_lab_proposal(
+    course_id: str,
+    chapter_key: StableKey,
+    lab_key: StableKey,
+    request: CourseLabApprovalRequest,
+):
+    return await _call(
+        course_v2_service.approve_lab_proposal(
+            course_id,
+            chapter_key,
+            lab_key,
+            request,
+        )
+    )
 
 
 @router.get("/courses/{course_id}/chapters/{chapter_key}/attempts")

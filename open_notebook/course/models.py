@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timezone
 from typing import Any, ClassVar, TypeVar
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from surrealdb import RecordID
 
 from open_notebook.database.repository import ensure_record_id, repo_query
@@ -13,9 +15,10 @@ from open_notebook.domain.base import ObjectModel
 from open_notebook.exceptions import NotFoundError, OpenNotebookError
 
 from . import state_machine as sm
-from .contracts import ModelSelection, SourceLocator
+from .contracts import LabSpecVariant, ModelSelection, SourceLocator
 
 T = TypeVar("T", bound="CourseRecord")
+_LAB_SPEC_ADAPTER: TypeAdapter[LabSpecVariant] = TypeAdapter(LabSpecVariant)
 
 DEFAULT_MODEL_POLICY: dict[str, ModelSelection] = {
     "outline": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
@@ -49,6 +52,28 @@ def _record_arrays(data: dict[str, Any], *fields: str) -> dict[str, Any]:
 def _rows(model: type[T], result: Any) -> list[T]:
     rows = result if isinstance(result, list) else [result] if result else []
     return [model(**row) for row in rows if isinstance(row, dict)]
+
+
+def canonical_lab_proposal_payload(payload: object) -> dict[str, Any]:
+    """Validate and normalize the complete declarative Lab proposal."""
+
+    spec = _LAB_SPEC_ADAPTER.validate_python(payload)
+    return spec.model_dump(mode="json", by_alias=True)
+
+
+def canonical_lab_proposal_hash(payload: object) -> str:
+    """Bind approval to every normalized visual and pedagogical Lab field."""
+
+    canonical = canonical_lab_proposal_payload(payload)
+    return hashlib.sha256(
+        json.dumps(
+            canonical,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 class CourseRecord(ObjectModel):
@@ -277,7 +302,15 @@ class Evidence(CourseRecord):
 
 class Lab(CourseRecord):
     table_name: ClassVar[str] = "lab"
-    nullable_fields: ClassVar[set[str]] = {"chapter", "prompt", "answer"}
+    nullable_fields: ClassVar[set[str]] = {
+        "chapter",
+        "prompt",
+        "answer",
+        "proposal_hash",
+        "approved_hash",
+        "approved_at",
+        "approval_reason",
+    }
 
     course_version: str
     chapter: str | None = None
@@ -285,11 +318,44 @@ class Lab(CourseRecord):
     prompt: str | None = None
     payload: dict[str, Any]
     answer: dict[str, Any] | None = None
+    proposal_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    approved_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    approved_at: datetime | None = None
+    approval_reason: str | None = Field(default=None, max_length=4000)
 
     @field_validator("course_version", "chapter", mode="before")
     @classmethod
     def record_as_string(cls, value: Any) -> Any:
         return _string_id(value)
+
+    @field_validator("approved_at")
+    @classmethod
+    def approval_time_is_utc(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        offset = value.utcoffset()
+        if offset is None or offset.total_seconds() != 0:
+            raise ValueError("Lab approval time must be UTC")
+        return value
+
+    @field_validator("approval_reason")
+    @classmethod
+    def approval_reason_is_nonblank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        clean = value.strip()
+        if not clean:
+            raise ValueError("Lab approval reason must not be blank")
+        return clean
+
+    @model_validator(mode="after")
+    def approval_audit_is_complete(self) -> "Lab":
+        audit = (self.approved_at, self.approval_reason)
+        if self.approved_hash is None and any(value is not None for value in audit):
+            raise ValueError("Lab approval hash is required for approval audit data")
+        if self.approved_hash is not None and any(value is None for value in audit):
+            raise ValueError("Lab approval audit data is incomplete")
+        return self
 
     def _prepare_save_data(self) -> dict[str, Any]:
         return _record_fields(super()._prepare_save_data(), "course_version", "chapter")

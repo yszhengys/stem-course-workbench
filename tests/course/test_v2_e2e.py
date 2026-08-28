@@ -41,7 +41,12 @@ from open_notebook.course.model_adapters import (
     CourseModelAdapter,
     FakeCourseModelAdapter,
 )
-from open_notebook.course.models import Course, CourseGenerationRun, CourseVersion
+from open_notebook.course.models import (
+    Course,
+    CourseGenerationRun,
+    CourseVersion,
+    canonical_lab_proposal_hash,
+)
 from open_notebook.course.publication_service import PublicationService
 from open_notebook.course.tutor_service import TutorEvidence, TutorScope, TutorService
 from open_notebook.course.v2_contracts import (
@@ -392,7 +397,7 @@ async def test_command_generated_bank_is_verified_published_and_used_by_learn_ap
         "DEFINE TABLE source SCHEMALESS; "
         "DEFINE TABLE command SCHEMALESS;"
     )
-    for migration_version in ("24", "25", "26", "27", "28"):
+    for migration_version in ("24", "25", "26", "27", "28", "29"):
         await database.query(_migration(migration_version))
 
     fixture = _fixture()
@@ -437,6 +442,8 @@ async def test_command_generated_bank_is_verified_published_and_used_by_learn_ap
         }],
     })
     chapter_artifact = _chapter(anchor_ids[0]).model_dump(mode="json")
+    lab_proposal = cast(dict[str, Any], chapter_artifact["labs"][0])
+    lab_proposal_hash = canonical_lab_proposal_hash(lab_proposal)
     chapter_run = CourseGenerationRun(
         id="course_generation_run:e2e_chapter",
         course="course:e2e_product",
@@ -498,6 +505,11 @@ async def test_command_generated_bank_is_verified_published_and_used_by_learn_ap
             status = 'ready', review_status = 'passed',
             validation_status = 'passed', artifact = $chapter_artifact,
             input_hash = $chapter_input_hash;
+        CREATE lab:e2e_product SET
+            course_version = course_version:e2e_product,
+            chapter = chapter:e2e_product,
+            lab_type = 'function_plot', payload = $lab_proposal,
+            proposal_hash = $lab_proposal_hash;
         CREATE course_generation_run:e2e_chapter SET
             course = course:e2e_product,
             course_version = course_version:e2e_product,
@@ -522,6 +534,8 @@ async def test_command_generated_bank_is_verified_published_and_used_by_learn_ap
             "approved_at": NOW,
             "chapter_artifact": chapter_artifact,
             "chapter_input_hash": chapter_input_hash,
+            "lab_proposal": lab_proposal,
+            "lab_proposal_hash": lab_proposal_hash,
             "adapter": MODEL.adapter,
             "model": MODEL.model,
             "reasoning_effort": MODEL.reasoning_effort,
@@ -676,6 +690,23 @@ async def test_command_generated_bank_is_verified_published_and_used_by_learn_ap
         )
         assert verified.status_code == 200, verified.text
         assert verified.json()["level"] == "L3"
+
+        listed_labs = await client.get(
+            "/api/courses/course:e2e_product/chapters/limits/labs"
+        )
+        assert listed_labs.status_code == 200, listed_labs.text
+        assert listed_labs.json()[0]["proposal_hash"] == lab_proposal_hash
+        approved_lab = await client.post(
+            "/api/courses/course:e2e_product/chapters/limits/"
+            "labs/limit-plot/approve",
+            json={
+                "confirmation": "确认实验方案",
+                "proposal_hash": lab_proposal_hash,
+                "reason": "Human checked every visual and teaching field.",
+            },
+        )
+        assert approved_lab.status_code == 200, approved_lab.text
+        assert approved_lab.json()["approved_hash"] == lab_proposal_hash
 
         published = await client.post(
             "/api/courses/course:e2e_product/chapters/limits/publish"

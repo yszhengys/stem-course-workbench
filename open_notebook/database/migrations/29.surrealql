@@ -1,0 +1,7 @@
+-- Migration 29: immutable human approval bound to one canonical Lab proposal.
+-- Legacy Labs remain readable with all four optional fields absent.
+
+DEFINE FIELD IF NOT EXISTS proposal_hash ON TABLE lab TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS approved_hash ON TABLE lab TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS approved_at ON TABLE lab TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS approval_reason ON TABLE lab TYPE option<string>;

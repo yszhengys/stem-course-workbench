@@ -32,6 +32,8 @@ from .models import (
     CourseValidationFinding,
     CourseVersion,
     Lab,
+    canonical_lab_proposal_hash,
+    canonical_lab_proposal_payload,
 )
 
 _escalation_locks: dict[str, asyncio.Lock] = {}
@@ -1041,23 +1043,69 @@ class CourseWorkflowService:
 
     async def _ensure_labs(self, version: CourseVersion, chapter: Chapter) -> None:
         artifact = ChapterArtifact.model_validate(chapter.artifact)
-        existing = await repo_query(
+        rows = await repo_query(
             "SELECT * FROM lab WHERE chapter = $chapter;",
             {"chapter": ensure_record_id(str(chapter.id))},
         )
-        existing_keys = {
-            row.get("payload", {}).get("key")
-            for row in existing
-            if isinstance(row.get("payload"), dict)
-        }
+        existing_by_key: dict[str, Lab] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            lab = Lab(**row)
+            key = lab.payload.get("key")
+            if not isinstance(key, str) or not key:
+                raise ValueError("Persistent Lab has no stable key")
+            if key in existing_by_key:
+                raise ValueError("Persistent Lab stable key is not unique")
+            existing_by_key[key] = lab
         for spec in artifact.labs:
-            if spec.key in existing_keys:
+            payload = canonical_lab_proposal_payload(
+                spec.model_dump(mode="json", by_alias=True)
+            )
+            proposal_hash = canonical_lab_proposal_hash(payload)
+            existing = existing_by_key.get(spec.key)
+            if (
+                existing is not None
+                and existing.payload == payload
+                and existing.proposal_hash == proposal_hash
+            ):
+                continue
+            if existing is not None:
+                if existing.id is None:
+                    raise ValueError("Persistent Lab has no identity")
+                updated = await repo_query(
+                    """
+                    UPDATE $lab SET
+                        lab_type = $lab_type,
+                        payload = $payload,
+                        proposal_hash = $proposal_hash,
+                        approved_hash = NONE,
+                        approved_at = NONE,
+                        approval_reason = NONE,
+                        updated = time::now()
+                    WHERE course_version = $version AND chapter = $chapter
+                      AND payload.key = $lab_key
+                    RETURN AFTER;
+                    """,
+                    {
+                        "lab": ensure_record_id(str(existing.id)),
+                        "version": ensure_record_id(str(version.id)),
+                        "chapter": ensure_record_id(str(chapter.id)),
+                        "lab_key": spec.key,
+                        "lab_type": spec.kind,
+                        "payload": payload,
+                        "proposal_hash": proposal_hash,
+                    },
+                )
+                if len(updated) != 1:
+                    raise ValueError("Persistent Lab changed during generation")
                 continue
             lab = Lab(
                 course_version=str(version.id),
                 chapter=str(chapter.id),
                 lab_type=spec.kind,
-                payload=spec.model_dump(mode="json", by_alias=True),
+                payload=payload,
+                proposal_hash=proposal_hash,
             )
             await lab.save()
 

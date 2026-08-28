@@ -8,6 +8,7 @@ import { ArrowLeft, Beaker, BookCheck, FileWarning, NotebookPen } from 'lucide-r
 import { AppShell } from '@/components/layout/AppShell'
 import { ExerciseBankReview } from '@/components/course/authoring/ExerciseBankReview'
 import { AcademicVerificationReview } from '@/components/course/authoring/AcademicVerificationReview'
+import { LabProposalReview } from '@/components/course/authoring/LabProposalReview'
 import { StructuredDraftEditor } from '@/components/course/authoring/StructuredDraftEditor'
 import { ChapterPublicationGate } from '@/components/course/ChapterPublicationGate'
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
@@ -164,6 +165,20 @@ export default function CourseChapterPage() {
       && core.blueprint.transfer_task !== null
       && (core.verification.level === 'L2' || core.verification.level === 'L3')
   }, [exerciseBuild.data])
+  const labProposalsReady = useMemo(() => Boolean(
+    labs.data?.length
+    && labs.data.every((lab) => (
+      Boolean(lab.spec.pedagogy)
+      && Boolean(lab.proposal_hash)
+      && lab.approved_hash === lab.proposal_hash
+      && Boolean(lab.approved_at)
+      && Boolean(lab.approval_reason)
+    )),
+  ), [labs.data])
+  const publicationPrerequisiteBlock = [
+    exerciseBankReady ? null : t('course.exercisePublicationBlocked'),
+    labProposalsReady ? null : t('course.labPublicationBlocked'),
+  ].filter((message): message is string => Boolean(message)).join(' ')
   const blockKeys = useMemo(() => artifact ? [
     ...artifact.sections.map((item) => item.key),
     ...artifact.formulas.map((item) => item.key),
@@ -392,6 +407,12 @@ export default function CourseChapterPage() {
 
               <AcademicVerificationReview courseId={courseId} chapterKey={chapterKey} />
 
+              <LabProposalReview
+                courseId={courseId}
+                chapterKey={chapterKey}
+                canApprove={currentChapter.status !== 'published'}
+              />
+
               <ExerciseBankReview
                 status={exerciseBuild.data}
                 anchors={anchors.data ?? []}
@@ -524,7 +545,7 @@ export default function CourseChapterPage() {
                     isError={findings.isError}
                     isUpdating={updateFinding.isPending}
                     isPublishing={publishChapter.isPending}
-                    additionalBlockedReason={exerciseBankReady ? null : t('course.exercisePublicationBlocked')}
+                    additionalBlockedReason={publicationPrerequisiteBlock || null}
                     onRetry={() => void findings.refetch()}
                     onUpdate={(findingId, status, resolution_reason) => updateFinding.mutate({ findingId, status, resolution_reason })}
                     onPublish={() => publishChapter.mutate()}

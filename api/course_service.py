@@ -48,6 +48,7 @@ from open_notebook.course.models import (
 from open_notebook.course.publication_service import (
     DraftPublicationError,
     ExercisePublicationError,
+    LabPublicationError,
     PublicationService,
 )
 from open_notebook.course.v2_contracts import (
@@ -1479,10 +1480,12 @@ class CourseService:
             )
             await publication.assert_draft_ready(scope)
             await publication.assert_exercises_ready(scope)
+            await publication.assert_labs_ready(scope)
         except (
             DraftConflictError,
             DraftPublicationError,
             ExercisePublicationError,
+            LabPublicationError,
         ) as exc:
             raise CourseConflictError(str(exc)) from exc
         _, finding_records = (
@@ -1805,6 +1808,10 @@ class CourseService:
                     "lab_key": lab_key,
                     "lab_type": lab.lab_type,
                     "spec": lab.payload,
+                    "proposal_hash": lab.proposal_hash,
+                    "approved_hash": lab.approved_hash,
+                    "approved_at": lab.approved_at,
+                    "approval_reason": lab.approval_reason,
                 }
             )
         return result

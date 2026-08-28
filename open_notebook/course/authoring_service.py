@@ -27,7 +27,13 @@ from .contracts import (
     WorkedExampleArtifact,
 )
 from .generation_service import CourseGenerationService
-from .models import Chapter, Course, CourseGenerationRun, CourseVersion
+from .models import (
+    Chapter,
+    Course,
+    CourseGenerationRun,
+    CourseVersion,
+    canonical_lab_proposal_hash,
+)
 from .task_backend import CourseTaskBackend
 from .v2_contracts import (
     DraftOperation,
@@ -1097,10 +1103,12 @@ class AuthoringService:
             )
         lab_payload: dict[str, object] | None = None
         lab_key: str | None = None
+        lab_proposal_hash: str | None = None
         if isinstance(operation, ReplaceLabOperation):
             lab = operation.lab_spec.as_lab_spec()
             lab_payload = lab.model_dump(mode="json", by_alias=True)
             lab_key = lab.key
+            lab_proposal_hash = canonical_lab_proposal_hash(lab_payload)
 
         statement = """
         BEGIN TRANSACTION;
@@ -1162,7 +1170,12 @@ class AuthoringService:
         IF $lab_key != NONE {
             LET $lab_update = (
                 UPDATE lab SET payload = $lab_payload,
-                    lab_type = $lab_type, updated = time::now()
+                    lab_type = $lab_type,
+                    proposal_hash = $lab_proposal_hash,
+                    approved_hash = NONE,
+                    approved_at = NONE,
+                    approval_reason = NONE,
+                    updated = time::now()
                 WHERE course_version = $version AND chapter = $chapter
                   AND payload.key = $lab_key
                 RETURN VALUE id
@@ -1229,6 +1242,7 @@ class AuthoringService:
                     "lab_key": lab_key,
                     "lab_payload": lab_payload,
                     "lab_type": lab_payload.get("kind") if lab_payload is not None else None,
+                    "lab_proposal_hash": lab_proposal_hash,
                     "revision_id": ensure_record_id(revision_id),
                     "revision_content": revision_content,
                 },

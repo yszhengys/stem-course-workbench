@@ -1290,6 +1290,39 @@ class CourseAcademicVerificationRequest(StrictCourseRequest):
         return values
 
 
+class CourseLabApprovalRequest(StrictCourseRequest):
+    confirmation: Literal["确认实验方案"]
+    proposal_hash: Sha256
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_not_blank(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("Lab approval reason must not be blank")
+        return clean
+
+
+class CourseLabApprovalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^lab:[^:]+$")
+    lab_key: SafeLabKey
+    lab_type: Literal[
+        "function_plot",
+        "parametric_curve",
+        "vector_field",
+        "geometry",
+        "kinematics",
+    ]
+    spec: LabSpecVariant
+    proposal_hash: Sha256 | None
+    approved_hash: Sha256 | None
+    approved_at: datetime | None
+    approval_reason: str | None
+
+
 class CourseDraftValidateRequest(StrictCourseRequest):
     revision_token: Sha256
 
