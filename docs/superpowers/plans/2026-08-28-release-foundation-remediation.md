@@ -174,7 +174,7 @@ status = "development"
 
 Run: `.venv/bin/pytest tests/test_workbench_distribution_metadata.py -v`
 
-Run: `./.tools/bin/uv run python scripts/check_markdown_links.py`
+Run: `./.tools/bin/uv run python scripts/check_md_links.py`
 
 Run: `git diff --check`
 
