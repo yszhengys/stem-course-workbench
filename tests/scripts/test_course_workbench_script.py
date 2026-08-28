@@ -14,6 +14,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = PROJECT_ROOT / "scripts" / "course-workbench.sh"
+BOOTSTRAP_SCRIPT = PROJECT_ROOT / "scripts" / "bootstrap-course-uv.sh"
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -369,6 +370,10 @@ from pathlib import Path
 state = Path(os.environ["FAKE_STATE"])
 args = sys.argv[1:]
 
+if args == ["--version"]:
+    print("uv 0.12.5")
+    raise SystemExit(0)
+
 def raise_exit():
     pid = os.getpid()
     (state / "port.5055").unlink(missing_ok=True)
@@ -465,9 +470,11 @@ raise SystemExit(2)
 @pytest.fixture
 def fake_repo(tmp_path: Path) -> Iterator[tuple[Path, dict[str, str], Path]]:
     assert SCRIPT.exists(), "launcher script must exist"
+    assert BOOTSTRAP_SCRIPT.exists(), "uv bootstrap script must exist"
     repo = tmp_path / "stem-course-workbench"
     (repo / "scripts").mkdir(parents=True)
     shutil.copy2(SCRIPT, repo / "scripts" / SCRIPT.name)
+    shutil.copy2(BOOTSTRAP_SCRIPT, repo / "scripts" / BOOTSTRAP_SCRIPT.name)
     (repo / "frontend").mkdir()
     (repo / "uv.lock").write_text("uv-lock-v1", encoding="utf-8")
     (repo / "frontend" / "package-lock.json").write_text(
@@ -618,6 +625,48 @@ def _force_stop_pid(pid: int) -> None:
     except ProcessLookupError:
         return
     _wait_for_pid_exit(pid)
+
+
+def test_start_uses_path_uv_when_repository_tool_is_absent(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    repository_uv = repo / ".tools" / "bin" / "uv"
+    path_uv = Path(env["PATH"].split(":", 1)[0]) / "uv"
+    repository_uv.replace(path_uv)
+
+    result = _run(repo, _with_ui_contract(env), "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "sync --locked" in _calls(state / "uv.calls")
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_start_bootstraps_uv_when_repository_and_path_uv_are_absent(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    repository_uv = repo / ".tools" / "bin" / "uv"
+    fake_uv_source = repo / "fake-uv-source"
+    repository_uv.replace(fake_uv_source)
+    env["FAKE_UV_SOURCE"] = str(fake_uv_source)
+    _write_executable(
+        repo / "scripts" / "bootstrap-course-uv.sh",
+        """#!/bin/sh
+set -eu
+mkdir -p "$1"
+cp "$FAKE_UV_SOURCE" "$1/uv"
+chmod 700 "$1/uv"
+printf '%s\n' "$1" > "$FAKE_STATE/bootstrap.calls"
+""",
+    )
+
+    result = _run(repo, _with_ui_contract(env), "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _calls(state / "bootstrap.calls") == [str(repo / ".tools" / "bin")]
+    assert "sync --locked" in _calls(state / "uv.calls")
+    assert _run(repo, env, "stop").returncode == 0
 
 
 def test_start_creates_secure_env_uses_locked_dependencies_and_is_idempotent(

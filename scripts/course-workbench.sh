@@ -14,7 +14,9 @@ LOG_DIR="$RUNTIME_DIR/logs"
 LOCK_DIR="$RUNTIME_DIR/launcher.lock"
 LOCK_OWNER_FILE="$LOCK_DIR/pid"
 ENV_FILE="$REPO_ROOT/.env"
-UV_BIN="$REPO_ROOT/.tools/bin/uv"
+REPOSITORY_UV_BIN="$REPO_ROOT/.tools/bin/uv"
+UV_BOOTSTRAP_SCRIPT="$REPO_ROOT/scripts/bootstrap-course-uv.sh"
+UV_BIN="$REPOSITORY_UV_BIN"
 PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
 COURSE_URL="http://127.0.0.1:3000/courses/new"
 READY_TIMEOUT=${COURSE_WORKBENCH_READY_TIMEOUT:-180}
@@ -162,9 +164,36 @@ require_command() {
     fi
 }
 
+resolve_uv() {
+    if [ -x "$REPOSITORY_UV_BIN" ] && "$REPOSITORY_UV_BIN" --version >/dev/null 2>&1; then
+        UV_BIN="$REPOSITORY_UV_BIN"
+        return 0
+    fi
+
+    candidate=$(command -v uv 2>/dev/null || true)
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" --version >/dev/null 2>&1; then
+        UV_BIN="$candidate"
+        return 0
+    fi
+
+    if [ ! -x "$UV_BOOTSTRAP_SCRIPT" ]; then
+        error "uv bootstrap script is missing or not executable: $UV_BOOTSTRAP_SCRIPT"
+        return 1
+    fi
+    say "uv was not found; installing the verified repository-pinned version."
+    if ! "$UV_BOOTSTRAP_SCRIPT" "$(dirname "$REPOSITORY_UV_BIN")"; then
+        return 1
+    fi
+    if [ ! -x "$REPOSITORY_UV_BIN" ] || ! "$REPOSITORY_UV_BIN" --version >/dev/null 2>&1; then
+        error "The uv bootstrap completed without a usable executable at $REPOSITORY_UV_BIN."
+        return 1
+    fi
+    UV_BIN="$REPOSITORY_UV_BIN"
+}
+
 check_tools() {
-    if [ ! -x "$UV_BIN" ]; then
-        error "Repository-local uv is missing at $UV_BIN. Install uv there before starting."
+    if ! resolve_uv; then
+        error "uv is missing or unusable, and the verified bootstrap could not install it."
         return 1
     fi
     require_command docker "Docker Desktop is required. Install and start Docker Desktop." || return 1
