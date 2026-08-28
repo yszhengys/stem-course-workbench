@@ -12,11 +12,14 @@ import {
   courseAttemptSchema,
   courseAttemptWithLabSchema,
   courseExerciseGradeResponseSchema,
+  courseExerciseBuildStatusSchema,
   courseExerciseGradeRequestSchema,
   courseExerciseHintRequestSchema,
   courseExerciseHintResponseSchema,
   courseExerciseRevealRequestSchema,
   courseExerciseRevealResponseSchema,
+  courseExerciseVerificationRequestSchema,
+  exerciseVerificationSchema,
   courseExerciseSchema,
   courseFindingSchema,
   courseJobSchema,
@@ -43,6 +46,7 @@ import {
   CourseExerciseGradeRequest,
   CourseExerciseHintRequest,
   CourseExerciseRevealRequest,
+  CourseExerciseVerificationRequest,
   CourseDraftOperationRequest,
   CourseLearningEventRequest,
   CourseLearnerNoteCreateRequest,
@@ -52,6 +56,7 @@ import {
   eligibleCourseSourceSchema,
   evidenceAnchorSchema,
   GenerateChapterRequest,
+  GenerateExerciseBankRequest,
   GenerateOutlineRequest,
   ReviewChapterRequest,
   chapterSchema,
@@ -230,6 +235,42 @@ export const courseApi = {
       }
     )
     return courseJobSchema.parse(response.data)
+  },
+
+  async generateExerciseBank(
+    courseId: string,
+    chapterKey: string,
+    request: GenerateExerciseBankRequest,
+  ) {
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/exercises/generate`,
+      {
+        ...anchoredJobPayload(request),
+        review_model: modelPayload(request.review_model),
+      },
+    )
+    return courseJobSchema.parse(response.data)
+  },
+
+  async getExerciseBuildStatus(courseId: string, chapterKey: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/exercises/build-status`,
+    )
+    return courseExerciseBuildStatusSchema.parse(response.data)
+  },
+
+  async verifyExercise(
+    courseId: string,
+    chapterKey: string,
+    exerciseKey: string,
+    request: CourseExerciseVerificationRequest,
+  ) {
+    const parsed = courseExerciseVerificationRequestSchema.parse(request)
+    const response = await apiClient.post(
+      `/courses/${pathId(courseId)}/chapters/${pathId(chapterKey)}/exercises/${pathId(exerciseKey)}/verify`,
+      parsed,
+    )
+    return exerciseVerificationSchema.parse(response.data)
   },
 
   async getCurrentChapter(courseId: string, chapterKey: string) {

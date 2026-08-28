@@ -22,6 +22,7 @@ from api.models import (
     CourseDraftResponse,
     CourseDraftValidateRequest,
     CourseDraftValidationResponse,
+    CourseExerciseAuthoringResponse,
     CourseExerciseBuildStatusResponse,
     CourseExerciseGradeRequest,
     CourseExerciseGradeResponse,
@@ -1362,6 +1363,35 @@ class CourseV2Service:
         payload = await CourseCommandService().exercise_build_status(
             course_id, chapter_key
         )
+        exercises: tuple[CourseExerciseAuthoringResponse, ...] = ()
+        if int(payload.get("exercise_count", 0)):
+            version, _chapter, records = (
+                await CourseService.list_current_authoring_exercises(
+                    course_id, chapter_key
+                )
+            )
+            if len(records) != int(payload["exercise_count"]):
+                raise CourseConflictError(
+                    "Exercise build status changed; refresh before reviewing."
+                )
+            exercises = tuple(
+                CourseExerciseAuthoringResponse(
+                    key=exercise.exercise_key,
+                    blueprint=exercise.blueprint,
+                    snapshot_token=self._exercise_snapshot_token(
+                        course_id, version, exercise
+                    ),
+                    expected_answer=self.assessment_service.reveal_grader_answer(
+                        exercise.blueprint.grader
+                    ),
+                    verification=ExerciseVerificationResponse.model_validate(
+                        exercise.verification
+                    ),
+                    review_run_ids=exercise.review_run_ids,
+                )
+                for exercise in records
+            )
+        payload["exercises"] = exercises
         return CourseExerciseBuildStatusResponse.model_validate(payload)
 
     async def next_hint(

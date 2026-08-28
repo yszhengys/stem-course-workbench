@@ -607,6 +607,10 @@ export interface ReviewChapterRequest extends GenerateChapterRequest {
   escalation_model: ModelSelection
 }
 
+export interface GenerateExerciseBankRequest extends GenerateChapterRequest {
+  review_model: ModelSelection
+}
+
 export interface CreateCourseAttemptRequest {
   answers: Record<string, unknown>
   exercise_key?: string
@@ -1405,6 +1409,45 @@ export const exerciseVerificationSchema = z.object({
   }
 })
 export type ExerciseVerification = z.infer<typeof exerciseVerificationSchema>
+
+export const courseExerciseAuthoringSchema = z.object({
+  key: stableCourseKeySchema,
+  blueprint: exerciseBlueprintSchema,
+  snapshot_token: sha256Schema,
+  expected_answer: boundedJsonAnswerSchema,
+  verification: exerciseVerificationSchema,
+  review_run_ids: z.array(recordId).max(100),
+}).strict()
+export type CourseExerciseAuthoring = z.infer<typeof courseExerciseAuthoringSchema>
+
+export const courseExerciseBuildStatusSchema = z.object({
+  run_id: recordId.nullable(),
+  command_id: recordId.nullable(),
+  status: z.enum([
+    'not_started', 'queued', 'running', 'succeeded', 'failed', 'cancelled',
+  ]),
+  error_message: z.string().nullable(),
+  exercise_count: z.number().int().nonnegative().max(500),
+  exercises: z.array(courseExerciseAuthoringSchema).max(500),
+}).strict().superRefine((value, context) => {
+  if (value.status === 'succeeded' && value.exercise_count !== value.exercises.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['exercise_count'],
+      message: 'Exercise count must match the current authoring bank',
+    })
+  }
+})
+export type CourseExerciseBuildStatus = z.infer<typeof courseExerciseBuildStatusSchema>
+
+export const courseExerciseVerificationRequestSchema = z.object({
+  snapshot_token: sha256Schema,
+  expected_answer_confirmation: boundedJsonAnswerSchema,
+  reason: z.string().trim().min(1).max(4000),
+}).strict()
+export type CourseExerciseVerificationRequest = z.input<
+  typeof courseExerciseVerificationRequestSchema
+>
 
 const draftTargetKeySchema = z.string().min(1).max(300)
 

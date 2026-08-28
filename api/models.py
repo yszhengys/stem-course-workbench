@@ -1389,6 +1389,24 @@ class CourseExerciseBankGenerateRequest(CourseAnchoredJobRequest):
     review_model: ModelSelection
 
 
+class CourseExerciseAuthoringResponse(BaseModel):
+    """Build-only exercise projection; grading oracles never use the Learn route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: StableKey
+    blueprint: ExerciseBlueprint
+    snapshot_token: Sha256
+    expected_answer: Any
+    verification: ExerciseVerificationResponse
+    review_run_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+
+    @field_validator("expected_answer")
+    @classmethod
+    def expected_answer_is_bounded_json(cls, value: Any) -> Any:
+        return _bounded_json_answer(value)
+
+
 class CourseExerciseBuildStatusResponse(BaseModel):
     run_id: str | None = None
     command_id: str | None = None
@@ -1402,6 +1420,9 @@ class CourseExerciseBuildStatusResponse(BaseModel):
     ]
     error_message: str | None = None
     exercise_count: int = Field(default=0, ge=0)
+    exercises: tuple[CourseExerciseAuthoringResponse, ...] = Field(
+        default_factory=tuple, max_length=500
+    )
 
 
 class CourseRetrievalRequest(StrictCourseRequest):

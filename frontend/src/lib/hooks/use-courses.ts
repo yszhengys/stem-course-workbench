@@ -9,6 +9,7 @@ import type {
   CourseExerciseGradeRequest,
   CourseExerciseHintRequest,
   CourseExerciseRevealRequest,
+  CourseExerciseVerificationRequest,
   CourseLearningEventRequest,
   CourseTransferGradeRequest,
   CourseTutorMessageRequest,
@@ -16,6 +17,7 @@ import type {
   CreateCourseRequest,
   CreateCourseAttemptRequest,
   GenerateChapterRequest,
+  GenerateExerciseBankRequest,
   GenerateOutlineRequest,
   ReviewChapterRequest,
 } from '@/lib/types/course'
@@ -375,6 +377,64 @@ export function useReviewCourseChapter(courseId: string, chapterKey: string) {
       courseApi.reviewChapter(courseId, chapterKey, request),
     onSuccess: feedback.success,
     onError: feedback.error,
+  })
+}
+
+export function useCourseExerciseBuildStatus(
+  courseId: string,
+  chapterKey: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: QUERY_KEYS.courseExerciseBuild(courseId, chapterKey),
+    queryFn: () => courseApi.getExerciseBuildStatus(courseId, chapterKey),
+    enabled: Boolean(courseId && chapterKey) && enabled,
+    retry: false,
+    staleTime: 0,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'queued' || status === 'running' ? 2000 : false
+    },
+    refetchOnWindowFocus: true,
+  })
+}
+
+export function useGenerateCourseExerciseBank(courseId: string, chapterKey: string) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: (request: GenerateExerciseBankRequest) =>
+      courseApi.generateExerciseBank(courseId, chapterKey, request),
+    onSuccess: async () => {
+      await client.invalidateQueries({
+        queryKey: QUERY_KEYS.courseExerciseBuild(courseId, chapterKey),
+      })
+      feedback.success()
+    },
+    onError: feedback.error,
+    retry: false,
+  })
+}
+
+export function useVerifyCourseExercise(courseId: string, chapterKey: string) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: ({
+      exerciseKey,
+      request,
+    }: {
+      exerciseKey: string
+      request: CourseExerciseVerificationRequest
+    }) => courseApi.verifyExercise(courseId, chapterKey, exerciseKey, request),
+    onSuccess: async () => {
+      await client.invalidateQueries({
+        queryKey: QUERY_KEYS.courseExerciseBuild(courseId, chapterKey),
+      })
+      feedback.success()
+    },
+    onError: feedback.error,
+    retry: false,
   })
 }
 

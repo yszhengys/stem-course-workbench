@@ -6,6 +6,7 @@ import { useParams } from 'next/navigation'
 import { ArrowLeft, Beaker, BookCheck, FileWarning, NotebookPen } from 'lucide-react'
 
 import { AppShell } from '@/components/layout/AppShell'
+import { ExerciseBankReview } from '@/components/course/authoring/ExerciseBankReview'
 import { StructuredDraftEditor } from '@/components/course/authoring/StructuredDraftEditor'
 import { ChapterPublicationGate } from '@/components/course/ChapterPublicationGate'
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
@@ -33,6 +34,7 @@ import {
   useCourse,
   useCourseAnchors,
   useCourseAttempts,
+  useCourseExerciseBuildStatus,
   useCourseFindings,
   useCourseLabs,
   useCourseModelOptions,
@@ -43,11 +45,13 @@ import {
   useCurrentCourseChapter,
   useCurrentCourseOutline,
   useGenerateCourseChapter,
+  useGenerateCourseExerciseBank,
   usePublishCourseChapter,
   useReattachCourseNote,
   useReviewCourseChapter,
   useUpdateCourseFinding,
   useUpdateCourseProgress,
+  useVerifyCourseExercise,
 } from '@/lib/hooks/use-courses'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import {
@@ -79,7 +83,14 @@ export default function CourseChapterPage() {
   const progress = useCourseProgress(courseId)
   const labs = useCourseLabs(courseId, chapterKey, Boolean(chapter.data?.artifact))
   const attempts = useCourseAttempts(courseId, chapterKey, Boolean(chapter.data?.artifact))
+  const exerciseBuild = useCourseExerciseBuildStatus(
+    courseId,
+    chapterKey,
+    Boolean(chapter.data?.artifact),
+  )
   const generateChapter = useGenerateCourseChapter(courseId, chapterKey)
+  const generateExerciseBank = useGenerateCourseExerciseBank(courseId, chapterKey)
+  const verifyExercise = useVerifyCourseExercise(courseId, chapterKey)
   const reviewChapter = useReviewCourseChapter(courseId, chapterKey)
   const updateFinding = useUpdateCourseFinding(courseId, chapterKey)
   const updateProgress = useUpdateCourseProgress(courseId)
@@ -91,9 +102,12 @@ export default function CourseChapterPage() {
   const [contentModel, setContentModel] = useState<ModelSelection | null>(null)
   const [reviewModel, setReviewModel] = useState<ModelSelection | null>(null)
   const [escalationModel, setEscalationModel] = useState<ModelSelection | null>(null)
+  const [exerciseGenerationModel, setExerciseGenerationModel] = useState<ModelSelection | null>(null)
+  const [exerciseReviewModel, setExerciseReviewModel] = useState<ModelSelection | null>(null)
   const [selectedAnchorIds, setSelectedAnchorIds] = useState<string[]>([])
   const [generationCommandId, setGenerationCommandId] = useState<string>()
   const [reviewCommandId, setReviewCommandId] = useState<string>()
+  const [exerciseCommandId, setExerciseCommandId] = useState<string>()
   const [noteContent, setNoteContent] = useState('')
   const [noteBlockKey, setNoteBlockKey] = useState('')
   const [reattachBlocks, setReattachBlocks] = useState<Record<string, string>>({})
@@ -108,6 +122,10 @@ export default function CourseChapterPage() {
   const reviewStatus = useCommandStatus(reviewCommandId, [
     QUERY_KEYS.course(courseId),
     QUERY_KEYS.courseChapter(courseId, chapterKey),
+    QUERY_KEYS.courseFindings(courseId, chapterKey),
+  ])
+  useCommandStatus(exerciseCommandId, [
+    QUERY_KEYS.courseExerciseBuild(courseId, chapterKey),
     QUERY_KEYS.courseFindings(courseId, chapterKey),
   ])
 
@@ -125,6 +143,26 @@ export default function CourseChapterPage() {
   const selectedEscalationModel = models.data && escalationModel
     ? selectableDefaultModel(models.data.options, escalationModel)
     : null
+  const selectedExerciseGenerationModel = models.data && exerciseGenerationModel
+    ? selectableDefaultModel(models.data.options, exerciseGenerationModel)
+    : null
+  const selectedExerciseReviewModel = models.data && exerciseReviewModel
+    ? selectableDefaultModel(models.data.options, exerciseReviewModel)
+    : null
+  const exerciseBankReady = useMemo(() => {
+    if (exerciseBuild.data?.status !== 'succeeded' || exerciseBuild.data.exercises.length === 0) {
+      return false
+    }
+    const cores = exerciseBuild.data.exercises.filter((exercise) => exercise.blueprint.is_core)
+    const gates = exerciseBuild.data.exercises.filter((exercise) => exercise.blueprint.is_gating)
+    if (cores.length !== 1 || gates.length !== 1 || cores[0].key !== gates[0].key) return false
+    const core = cores[0]
+    return core.blueprint.grader.kind !== 'advisory'
+      && core.blueprint.answer_type !== 'proof'
+      && core.blueprint.answer_type !== 'explanation'
+      && core.blueprint.transfer_task !== null
+      && (core.verification.level === 'L2' || core.verification.level === 'L3')
+  }, [exerciseBuild.data])
   const blockKeys = useMemo(() => artifact ? [
     ...artifact.sections.map((item) => item.key),
     ...artifact.formulas.map((item) => item.key),
@@ -140,6 +178,8 @@ export default function CourseChapterPage() {
       setContentModel(selectableDefaultModel(models.data.options, models.data.defaults.chapter_content))
       setReviewModel(selectableDefaultModel(models.data.options, models.data.defaults.review))
       setEscalationModel(selectableDefaultModel(models.data.options, models.data.defaults.escalation))
+      setExerciseGenerationModel(selectableDefaultModel(models.data.options, models.data.defaults.exercise_bank))
+      setExerciseReviewModel(selectableDefaultModel(models.data.options, models.data.defaults.exercise_bank_review))
       return
     }
     setContentModel((current) => current
@@ -151,6 +191,14 @@ export default function CourseChapterPage() {
       : null
     )
     setEscalationModel((current) => current
+      ? selectableDefaultModel(models.data.options, current)
+      : null
+    )
+    setExerciseGenerationModel((current) => current
+      ? selectableDefaultModel(models.data.options, current)
+      : null
+    )
+    setExerciseReviewModel((current) => current
       ? selectableDefaultModel(models.data.options, current)
       : null
     )
@@ -189,6 +237,20 @@ export default function CourseChapterPage() {
       force: false,
     })
     setReviewCommandId(job.command_id)
+  }
+
+  const generateExercises = async () => {
+    if (!selectedExerciseGenerationModel || !selectedExerciseReviewModel || selectedAnchorIds.length === 0) {
+      return
+    }
+    const job = await generateExerciseBank.mutateAsync({
+      anchor_ids: selectedAnchorIds,
+      prompt_version: 'v2',
+      model: selectedExerciseGenerationModel,
+      review_model: selectedExerciseReviewModel,
+      force: exerciseBuild.data?.status === 'succeeded',
+    })
+    setExerciseCommandId(job.command_id)
   }
 
   const saveNote = async () => {
@@ -327,6 +389,32 @@ export default function CourseChapterPage() {
             <>
               <StructuredDraftEditor courseId={courseId} chapterKey={chapterKey} />
 
+              <ExerciseBankReview
+                status={exerciseBuild.data}
+                anchors={anchors.data ?? []}
+                findings={findings.data ?? []}
+                options={models.data?.options ?? []}
+                generationModel={exerciseGenerationModel}
+                reviewModel={exerciseReviewModel}
+                onGenerationModelChange={setExerciseGenerationModel}
+                onReviewModelChange={setExerciseReviewModel}
+                canGenerate={Boolean(
+                  artifact
+                  && selectedAnchorIds.length
+                  && selectedExerciseGenerationModel
+                  && selectedExerciseReviewModel
+                  && !models.isError
+                  && !anchors.isError
+                )}
+                isGenerating={generateExerciseBank.isPending || exerciseBuild.isFetching}
+                isVerifying={verifyExercise.isPending}
+                onGenerate={() => void generateExercises()}
+                onVerify={async (exerciseKey, request) => {
+                  await verifyExercise.mutateAsync({ exerciseKey, request })
+                }}
+                onRetry={() => void exerciseBuild.refetch()}
+              />
+
               <Card>
                 <CardHeader><CardTitle>{t('course.chapterContent')}</CardTitle></CardHeader>
                 <CardContent className="space-y-8">
@@ -433,6 +521,7 @@ export default function CourseChapterPage() {
                     isError={findings.isError}
                     isUpdating={updateFinding.isPending}
                     isPublishing={publishChapter.isPending}
+                    additionalBlockedReason={exerciseBankReady ? null : t('course.exercisePublicationBlocked')}
                     onRetry={() => void findings.refetch()}
                     onUpdate={(findingId, status, resolution_reason) => updateFinding.mutate({ findingId, status, resolution_reason })}
                     onPublish={() => publishChapter.mutate()}

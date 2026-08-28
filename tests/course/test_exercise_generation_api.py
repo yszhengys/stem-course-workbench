@@ -5,6 +5,8 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from api.course_command_service import CourseCommandService, CourseJobSubmission
+from api.course_service import CourseService
+from api.course_v2_service import CourseV2Service
 from api.models import CourseExerciseBankGenerateRequest
 from open_notebook.course.contracts import CourseOutlineArtifact, ModelSelection
 from open_notebook.course.models import (
@@ -13,8 +15,11 @@ from open_notebook.course.models import (
     CourseGenerationRun,
     CourseVersion,
 )
+from open_notebook.course.v2_contracts import ExerciseVerification
+from open_notebook.course.v2_models import CourseExercise
 from open_notebook.course.workflow_service import CourseWorkflowService
 from open_notebook.exceptions import NotFoundError
+from tests.course.test_chapter_exercise_bank import _core
 
 
 @pytest.fixture
@@ -182,6 +187,65 @@ def test_exercise_build_status_route_returns_current_scoped_status(
     assert response.status_code == 200
     assert response.json()["status"] == "running"
     status.assert_awaited_once_with("course:one", "linear-equations")
+
+
+@pytest.mark.asyncio
+async def test_build_status_exposes_authoring_oracle_without_changing_learn_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _course, version, chapter = _scope()
+    blueprint = _core("anchor:one")
+    exercise = CourseExercise(
+        id="course_exercise:core",
+        course="course:one",
+        course_version="course_version:one",
+        chapter="chapter:one",
+        chapter_key="linear-equations",
+        exercise_key=blueprint.key,
+        blueprint=blueprint,
+        source_anchor_ids=blueprint.source_anchor_ids,
+        difficulty=blueprint.difficulty,
+        grader=blueprint.grader,
+        is_core=True,
+        is_gating=True,
+        verification=ExerciseVerification(
+            level="L1", method="independent_model_review"
+        ),
+        review_run_ids=("course_generation_run:review",),
+    )
+    monkeypatch.setattr(
+        CourseCommandService,
+        "exercise_build_status",
+        AsyncMock(
+            return_value={
+                "run_id": "course_generation_run:one",
+                "command_id": "command:one",
+                "status": "succeeded",
+                "error_message": None,
+                "exercise_count": 1,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        CourseService,
+        "list_current_authoring_exercises",
+        AsyncMock(return_value=(version, chapter, (exercise,))),
+        raising=False,
+    )
+
+    result = await CourseV2Service().exercise_build_status(
+        "course:one", "linear-equations"
+    )
+
+    assert result.status == "succeeded"
+    assert result.exercise_count == 1
+    assert result.exercises[0].blueprint.grader.kind == "numeric"
+    assert result.exercises[0].expected_answer == "4"
+    assert result.exercises[0].snapshot_token
+    assert result.exercises[0].verification.level == "L1"
+    assert result.exercises[0].review_run_ids == (
+        "course_generation_run:review",
+    )
 
 
 @pytest.mark.asyncio

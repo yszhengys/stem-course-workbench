@@ -473,12 +473,37 @@ class CourseService:
     ) -> tuple[CourseVersion, Chapter, CourseExercise]:
         """Resolve one exercise only inside the current unpublished authoring scope."""
 
+        version, chapter, records = (
+            await CourseService.list_current_authoring_exercises(
+                course_id, chapter_key, require_mutable=True
+            )
+        )
+        matches = [
+            exercise
+            for exercise in records
+            if exercise.exercise_key == exercise_key
+        ]
+        if not matches:
+            raise NotFoundError("Current Course exercise not found")
+        if len(matches) != 1:
+            raise CourseConflictError("Course exercise stable key is ambiguous")
+        return version, chapter, matches[0]
+
+    @staticmethod
+    async def list_current_authoring_exercises(
+        course_id: str,
+        chapter_key: str,
+        *,
+        require_mutable: bool = False,
+    ) -> tuple[CourseVersion, Chapter, tuple[CourseExercise, ...]]:
+        """Return the exact current Build exercise bank, including its grader."""
+
         _course, version, chapter = await _current_chapter_records(
             course_id, chapter_key
         )
-        if version.status == sm.VersionStatus.PUBLISHED:
+        if require_mutable and version.status == sm.VersionStatus.PUBLISHED:
             raise CourseImmutableError("Course version is immutable")
-        if chapter.status == sm.ChapterStatus.PUBLISHED:
+        if require_mutable and chapter.status == sm.ChapterStatus.PUBLISHED:
             raise CourseImmutableError("Course artifact is immutable")
         if version.id is None or chapter.id is None:
             raise CourseConflictError("Current Course exercise scope is not persisted")
@@ -486,13 +511,13 @@ class CourseService:
             """
             SELECT * FROM course_exercise
             WHERE course = $course AND course_version = $version
-              AND chapter_key = $chapter_key AND exercise_key = $exercise_key;
+              AND chapter_key = $chapter_key
+            ORDER BY exercise_key;
             """,
             {
                 "course": ensure_record_id(course_id),
                 "version": ensure_record_id(str(version.id)),
                 "chapter_key": chapter_key,
-                "exercise_key": exercise_key,
             },
         )
         try:
@@ -501,20 +526,19 @@ class CourseService:
             )
         except (TypeError, ValueError) as exc:
             raise CourseConflictError("Current Course exercise is invalid") from exc
-        if not records:
-            raise NotFoundError("Current Course exercise not found")
-        if len(records) != 1:
-            raise CourseConflictError("Course exercise stable key is ambiguous")
-        exercise = records[0]
-        if (
+        if any(
             exercise.course != course_id
             or exercise.course_version != str(version.id)
             or exercise.chapter != str(chapter.id)
             or exercise.chapter_key != chapter_key
-            or exercise.exercise_key != exercise_key
+            for exercise in records
         ):
             raise CourseConflictError("Current Course exercise scope changed")
-        return version, chapter, exercise
+        if len({exercise.exercise_key for exercise in records}) != len(records):
+            raise CourseConflictError("Course exercise stable key is ambiguous")
+        return version, chapter, tuple(
+            sorted(records, key=lambda exercise: exercise.exercise_key)
+        )
 
     @staticmethod
     async def set_exercise_verification(

@@ -84,4 +84,16 @@ describe('ChapterPublicationGate', () => {
     expect(screen.getByText('course.noFindings')).toBeVisible()
     expect(screen.getByRole('button', { name: 'course.publishChapter' })).toBeEnabled()
   })
+
+  it('honors an independent exercise-bank publication gate', () => {
+    render(
+      <ChapterPublicationGate
+        {...defaultProps}
+        additionalBlockedReason="course.exercisePublicationBlocked"
+      />
+    )
+
+    expect(screen.getByText('course.exercisePublicationBlocked')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'course.publishChapter' })).toBeDisabled()
+  })
 })

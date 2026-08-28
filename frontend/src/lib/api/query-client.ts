@@ -60,4 +60,6 @@ export const QUERY_KEYS = {
   ),
   courseReviewQueue: (id: string) => ['courses', id, 'learning', 'review-queue'] as const,
   courseExercises: (id: string, chapterKey?: string) => ['courses', id, 'exercises', chapterKey] as const,
+  courseExerciseBuild: (id: string, chapterKey: string) =>
+    ['courses', id, 'chapters', chapterKey, 'exercises', 'build'] as const,
 }
