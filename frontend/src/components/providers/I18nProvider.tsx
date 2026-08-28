@@ -1,10 +1,11 @@
 'use client'
 
 import React, { useEffect, useState } from 'react'
-import { useTranslation } from 'react-i18next'
-import '@/lib/i18n'
+import i18n from '@/lib/i18n'
 import { LanguageLoadingOverlay } from '@/components/common/LanguageLoadingOverlay'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
+
+const HYDRATION_LOADING_TEXT = 'Loading...'
 
 export function I18nProvider({
   children,
@@ -13,11 +14,22 @@ export function I18nProvider({
   children: React.ReactNode
   initialPathname?: string
 }) {
-  const { t } = useTranslation()
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
     setMounted(true)
+  }, [])
+
+  useEffect(() => {
+    const updateDocumentLanguage = (language: string) => {
+      document.documentElement.lang = language || 'en-US'
+    }
+
+    updateDocumentLanguage(i18n.resolvedLanguage ?? i18n.language)
+    i18n.on('languageChanged', updateDocumentLanguage)
+    return () => {
+      i18n.off('languageChanged', updateDocumentLanguage)
+    }
   }, [])
 
   // Avoid hydration mismatch while preserving a visible first paint.
@@ -30,7 +42,7 @@ export function I18nProvider({
         className="flex min-h-screen items-center justify-center gap-3 bg-background text-muted-foreground"
       >
         <LoadingSpinner />
-        <span>{t('common.loading')}</span>
+        <span>{HYDRATION_LOADING_TEXT}</span>
       </div>
     )
   }

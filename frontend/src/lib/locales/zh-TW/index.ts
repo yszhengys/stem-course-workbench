@@ -227,6 +227,8 @@ export const zhTW = {
     settings: "設定",
     advanced: "進階",
     nav: "導覽",
+    expandSidebar: "展開側邊欄",
+    collapseSidebar: "收合側邊欄",
     language: "切換語言",
     theme: "主題",
     ask: "提問",

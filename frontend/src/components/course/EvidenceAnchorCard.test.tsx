@@ -32,11 +32,13 @@ function anchor(kind: 'pdf_page' | 'pptx_slide'): EvidenceAnchor {
       block_key: '#/texts/0',
       quote: 'Grounded quote.',
       content_sha256: 'a'.repeat(64),
-      bbox: null,
+      bbox: kind === 'pptx_slide' ? [0.1, 0.2, 0.5, 0.6] : null,
     },
     quote_sha256: 'b'.repeat(64),
     source_role: 'PRIMARY',
     preview_path: kind === 'pptx_slide' ? 'private/cache/slide.svg' : null,
+    visual_preview_path: kind === 'pptx_slide' ? 'private/cache/slide.png' : null,
+    visual_preview_status: kind === 'pptx_slide' ? 'available' : 'text_only',
     is_current: true,
   }
 }
@@ -88,6 +90,12 @@ describe('EvidenceAnchorCard', () => {
       'src', 'blob:course-evidence'
     )
     expect(api.getEvidencePreviewBlob).toHaveBeenCalledWith('course:one', 'anchor:pptx_slide')
+    const overlay = screen.getByTestId('evidence-bbox-overlay')
+    const rectangle = overlay.querySelector('rect')
+    expect(rectangle).toHaveAttribute('x', '0.1')
+    expect(rectangle).toHaveAttribute('y', '0.2')
+    expect(rectangle).toHaveAttribute('width', '0.4')
+    expect(rectangle).toHaveAttribute('height', '0.39999999999999997')
     fireEvent.click(screen.getByRole('button', { name: 'course.downloadOriginal' }))
     await waitFor(() => expect(api.getEvidenceSourceBlob).toHaveBeenCalledWith(
       'course:one', 'anchor:pptx_slide'
@@ -121,5 +129,24 @@ describe('EvidenceAnchorCard', () => {
       />
     )
     expect(await screen.findByText('course.sourcePreviewFailed')).toBeInTheDocument()
+  })
+
+  it('labels the honest text-only fallback without exposing cache paths', async () => {
+    const fallback = anchor('pptx_slide')
+    fallback.visual_preview_status = 'text_only'
+    fallback.visual_preview_path = null
+
+    render(
+      <EvidenceAnchorCard
+        courseId="course:one"
+        anchor={fallback}
+        checked={false}
+        onCheckedChange={vi.fn()}
+      />
+    )
+
+    expect(await screen.findByRole('img')).toBeVisible()
+    expect(screen.getByText('course.textOnlyPreview')).toBeVisible()
+    expect(document.body.textContent).not.toContain(String(fallback.preview_path))
   })
 })

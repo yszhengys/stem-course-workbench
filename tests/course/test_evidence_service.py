@@ -3,6 +3,7 @@ import hashlib
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -178,6 +179,35 @@ def test_docling_provenance_produces_one_based_bbox_record():
     assert records == [
         (1, "#/texts/0", "The derivative is linear.", (0.1, 0.1, 0.5, 0.3))
     ]
+
+
+def test_pdf_docling_pins_rapidocr_onnxruntime(tmp_path: Path, monkeypatch):
+    import docling.document_converter
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import RapidOcrOptions
+
+    captured: dict[str, object] = {}
+
+    class FakeDocumentConverter:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def convert(self, _path: str):
+            document = SimpleNamespace(export_to_json=lambda: "{}")
+            return SimpleNamespace(document=document)
+
+    monkeypatch.setattr(
+        docling.document_converter, "DocumentConverter", FakeDocumentConverter
+    )
+    service = EvidenceService(data_root=tmp_path / "cache")
+
+    assert service._extract_docling_sync(tmp_path / "lesson.pdf", "pdf") == "{}"
+
+    format_options = captured["format_options"]
+    assert isinstance(format_options, dict)
+    pdf_options = format_options[InputFormat.PDF].pipeline_options
+    assert isinstance(pdf_options.ocr_options, RapidOcrOptions)
+    assert pdf_options.ocr_options.backend == "onnxruntime"
 
 
 def test_anchor_identity_is_deterministic_per_course_and_quote_is_normalized():

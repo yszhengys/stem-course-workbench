@@ -1,0 +1,43 @@
+name: 💡 Workbench Feature Request
+description: Propose an improvement to STEM Course Workbench
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for STEM Course Workbench product and learning-workflow proposals. For broad or early ideas, start in [Workbench Discussions](https://github.com/yszhengys/stem-course-workbench/discussions).
+
+  - type: textarea
+    id: learning-problem
+    attributes:
+      label: Problem or learning need
+      description: Describe the user or learning problem, not only the proposed interface.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-outcome
+    attributes:
+      label: Desired outcome
+      description: What should become safer, clearer, faster, or more effective?
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence-and-scope
+    attributes:
+      label: Evidence, alternatives, and scope
+      description: Include examples, alternatives considered, affected course stages, and compatibility concerns.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Product boundaries
+      options:
+        - label: This request is specific to STEM Course Workbench or is reproducible in this repository.
+          required: true
+        - label: I have not included private course materials, credentials, or local data.
+          required: true

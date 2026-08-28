@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from datetime import datetime, timezone
-from typing import Any, ClassVar, TypeVar
+from typing import Any, ClassVar, Literal, TypeVar
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, TypeAdapter, field_validator, model_validator
 from surrealdb import RecordID
 
 from open_notebook.database.repository import ensure_record_id, repo_query
@@ -13,14 +16,90 @@ from open_notebook.domain.base import ObjectModel
 from open_notebook.exceptions import NotFoundError, OpenNotebookError
 
 from . import state_machine as sm
-from .contracts import ModelSelection, SourceLocator
+from .contracts import LabSpecVariant, ModelSelection, SourceLocator
 
 T = TypeVar("T", bound="CourseRecord")
+_LAB_SPEC_ADAPTER: TypeAdapter[LabSpecVariant] = TypeAdapter(LabSpecVariant)
+
+
+def normalize_bibliographic_authors(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Bibliographic authors must be a list")
+    if len(value) > 20:
+        raise ValueError("Bibliographic authors exceed the limit")
+    authors: list[str] = []
+    identities: set[str] = set()
+    for raw_author in value:
+        if not isinstance(raw_author, str):
+            raise ValueError("Bibliographic authors must be text")
+        author = " ".join(raw_author.split())
+        if not author or len(author) > 200:
+            raise ValueError("Bibliographic author is invalid")
+        identity = author.casefold()
+        if identity in identities:
+            raise ValueError("Bibliographic authors must be unique")
+        identities.add(identity)
+        authors.append(author)
+    return tuple(authors)
+
+
+def normalize_bibliographic_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Bibliographic field must be text")
+    normalized = " ".join(value.split())
+    return normalized or None
+
+
+def normalize_doi(value: Any) -> str | None:
+    normalized = normalize_bibliographic_text(value)
+    if normalized is None:
+        return None
+    identifier = re.sub(
+        r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    ).lower()
+    if (
+        len(identifier) > 255
+        or re.fullmatch(r"10\.\d{4,9}/[^\s\x00-\x1f]+", identifier) is None
+    ):
+        raise ValueError("DOI is invalid")
+    return identifier
+
+
+def normalize_isbn(value: Any) -> str | None:
+    normalized = normalize_bibliographic_text(value)
+    if normalized is None:
+        return None
+    identifier = re.sub(
+        r"^isbn(?:-1[03])?:?\s*", "", normalized, flags=re.IGNORECASE
+    )
+    identifier = re.sub(r"[\s-]", "", identifier).upper()
+    valid = False
+    if re.fullmatch(r"\d{9}[\dX]", identifier):
+        digits = [int(character) for character in identifier[:9]]
+        digits.append(10 if identifier[-1] == "X" else int(identifier[-1]))
+        valid = sum((10 - index) * digit for index, digit in enumerate(digits)) % 11 == 0
+    elif re.fullmatch(r"\d{13}", identifier):
+        valid = sum(
+            int(character) * (1 if index % 2 == 0 else 3)
+            for index, character in enumerate(identifier)
+        ) % 10 == 0
+    if not valid:
+        raise ValueError("ISBN checksum is invalid")
+    return identifier
 
 DEFAULT_MODEL_POLICY: dict[str, ModelSelection] = {
     "outline": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
     "chapter_content": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
     "practice_labs": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
+    "exercise_bank": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
+    "exercise_bank_review": ModelSelection(adapter="codex_cli", model="gpt-5.6-luna", reasoning_effort="max"),
     "review": ModelSelection(adapter="codex_cli", model="gpt-5.6-luna", reasoning_effort="max"),
     "escalation": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
 }
@@ -47,6 +126,28 @@ def _record_arrays(data: dict[str, Any], *fields: str) -> dict[str, Any]:
 def _rows(model: type[T], result: Any) -> list[T]:
     rows = result if isinstance(result, list) else [result] if result else []
     return [model(**row) for row in rows if isinstance(row, dict)]
+
+
+def canonical_lab_proposal_payload(payload: object) -> dict[str, Any]:
+    """Validate and normalize the complete declarative Lab proposal."""
+
+    spec = _LAB_SPEC_ADAPTER.validate_python(payload)
+    return spec.model_dump(mode="json", by_alias=True)
+
+
+def canonical_lab_proposal_hash(payload: object) -> str:
+    """Bind approval to every normalized visual and pedagogical Lab field."""
+
+    canonical = canonical_lab_proposal_payload(payload)
+    return hashlib.sha256(
+        json.dumps(
+            canonical,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 class CourseRecord(ObjectModel):
@@ -142,7 +243,8 @@ class Course(CourseRecord):
 class CourseVersion(CourseRecord):
     table_name: ClassVar[str] = "course_version"
     nullable_fields: ClassVar[set[str]] = {
-        "outline_hash", "published_at", "outline_artifact", "input_hash", "approved_at", "confirmation"
+        "outline_hash", "published_at", "outline_artifact", "input_hash", "approved_at", "confirmation",
+        "upgrade_source_version", "upgrade_idempotency_key", "upgrade_confirmation",
     }
 
     course: str
@@ -154,14 +256,19 @@ class CourseVersion(CourseRecord):
     input_hash: str | None = None
     approved_at: datetime | None = None
     confirmation: str | None = None
+    upgrade_source_version: str | None = None
+    upgrade_idempotency_key: str | None = None
+    upgrade_confirmation: str | None = None
 
-    @field_validator("course", mode="before")
+    @field_validator("course", "upgrade_source_version", mode="before")
     @classmethod
     def record_as_string(cls, value: Any) -> Any:
         return _string_id(value)
 
     def _prepare_save_data(self) -> dict[str, Any]:
-        return _record_fields(super()._prepare_save_data(), "course")
+        return _record_fields(
+            super()._prepare_save_data(), "course", "upgrade_source_version"
+        )
 
     async def transition_to(self, target: str) -> None:
         self.status = sm.transition("version", self.status, target)
@@ -267,9 +374,73 @@ class Evidence(CourseRecord):
         return _rows(Evidence, result)
 
 
+class BibliographicSource(CourseRecord):
+    """Course-owned metadata for one currently associated upstream Source."""
+
+    table_name: ClassVar[str] = "course_bibliographic_source"
+    nullable_fields: ClassVar[set[str]] = {
+        "title",
+        "edition",
+        "publisher",
+        "year",
+        "doi",
+        "isbn",
+        "license",
+    }
+
+    course: str
+    source: str
+    source_role: Literal["PRIMARY", "SUPPLEMENT"]
+    authors: tuple[str, ...] = Field(default_factory=tuple, max_length=20)
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    edition: str | None = Field(default=None, min_length=1, max_length=100)
+    publisher: str | None = Field(default=None, min_length=1, max_length=300)
+    year: int | None = Field(default=None, ge=1000, le=2100)
+    doi: str | None = Field(default=None, min_length=7, max_length=255)
+    isbn: str | None = Field(default=None, min_length=10, max_length=13)
+    license: str | None = Field(default=None, min_length=1, max_length=200)
+    manually_reviewed: bool = False
+
+    @field_validator("course", "source", mode="before")
+    @classmethod
+    def record_as_string(cls, value: Any) -> Any:
+        return _string_id(value)
+
+    @field_validator("authors", mode="before")
+    @classmethod
+    def authors_are_bounded(cls, value: Any) -> tuple[str, ...]:
+        return normalize_bibliographic_authors(value)
+
+    @field_validator("title", "edition", "publisher", "license", mode="before")
+    @classmethod
+    def text_is_normalized(cls, value: Any) -> str | None:
+        return normalize_bibliographic_text(value)
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def doi_is_normalized(cls, value: Any) -> str | None:
+        return normalize_doi(value)
+
+    @field_validator("isbn", mode="before")
+    @classmethod
+    def isbn_is_normalized(cls, value: Any) -> str | None:
+        return normalize_isbn(value)
+
+    def _prepare_save_data(self) -> dict[str, Any]:
+        return _record_fields(super()._prepare_save_data(), "course", "source")
+
+
 class Lab(CourseRecord):
     table_name: ClassVar[str] = "lab"
-    nullable_fields: ClassVar[set[str]] = {"chapter", "prompt", "answer"}
+    nullable_fields: ClassVar[set[str]] = {
+        "chapter",
+        "prompt",
+        "answer",
+        "proposal_hash",
+        "approved_hash",
+        "approved_at",
+        "approval_reason",
+    }
 
     course_version: str
     chapter: str | None = None
@@ -277,11 +448,44 @@ class Lab(CourseRecord):
     prompt: str | None = None
     payload: dict[str, Any]
     answer: dict[str, Any] | None = None
+    proposal_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    approved_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    approved_at: datetime | None = None
+    approval_reason: str | None = Field(default=None, max_length=4000)
 
     @field_validator("course_version", "chapter", mode="before")
     @classmethod
     def record_as_string(cls, value: Any) -> Any:
         return _string_id(value)
+
+    @field_validator("approved_at")
+    @classmethod
+    def approval_time_is_utc(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        offset = value.utcoffset()
+        if offset is None or offset.total_seconds() != 0:
+            raise ValueError("Lab approval time must be UTC")
+        return value
+
+    @field_validator("approval_reason")
+    @classmethod
+    def approval_reason_is_nonblank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        clean = value.strip()
+        if not clean:
+            raise ValueError("Lab approval reason must not be blank")
+        return clean
+
+    @model_validator(mode="after")
+    def approval_audit_is_complete(self) -> "Lab":
+        audit = (self.approved_at, self.approval_reason)
+        if self.approved_hash is None and any(value is not None for value in audit):
+            raise ValueError("Lab approval hash is required for approval audit data")
+        if self.approved_hash is not None and any(value is None for value in audit):
+            raise ValueError("Lab approval audit data is incomplete")
+        return self
 
     def _prepare_save_data(self) -> dict[str, Any]:
         return _record_fields(super()._prepare_save_data(), "course_version", "chapter")
@@ -392,7 +596,11 @@ class CourseNote(CourseRecord):
 
 class CourseEvidenceAnchor(CourseRecord):
     table_name: ClassVar[str] = "course_evidence_anchor"
-    nullable_fields: ClassVar[set[str]] = {"evidence", "preview_path"}
+    nullable_fields: ClassVar[set[str]] = {
+        "evidence",
+        "preview_path",
+        "visual_preview_path",
+    }
 
     course: str
     source: str
@@ -402,7 +610,17 @@ class CourseEvidenceAnchor(CourseRecord):
     quote_sha256: str
     source_role: str = "PRIMARY"
     preview_path: str | None = None
+    visual_preview_path: str | None = None
+    visual_preview_status: Literal["available", "text_only"] = "text_only"
     is_current: bool = True
+
+    @model_validator(mode="after")
+    def validate_visual_preview_identity(self) -> "CourseEvidenceAnchor":
+        if self.visual_preview_status == "available" and not self.visual_preview_path:
+            raise ValueError("Available visual evidence requires a preview path")
+        if self.visual_preview_status == "text_only" and self.visual_preview_path:
+            raise ValueError("Text-only evidence must not reference a visual preview")
+        return self
 
     @field_validator("course", "source", "evidence", mode="before")
     @classmethod

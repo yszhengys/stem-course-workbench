@@ -14,7 +14,9 @@ LOG_DIR="$RUNTIME_DIR/logs"
 LOCK_DIR="$RUNTIME_DIR/launcher.lock"
 LOCK_OWNER_FILE="$LOCK_DIR/pid"
 ENV_FILE="$REPO_ROOT/.env"
-UV_BIN="$REPO_ROOT/.tools/bin/uv"
+REPOSITORY_UV_BIN="$REPO_ROOT/.tools/bin/uv"
+UV_BOOTSTRAP_SCRIPT="$REPO_ROOT/scripts/bootstrap-course-uv.sh"
+UV_BIN="$REPOSITORY_UV_BIN"
 PYTHON_BIN="$REPO_ROOT/.venv/bin/python"
 COURSE_URL="http://127.0.0.1:3000/courses/new"
 READY_TIMEOUT=${COURSE_WORKBENCH_READY_TIMEOUT:-180}
@@ -162,9 +164,36 @@ require_command() {
     fi
 }
 
+resolve_uv() {
+    if [ -x "$REPOSITORY_UV_BIN" ] && "$REPOSITORY_UV_BIN" --version >/dev/null 2>&1; then
+        UV_BIN="$REPOSITORY_UV_BIN"
+        return 0
+    fi
+
+    candidate=$(command -v uv 2>/dev/null || true)
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" --version >/dev/null 2>&1; then
+        UV_BIN="$candidate"
+        return 0
+    fi
+
+    if [ ! -x "$UV_BOOTSTRAP_SCRIPT" ]; then
+        error "uv bootstrap script is missing or not executable: $UV_BOOTSTRAP_SCRIPT"
+        return 1
+    fi
+    say "uv was not found; installing the verified repository-pinned version."
+    if ! "$UV_BOOTSTRAP_SCRIPT" "$(dirname "$REPOSITORY_UV_BIN")"; then
+        return 1
+    fi
+    if [ ! -x "$REPOSITORY_UV_BIN" ] || ! "$REPOSITORY_UV_BIN" --version >/dev/null 2>&1; then
+        error "The uv bootstrap completed without a usable executable at $REPOSITORY_UV_BIN."
+        return 1
+    fi
+    UV_BIN="$REPOSITORY_UV_BIN"
+}
+
 check_tools() {
-    if [ ! -x "$UV_BIN" ]; then
-        error "Repository-local uv is missing at $UV_BIN. Install uv there before starting."
+    if ! resolve_uv; then
+        error "uv is missing or unusable, and the verified bootstrap could not install it."
         return 1
     fi
     require_command docker "Docker Desktop is required. Install and start Docker Desktop." || return 1
@@ -498,10 +527,20 @@ wait_for_process_group_exit() {
     owned_pgid=$1
     attempt_limit=$2
     attempts=0
-    while process_group_has_members "$owned_pgid" && [ "$attempts" -lt "$attempt_limit" ]; do
+    while [ "$attempts" -lt "$attempt_limit" ]; do
+        # A just-exited direct child can remain as a zombie until this launcher
+        # reaps it. `kill -0 -PGID` still sees that zombie and would otherwise
+        # consume the full shutdown timeout even though no process is running.
+        if ! process_alive "$owned_pgid"; then
+            wait "$owned_pgid" 2>/dev/null || true
+        fi
+        process_group_has_members "$owned_pgid" || return 0
         attempts=$((attempts + 1))
         sleep "$STOP_POLL_INTERVAL"
     done
+    if ! process_alive "$owned_pgid"; then
+        wait "$owned_pgid" 2>/dev/null || true
+    fi
     ! process_group_has_members "$owned_pgid"
 }
 
@@ -536,6 +575,9 @@ terminate_owned_child() {
             attempts=$((attempts + 1))
             sleep "$STOP_POLL_INTERVAL"
         done
+    fi
+    if ! process_alive "$owned_pid"; then
+        wait "$owned_pid" 2>/dev/null || true
     fi
     ! process_alive "$owned_pid"
 }
@@ -658,6 +700,56 @@ port_pids() {
     lsof -t -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null || true
 }
 
+docker_desktop_proxy_owner() {
+    owner_pid=$1
+    owner_command=$(process_command "$owner_pid")
+    case "$owner_command" in
+        *"/Applications/Docker.app/Contents/MacOS/com.docker.backend services"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+docker_port_publishers() {
+    docker ps --no-trunc --quiet --filter "publish=$1" 2>/dev/null
+}
+
+database_port_owned_by_compose() {
+    port=$1
+    [ -n "$CONTAINER_ID" ] || {
+        CONTAINER_REASON="No verified SurrealDB container is available for port $port"
+        return 1
+    }
+
+    published_ids=$(docker_port_publishers "$port")
+    publisher_status=$?
+    if [ "$publisher_status" -ne 0 ]; then
+        CONTAINER_REASON="Could not inspect Docker publishers for port $port"
+        return 1
+    fi
+    if [ -z "$published_ids" ]; then
+        CONTAINER_REASON="This checkout's SurrealDB container is not publishing host port $port"
+        return 1
+    fi
+
+    found_current=0
+    for published_id in $published_ids; do
+        if [ "$published_id" = "$CONTAINER_ID" ]; then
+            found_current=1
+            continue
+        fi
+        published_root=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$published_id" 2>/dev/null || true)
+        CONTAINER_REASON="Port $port is published by another Docker container $published_id (checkout: ${published_root:-unknown})"
+        return 1
+    done
+    if [ "$found_current" -ne 1 ]; then
+        CONTAINER_REASON="This checkout's SurrealDB container does not own host port $port"
+        return 1
+    fi
+    return 0
+}
+
 pid_belongs_to_service() {
     owner_pid=$1
     service=$2
@@ -702,10 +794,61 @@ compose_container_state() {
     return 0
 }
 
+repair_database_port_publish() {
+    active_publishers=$(docker_port_publishers 8000)
+    publisher_status=$?
+    if [ "$publisher_status" -ne 0 ]; then
+        CONTAINER_REASON="Could not inspect Docker publishers for port 8000"
+        return 1
+    fi
+    # Never recreate while any container claims the port. In particular, this
+    # preserves a foreign checkout even when Docker Desktop's proxy obscures
+    # the host-side listener identity.
+    [ -z "$active_publishers" ] || return 1
+
+    db_owners=$(port_pids 8000)
+    for db_owner in $db_owners; do
+        if docker_desktop_proxy_owner "$db_owner"; then
+            continue
+        fi
+        CONTAINER_REASON="Port 8000 is held by another process or checkout: $(owner_diagnostic "$db_owner")"
+        return 1
+    done
+
+    say "Repairing this checkout's missing SurrealDB port publish..."
+    if ! docker compose -f "$REPO_ROOT/docker-compose.yml" \
+        --project-directory "$REPO_ROOT" up -d --force-recreate surrealdb; then
+        CONTAINER_REASON="Could not recreate this checkout's SurrealDB container"
+        return 1
+    fi
+    STARTED_DB=1
+
+    compose_container_state
+    repaired_state=$?
+    if [ "$repaired_state" -ne 0 ]; then
+        CONTAINER_REASON="Recreated SurrealDB but its Compose ownership could not be verified: $CONTAINER_REASON"
+        return 1
+    fi
+    STARTED_DB_CONTAINER_ID=$CONTAINER_ID
+    if ! database_port_owned_by_compose 8000; then
+        CONTAINER_REASON="Recreated SurrealDB but host port ownership is invalid: $CONTAINER_REASON"
+        return 1
+    fi
+    return 0
+}
+
 start_database() {
     compose_container_state
     container_state=$?
     if [ "$container_state" -eq 0 ]; then
+        if ! database_port_owned_by_compose 8000; then
+            if repair_database_port_publish; then
+                return 0
+            fi
+            error "$CONTAINER_REASON"
+            error "Stop the other SurrealDB instance with its own checkout before retrying."
+            return 1
+        fi
         say "Reusing this checkout's SurrealDB container."
         return 0
     fi
@@ -715,10 +858,28 @@ start_database() {
     fi
     db_owners=$(port_pids 8000)
     if [ -n "$db_owners" ]; then
-        first_owner=$(printf '%s\n' "$db_owners" | head -n 1)
-        error "Port 8000 is held by another process or checkout: $(owner_diagnostic "$first_owner")."
-        error "Stop that SurrealDB instance with its own checkout before retrying."
-        return 1
+        for db_owner in $db_owners; do
+            # Docker Desktop keeps its port-forward process listening while a
+            # Compose-owned container is stopped. A verified stopped container
+            # from this checkout can be safely resumed through that proxy.
+            if [ -n "$CONTAINER_ID" ] && docker_desktop_proxy_owner "$db_owner"; then
+                active_publishers=$(docker_port_publishers 8000)
+                publisher_status=$?
+                if [ "$publisher_status" -eq 0 ] && [ -z "$active_publishers" ]; then
+                    continue
+                fi
+                if [ "$publisher_status" -ne 0 ]; then
+                    error "Could not inspect Docker publishers for port 8000."
+                else
+                    error "Port 8000 is published by another Docker container: $active_publishers"
+                fi
+                error "Stop that SurrealDB instance with its own checkout before retrying."
+                return 1
+            fi
+            error "Port 8000 is held by another process or checkout: $(owner_diagnostic "$db_owner")."
+            error "Stop that SurrealDB instance with its own checkout before retrying."
+            return 1
+        done
     fi
     say "Starting SurrealDB (Docker only)..."
     if ! docker compose -f "$REPO_ROOT/docker-compose.yml" \
@@ -731,6 +892,10 @@ start_database() {
     container_state=$?
     if [ "$container_state" -ne 0 ]; then
         error "Started SurrealDB but its Compose ownership could not be verified: $CONTAINER_REASON"
+        return 1
+    fi
+    if ! database_port_owned_by_compose 8000; then
+        error "Started SurrealDB but host port ownership is invalid: $CONTAINER_REASON"
         return 1
     fi
     STARTED_DB_CONTAINER_ID=$CONTAINER_ID
@@ -993,6 +1158,7 @@ http_200_to_file() {
 
 surreal_ready() {
     compose_container_state && \
+        database_port_owned_by_compose 8000 && \
         http_200_to_file http://127.0.0.1:8000/health /dev/null
 }
 
@@ -1067,6 +1233,7 @@ final_ownership_snapshot() {
     # This runs after every HTTP/body probe. It closes the race where a service
     # exits (or a port changes owners) during the last successful request.
     compose_container_state && \
+        database_port_owned_by_compose 8000 && \
         service_owns_listening_port api 5055 && \
         validate_process worker && \
         service_owns_listening_port frontend 3000
@@ -1273,6 +1440,10 @@ database_status() {
     compose_container_state
     state=$?
     if [ "$state" -eq 0 ]; then
+        if ! database_port_owned_by_compose 8000; then
+            say "SurrealDB: foreign/misbound ($CONTAINER_REASON)"
+            return 1
+        fi
         say "SurrealDB: running (verified Compose checkout: $REPO_ROOT)"
         return 0
     fi

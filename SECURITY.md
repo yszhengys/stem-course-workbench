@@ -1,65 +1,36 @@
 # Security Policy
 
-## Supported Versions
+## Reporting a vulnerability
 
-Open Notebook is an actively developed project. Security fixes are applied to the
-**latest released version** only; there are no long-term support branches.
+Do not report a suspected vulnerability through a public Issue, Discussion, or pull request. Use the current repository's private form instead:
 
-| Version | Supported          |
-| ------- | ------------------ |
-| Latest release (`1.x`, current minor) | :white_check_mark: |
-| Older releases | :x: |
+[Privately report a STEM Course Workbench vulnerability](https://github.com/yszhengys/stem-course-workbench/security/advisories/new)
 
-If you are running an older version, please upgrade to the latest release before
-reporting an issue — the problem may already be fixed.
+Include the affected Workbench version, operating system, startup method, component, impact, and the smallest safe reproduction you can provide. Remove course materials, API keys, passwords, local paths, and other private data before attaching logs or examples.
 
-## Reporting a Vulnerability
+This repository is independently maintained. Reports are not forwarded to Open Notebook automatically. If investigation shows that an issue also affects an unmodified upstream release, the maintainers will coordinate an upstream report without publicly disclosing the vulnerability.
 
-**Please do not report security vulnerabilities through public GitHub issues,
-discussions, or pull requests.**
+## Supported scope
 
-Instead, report them privately through GitHub's built-in **private vulnerability
-reporting**:
+STEM Course Workbench `2.0.0-dev` is a development build for a **single-user**, **local-first** Apple Silicon Mac setup. Docker runs SurrealDB locally; the API, worker, and frontend run on the host. There is currently no long-term-support branch or guaranteed response SLA.
 
-1. Go to the [Security tab](https://github.com/lfnovo/open-notebook/security) of
-   the repository.
-2. Click **"Report a vulnerability"**.
-3. Fill out the form with as much detail as you can.
+Security reports are in scope when they concern this repository's code or documented defaults, including:
 
-This keeps the report private between you and the maintainers until a fix is
-available.
+- unauthorized access to local course data, credentials, evidence, or exports;
+- path traversal, unsafe archive handling, command execution, or sandbox escape;
+- cross-course or cross-notebook data leakage;
+- unsafe handling of model, Docling, PDF/PPTX, LabSpec, or import data;
+- a documented default that exposes a local service unexpectedly.
 
-When reporting, please include where relevant:
+The following are deployment risks rather than supported production configurations:
 
-- A description of the vulnerability and its impact.
-- Steps to reproduce (a proof of concept, affected endpoint/component, or sample
-  configuration).
-- The Open Notebook version and how you are running it (Docker Compose,
-  single-container, from source).
-- Any suggested remediation, if you have one.
+- exposing SurrealDB, FastAPI, or the frontend directly to an untrusted network;
+- treating the built-in password middleware as multi-user authentication;
+- using default database credentials outside the local host;
+- committing `.env`, course source files, model caches, databases, or runtime logs.
 
-## What to Expect
+See [the local user guide](docs/0-START-HERE/course-workbench-user-guide.zh-CN.md) and [Open Notebook hardening guidance](docs/5-CONFIGURATION/security.md) before changing the local-only topology.
 
-- **Acknowledgement:** we aim to acknowledge a report within **5 business days**.
-- **Assessment:** we will investigate, confirm the issue, and determine the
-  affected versions.
-- **Fix & disclosure:** once a fix is ready we will release it and, with your
-  consent, credit you in the release notes. We follow a coordinated-disclosure
-  approach and ask that you keep the report private until a fix is published.
+## Versions
 
-## Scope
-
-Open Notebook is **self-hosted**: you run the API, frontend, and SurrealDB
-yourself, and you control the AI provider credentials. Please keep in mind:
-
-- The built-in password middleware (`OPEN_NOTEBOOK_PASSWORD`) is a basic access
-  control, not a full authentication system. See
-  [docs/5-CONFIGURATION/security.md](docs/5-CONFIGURATION/security.md) for
-  hardening guidance (encryption key, reverse proxy, CORS, default credentials).
-- Misconfiguration of your own deployment (e.g. exposing SurrealDB with default
-  credentials, or running without `OPEN_NOTEBOOK_ENCRYPTION_KEY`) is a
-  deployment concern covered by that hardening guide rather than a vulnerability
-  in the project — though we welcome reports where the defaults or docs actively
-  steer users toward an insecure setup.
-
-Thank you for helping keep Open Notebook and its users safe.
+The Workbench product version is maintained separately from the compatible upstream Python package version. The authoritative values are in [`workbench.toml`](workbench.toml). Security advisories will state the affected Workbench versions explicitly.

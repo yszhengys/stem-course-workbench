@@ -227,6 +227,8 @@ export const plPL = {
     settings: "Ustawienia",
     advanced: "Zaawansowane",
     nav: "Nawigacja",
+    expandSidebar: "Rozwiń pasek boczny",
+    collapseSidebar: "Zwiń pasek boczny",
     language: "Przełącz język",
     theme: "Motyw",
     ask: "Pytaj",

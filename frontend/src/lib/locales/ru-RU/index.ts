@@ -227,6 +227,8 @@ export const ruRU = {
     settings: "Настройки",
     advanced: "Дополнительно",
     nav: "Навигация",
+    expandSidebar: "Развернуть боковую панель",
+    collapseSidebar: "Свернуть боковую панель",
     language: "Переключить язык",
     theme: "Тема",
     ask: "Запрос",

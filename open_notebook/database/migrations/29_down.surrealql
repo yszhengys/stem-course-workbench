@@ -1,0 +1,8 @@
+-- Roll back only migration 29 approval metadata; Lab payloads remain intact.
+
+UPDATE lab UNSET proposal_hash, approved_hash, approved_at, approval_reason;
+
+REMOVE FIELD IF EXISTS proposal_hash ON TABLE lab;
+REMOVE FIELD IF EXISTS approved_hash ON TABLE lab;
+REMOVE FIELD IF EXISTS approved_at ON TABLE lab;
+REMOVE FIELD IF EXISTS approval_reason ON TABLE lab;

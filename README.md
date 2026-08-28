@@ -1,68 +1,51 @@
-<a id="readme-top"></a>
+# STEM Course Workbench
 
-<!-- [![Contributors][contributors-shield]][contributors-url] -->
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
-[![MIT License][license-shield]][license-url]
-<!-- [![LinkedIn][linkedin-shield]][linkedin-url] -->
+> 产品版本：`2.0.0-dev`（development） · 上游基线：Open Notebook `1.14.0`
 
+STEM Course Workbench 是一个单用户、local-first、证据可追溯的数学/物理教材制作与学习工作台。Build 模式负责 PDF/PPTX 取证、大纲审批、章节生成、审查和发布；Learn 模式负责教材阅读、确定性评分练习、掌握度、间隔复习、笔记、安全实验和带引用的章节导师。
 
-<!-- PROJECT LOGO -->
-<br />
-<div align="center">
-  <a href="https://github.com/lfnovo/open-notebook">
-    <img src="docs/assets/hero.svg" alt="Logo">
-  </a>
+本项目的公开源代码仓库是 [yszhengys/stem-course-workbench](https://github.com/yszhengys/stem-course-workbench)。课程原文、证据缓存、数据库、模型缓存、运行日志和 `.env` 只保留在本机，不进入 Git。
 
-  <h3 align="center">Open Notebook</h3>
+## 一键启动（Apple Silicon Mac）
 
-  <p align="center">
-    An open source, privacy-focused alternative to Google's Notebook LM!
-    <br /><strong>Join our <a href="https://discord.gg/37XJPXfz2w">Discord server</a> for help, to share workflow ideas, and suggest features!</strong>
-    <br />
-    <a href="https://www.open-notebook.ai"><strong>Checkout our website »</strong></a>
-    <br />
-    Follow <a href="https://x.com/lfnovo">@lfnovo on X</a> for updates
-    <br />
-    <br />
-    <a href="docs/0-START-HERE/index.md">📚 Get Started</a>
-    ·
-    <a href="docs/3-USER-GUIDE/index.md">📖 User Guide</a>
-    ·
-    <a href="docs/2-CORE-CONCEPTS/index.md">✨ Features</a>
-    ·
-    <a href="docs/1-INSTALLATION/index.md">🚀 Deploy</a>
-  </p>
-</div>
-
-<p align="center">
-<a href="https://trendshift.io/repositories/14536" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14536" alt="lfnovo%2Fopen-notebook | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</p>
-
-<div align="center">
-  <!-- Keep these links. Translations will automatically update with the README. -->
-  <a href="https://zdoc.app/de/lfnovo/open-notebook">Deutsch</a> | 
-  <a href="https://zdoc.app/es/lfnovo/open-notebook">Español</a> | 
-  <a href="https://zdoc.app/fr/lfnovo/open-notebook">français</a> | 
-  <a href="https://zdoc.app/ja/lfnovo/open-notebook">日本語</a> | 
-  <a href="https://zdoc.app/ko/lfnovo/open-notebook">한국어</a> | 
-  <a href="https://zdoc.app/pt/lfnovo/open-notebook">Português</a> | 
-  <a href="https://zdoc.app/ru/lfnovo/open-notebook">Русский</a> | 
-  <a href="https://zdoc.app/zh/lfnovo/open-notebook">中文</a>
-</div>
-
-## STEM Course Workbench（本分支）
-
-本仓库在 Open Notebook 之上增加了本地优先、证据可追溯的数学/物理课程工作流。Apple Silicon Mac 上可用一条命令启动，并直接进入新建课程页面：
+先启动 Docker Desktop，然后在仓库目录运行：
 
 ```bash
 ./scripts/course-workbench.sh
 ```
 
-开始使用：[STEM Course Workbench 中文使用说明](docs/0-START-HERE/course-workbench-user-guide.zh-CN.md) · [架构与维护说明](docs/course-workbench.md) · [上游 Open Notebook 文档](docs/index.md)
+启动器会优先复用仓库或系统已有的 `uv`；若两者都不存在，会下载固定版本的官方 macOS ARM64 资产并验证 SHA256 后安装，不执行远程 shell。服务就绪后会打开 `http://127.0.0.1:3000/courses/new`。
 
-> **公开仓库与本地数据：** 本仓库公开的是源代码、文档和明确可再分发的合成测试材料，不包含本机课程原文、证据缓存、数据库、模型缓存或 `.env`。当前 Course Workbench 是单用户、本地优先的开发配置；不要把 SurrealDB、API 或前端直接暴露到公网。
+- [STEM Course Workbench V2 中文使用说明](docs/0-START-HERE/course-workbench-user-guide.zh-CN.md)
+- [架构与维护说明](docs/course-workbench.md)
+- [报告漏洞](SECURITY.md)
+- [提交问题或功能建议](https://github.com/yszhengys/stem-course-workbench/issues/new/choose)
+
+> **当前边界：** 这是面向本机使用的开发版本，不提供多用户权限、云部署或协作编辑，也不应把 SurrealDB、API 或前端直接暴露到公网。模型输出不能替代教师或独立学术核验。
+
+### 发布前的干净克隆预检
+
+GitHub Actions 会在 `macos-14` Apple Silicon runner 上，从不存在 `.tools/` 和 `.venv/` 的 checkout 验证固定 `uv` 引导、`uv sync --locked --no-dev` 与 `npm ci --ignore-scripts`。维护者也可在一次性的全新 clone 中运行：
+
+```bash
+./scripts/verify-clean-clone.sh "$PWD"
+```
+
+该预检会拒绝已有 `.tools/` 或 `.venv/` 的日常开发目录，且不会读取 `.env`、启动服务或调用模型。
+
+### 发布质量门与证据边界
+
+Pull Request 会分别执行后端/前端覆盖率下限、仓库自有 CC0 PDF/PPTX 金样本的真实 Docling 提取、临时 RocksDB 上下迁移与回滚，以及真实 Course 页面上的 Chromium 键盘/axe 检查。详见[架构与维护说明](docs/course-workbench.md)和[人工无障碍发布清单](docs/7-DEVELOPMENT/course-accessibility-checklist.md)。
+
+这些门的含义彼此独立：覆盖率只防止未执行代码比例回退；金样本只验证受控文件的完整性和当前解析链；浏览器自动化只检查覆盖到的键盘路径和可自动检测的规则。它们**不证明**生成内容正确、学生学习效果提升、用户材料拥有版权许可，也不等同于完整 WCAG 2.2 AA 符合性。用户仍需确认所导入材料的使用权；学习成效与完整无障碍声明分别需要研究证据和有日期的人工复核记录。
+
+## 基于 Open Notebook
+
+本项目是 [Open Notebook](https://github.com/lfnovo/open-notebook) `v1.14.0` 的独立维护衍生项目，保留其完整历史、MIT License、FastAPI、Next.js、SurrealDB、异步任务和多模型供应商体系。Workbench 的问题、功能建议和安全报告由本仓库接收；如问题可复现于未修改的上游版本，再由报告者或维护者转交上游。
+
+以下章节保留上游 Open Notebook 的通用能力与文档入口，便于理解继承的 Notebook、Source、Note、搜索、聊天和播客功能；其中指向 `lfnovo/open-notebook` 的社区链接属于上游项目。
+
+<a id="readme-top"></a>
 
 ## A private, multi-model, 100% local, full-featured alternative to Notebook LM
 

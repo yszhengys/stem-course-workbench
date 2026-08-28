@@ -14,6 +14,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = PROJECT_ROOT / "scripts" / "course-workbench.sh"
+BOOTSTRAP_SCRIPT = PROJECT_ROOT / "scripts" / "bootstrap-course-uv.sh"
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -188,6 +189,14 @@ with (state / "docker.calls").open("a", encoding="utf-8") as handle:
     handle.write(" ".join(args) + "\\n")
 if args == ["info"]:
     raise SystemExit(0)
+if args == ["ps", "--no-trunc", "--quiet", "--filter", "publish=8000"]:
+    publishers_file = state / "docker.publishers"
+    if publishers_file.exists():
+        print(publishers_file.read_text(encoding="utf-8").strip())
+    elif (state / "docker.running").exists():
+        id_file = state / "docker.id"
+        print(id_file.read_text(encoding="utf-8").strip() if id_file.exists() else "fake-surrealdb")
+    raise SystemExit(0)
 if args and args[0] == "inspect":
     fmt = args[2] if len(args) > 2 else ""
     if "working_dir" in fmt:
@@ -212,6 +221,14 @@ if args and args[0] == "compose":
         (state / "docker.root").write_text(project_dir, encoding="utf-8")
         (state / "docker.service").write_text("surrealdb", encoding="utf-8")
         (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+        raise SystemExit(0)
+    if tail == ["up", "-d", "--force-recreate", "surrealdb"]:
+        (state / "docker.exists").touch()
+        (state / "docker.running").touch()
+        (state / "docker.root").write_text(project_dir, encoding="utf-8")
+        (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+        (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+        (state / "docker.publishers").unlink(missing_ok=True)
         raise SystemExit(0)
     if tail == ["stop", "surrealdb"]:
         (state / "docker.running").unlink(missing_ok=True)
@@ -353,6 +370,10 @@ from pathlib import Path
 state = Path(os.environ["FAKE_STATE"])
 args = sys.argv[1:]
 
+if args == ["--version"]:
+    print("uv 0.12.5")
+    raise SystemExit(0)
+
 def raise_exit():
     pid = os.getpid()
     (state / "port.5055").unlink(missing_ok=True)
@@ -449,9 +470,11 @@ raise SystemExit(2)
 @pytest.fixture
 def fake_repo(tmp_path: Path) -> Iterator[tuple[Path, dict[str, str], Path]]:
     assert SCRIPT.exists(), "launcher script must exist"
+    assert BOOTSTRAP_SCRIPT.exists(), "uv bootstrap script must exist"
     repo = tmp_path / "stem-course-workbench"
     (repo / "scripts").mkdir(parents=True)
     shutil.copy2(SCRIPT, repo / "scripts" / SCRIPT.name)
+    shutil.copy2(BOOTSTRAP_SCRIPT, repo / "scripts" / BOOTSTRAP_SCRIPT.name)
     (repo / "frontend").mkdir()
     (repo / "uv.lock").write_text("uv-lock-v1", encoding="utf-8")
     (repo / "frontend" / "package-lock.json").write_text(
@@ -602,6 +625,48 @@ def _force_stop_pid(pid: int) -> None:
     except ProcessLookupError:
         return
     _wait_for_pid_exit(pid)
+
+
+def test_start_uses_path_uv_when_repository_tool_is_absent(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    repository_uv = repo / ".tools" / "bin" / "uv"
+    path_uv = Path(env["PATH"].split(":", 1)[0]) / "uv"
+    repository_uv.replace(path_uv)
+
+    result = _run(repo, _with_ui_contract(env), "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "sync --locked" in _calls(state / "uv.calls")
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_start_bootstraps_uv_when_repository_and_path_uv_are_absent(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    repository_uv = repo / ".tools" / "bin" / "uv"
+    fake_uv_source = repo / "fake-uv-source"
+    repository_uv.replace(fake_uv_source)
+    env["FAKE_UV_SOURCE"] = str(fake_uv_source)
+    _write_executable(
+        repo / "scripts" / "bootstrap-course-uv.sh",
+        """#!/bin/sh
+set -eu
+mkdir -p "$1"
+cp "$FAKE_UV_SOURCE" "$1/uv"
+chmod 700 "$1/uv"
+printf '%s\n' "$1" > "$FAKE_STATE/bootstrap.calls"
+""",
+    )
+
+    result = _run(repo, _with_ui_contract(env), "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _calls(state / "bootstrap.calls") == [str(repo / ".tools" / "bin")]
+    assert "sync --locked" in _calls(state / "uv.calls")
+    assert _run(repo, env, "stop").returncode == 0
 
 
 def test_start_creates_secure_env_uses_locked_dependencies_and_is_idempotent(
@@ -1255,6 +1320,139 @@ def test_other_checkout_surreal_container_is_rejected(
     assert "another checkout" in combined.lower()
     assert "/another/checkout" in combined
     assert not any("stop surrealdb" in line for line in _calls(state / "docker.calls"))
+
+
+def test_stopped_owned_surreal_container_reuses_docker_desktop_port_proxy(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = _with_ui_contract(env)
+    proxy_pid = 424242
+    (state / "docker.exists").touch()
+    (state / "docker.root").write_text(str(repo), encoding="utf-8")
+    (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+    (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+    (state / "port.8000").write_text(str(proxy_pid), encoding="utf-8")
+    (state / f"pid.{proxy_pid}.command").write_text(
+        "/Applications/Docker.app/Contents/MacOS/com.docker.backend services",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (state / "docker.running").exists()
+    assert any(
+        call.endswith("up -d surrealdb")
+        for call in _calls(state / "docker.calls")
+    )
+    (state / "port.8000").unlink()
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_docker_desktop_proxy_with_foreign_publisher_is_rejected(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    proxy_pid = 424242
+    (state / "docker.exists").touch()
+    (state / "docker.root").write_text(str(repo), encoding="utf-8")
+    (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+    (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+    (state / "docker.publishers").write_text(
+        "foreign-surrealdb", encoding="utf-8"
+    )
+    (state / "port.8000").write_text(str(proxy_pid), encoding="utf-8")
+    (state / f"pid.{proxy_pid}.command").write_text(
+        "/Applications/Docker.app/Contents/MacOS/com.docker.backend services",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "foreign-surrealdb" in combined
+    assert "another Docker container" in combined
+    assert not any(
+        call.endswith("up -d surrealdb")
+        for call in _calls(state / "docker.calls")
+    )
+
+
+def test_running_owned_surreal_container_requires_its_own_published_port(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    (state / "docker.exists").touch()
+    (state / "docker.running").touch()
+    (state / "docker.root").write_text(str(repo), encoding="utf-8")
+    (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+    (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+    (state / "docker.publishers").write_text(
+        "foreign-surrealdb", encoding="utf-8"
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "foreign-surrealdb" in combined
+    assert "another Docker container" in combined
+
+
+def test_running_owned_surreal_container_repairs_missing_port_publish(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    env = _with_ui_contract(env)
+    (state / "docker.exists").touch()
+    (state / "docker.running").touch()
+    (state / "docker.root").write_text(str(repo), encoding="utf-8")
+    (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+    (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+    # Docker can retain HostConfig.PortBindings while omitting the active
+    # publisher when the container was created during a port collision.
+    (state / "docker.publishers").write_text("", encoding="utf-8")
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert any(
+        call.endswith("up -d --force-recreate surrealdb")
+        for call in _calls(state / "docker.calls")
+    )
+    assert _run(repo, env, "stop").returncode == 0
+
+
+def test_running_owned_surreal_container_does_not_repair_over_foreign_process(
+    fake_repo: tuple[Path, dict[str, str], Path],
+) -> None:
+    repo, env, state = fake_repo
+    foreign_pid = 424242
+    (state / "docker.exists").touch()
+    (state / "docker.running").touch()
+    (state / "docker.root").write_text(str(repo), encoding="utf-8")
+    (state / "docker.service").write_text("surrealdb", encoding="utf-8")
+    (state / "docker.id").write_text("fake-surrealdb", encoding="utf-8")
+    (state / "docker.publishers").write_text("", encoding="utf-8")
+    (state / "port.8000").write_text(str(foreign_pid), encoding="utf-8")
+    (state / f"pid.{foreign_pid}.cwd").write_text(
+        "/another/checkout", encoding="utf-8"
+    )
+    (state / f"pid.{foreign_pid}.command").write_text(
+        "foreign service", encoding="utf-8"
+    )
+
+    result = _run(repo, env, "start", "--no-open")
+
+    assert result.returncode != 0
+    combined = result.stdout + result.stderr
+    assert "another process or checkout" in combined
+    assert not any(
+        call.endswith("up -d --force-recreate surrealdb")
+        for call in _calls(state / "docker.calls")
+    )
 
 
 @pytest.mark.parametrize("race", ["id", "root", "service"])

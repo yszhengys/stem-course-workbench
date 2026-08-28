@@ -137,9 +137,11 @@ export function AppSidebar() {
                 variant="ghost"
                 size="sm"
                 onClick={toggleCollapse}
-                className="absolute text-sidebar-foreground hover:bg-sidebar-accent opacity-0 group-hover:opacity-100 transition-opacity"
+                aria-label={t('navigation.expandSidebar')}
+                data-testid="sidebar-toggle"
+                className="absolute text-sidebar-foreground hover:bg-sidebar-accent opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
               >
-                <Menu className="h-4 w-4" />
+                <Menu className="h-4 w-4" aria-hidden="true" />
               </Button>
             </div>
           ) : (
@@ -154,16 +156,18 @@ export function AppSidebar() {
                 variant="ghost"
                 size="sm"
                 onClick={toggleCollapse}
+                aria-label={t('navigation.collapseSidebar')}
                 className="text-sidebar-foreground hover:bg-sidebar-accent"
                 data-testid="sidebar-toggle"
               >
-                <ChevronLeft className="h-4 w-4" />
+                <ChevronLeft className="h-4 w-4" aria-hidden="true" />
               </Button>
             </>
           )}
         </div>
 
         <nav
+          aria-label={t('navigation.nav')}
           className={cn(
             'flex-1 space-y-1 py-4',
             isCollapsed ? 'px-2' : 'px-3'
@@ -253,7 +257,7 @@ export function AppSidebar() {
               )}
               <div className="space-y-1">
                 {!isCollapsed && (
-                  <h3 className="mb-1.5 px-3 text-[10.5px] font-bold uppercase tracking-[0.14em] text-sidebar-foreground/40">
+                  <h3 className="mb-1.5 px-3 text-[10.5px] font-bold uppercase tracking-[0.14em] text-sidebar-foreground/80">
                     {section.title}
                   </h3>
                 )}
@@ -262,6 +266,7 @@ export function AppSidebar() {
                   const isActive = pathname?.startsWith(item.href) || false
                   const button = (
                     <Button
+                      asChild
                       variant="ghost"
                       className={cn(
                         'w-full gap-2.5 text-[13px] font-medium text-sidebar-foreground/80 sidebar-menu-item relative',
@@ -270,8 +275,16 @@ export function AppSidebar() {
                         isCollapsed ? 'justify-center px-2' : 'justify-start'
                       )}
                     >
-                      <item.icon className={cn('h-4 w-4 opacity-85', item.iconClass)} />
-                      {!isCollapsed && <span>{item.name}</span>}
+                      <Link
+                        href={item.href}
+                        aria-label={isCollapsed ? item.name : undefined}
+                      >
+                        <item.icon
+                          aria-hidden="true"
+                          className={cn('h-4 w-4 opacity-85', item.iconClass)}
+                        />
+                        {!isCollapsed && <span>{item.name}</span>}
+                      </Link>
                     </Button>
                   )
 
@@ -279,20 +292,14 @@ export function AppSidebar() {
                     return (
                       <Tooltip key={item.name}>
                         <TooltipTrigger asChild>
-                          <Link href={item.href}>
-                            {button}
-                          </Link>
+                          {button}
                         </TooltipTrigger>
                         <TooltipContent side="right">{item.name}</TooltipContent>
                       </Tooltip>
                     )
                   }
 
-                  return (
-                    <Link key={item.name} href={item.href}>
-                      {button}
-                    </Link>
-                  )
+                  return <div key={item.name}>{button}</div>
                 })}
               </div>
             </div>
@@ -307,7 +314,7 @@ export function AppSidebar() {
         >
           {/* Command Palette hint */}
           {!isCollapsed && (
-            <div className="px-3 py-1.5 text-xs text-sidebar-foreground/60">
+            <div className="px-3 py-1.5 text-xs text-sidebar-foreground/80">
               <div className="flex items-center justify-between">
                  <span className="flex items-center gap-1.5">
                   <Command className="h-3 w-3" />
@@ -317,7 +324,7 @@ export function AppSidebar() {
                   {isMac ? <span className="text-xs">⌘</span> : <span>Ctrl+</span>}K
                 </kbd>
               </div>
-               <p className="mt-1 text-[10px] text-sidebar-foreground/40">
+               <p className="mt-1 text-[10px] text-sidebar-foreground/80">
                 {t('common.quickActionsDesc')}
               </p>
             </div>

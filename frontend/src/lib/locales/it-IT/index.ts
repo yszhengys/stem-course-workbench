@@ -227,6 +227,8 @@ export const itIT = {
     settings: "Impostazioni",
     advanced: "Avanzate",
     nav: "Navigazione",
+    expandSidebar: "Espandi barra laterale",
+    collapseSidebar: "Comprimi barra laterale",
     language: "Cambia lingua",
     theme: "Tema",
     ask: "Chiedi",

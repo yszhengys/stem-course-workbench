@@ -1,9 +1,11 @@
-"""Opt-in real Docling smoke for synthetic PDF/PPTX evidence previews."""
+"""Opt-in real Docling smoke over the repository-owned CC0 gold sources."""
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -15,48 +17,44 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _synthetic_pptx(path: Path) -> None:
-    from pptx import Presentation
-    from pptx.util import Inches
-
-    presentation = Presentation()
-    for index in range(1, 4):
-        slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-        box = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(2))
-        box.text = f"Synthetic vector lesson slide {index}: v{index} = {index} m/s"
-    presentation.save(str(path))
+GOLD_ROOT = Path(__file__).parent / "fixtures" / "gold"
 
 
-def _synthetic_scanned_pdf(path: Path) -> None:
-    from PIL import Image, ImageDraw
+def _expected(kind: str) -> list[dict[str, Any]]:
+    manifest = cast(
+        dict[str, Any],
+        json.loads((GOLD_ROOT / "manifest.json").read_text(encoding="utf-8")),
+    )
+    return next(entry["expected"] for entry in manifest["files"] if entry["kind"] == kind)
 
-    pages = []
-    for index in range(1, 3):
-        image = Image.new("RGB", (1200, 800), "white")
-        drawing = ImageDraw.Draw(image)
-        drawing.text(
-            (80, 100),
-            f"Synthetic projectile page {index}\nposition equals velocity times time",
-            fill="black",
-            spacing=24,
-        )
-        pages.append(image)
-    pages[0].save(path, "PDF", save_all=True, append_images=pages[1:], resolution=144)
+
+def _assert_expected_records(
+    records: list[tuple[int, str, str, tuple[float, float, float, float] | None]],
+    kind: str,
+) -> None:
+    by_index: dict[int, str] = {}
+    for index, _block_key, quote, bbox in records:
+        by_index[index] = f"{by_index.get(index, '')} {quote}".casefold()
+        assert bbox is not None
+        assert all(0.0 <= coordinate <= 1.0 for coordinate in bbox)
+    for expected in _expected(kind):
+        assert str(expected["text"]).casefold() in by_index[int(expected["index"])]
 
 
 def test_real_docling_extracts_three_slides_and_two_pdf_pages_with_previews(
     tmp_path: Path,
 ) -> None:
-    pptx_path = tmp_path / "synthetic-vectors.pptx"
-    pdf_path = tmp_path / "synthetic-projectile.pdf"
-    _synthetic_pptx(pptx_path)
-    _synthetic_scanned_pdf(pdf_path)
-    service = EvidenceService(data_root=tmp_path / "course-evidence", allowed_roots=[tmp_path])
+    pptx_path = GOLD_ROOT / "stem-evidence-gold.pptx"
+    pdf_path = GOLD_ROOT / "stem-evidence-gold.pdf"
+    service = EvidenceService(
+        data_root=tmp_path / "course-evidence", allowed_roots=[GOLD_ROOT]
+    )
 
     pptx_records = service.docling_records(
         service._extract_docling_sync(pptx_path, "pptx"), "pptx"
     )
     assert {record[0] for record in pptx_records} == {1, 2, 3}
+    _assert_expected_records(pptx_records, "pptx")
     previews = service.write_pptx_previews(
         course_id="course:smoke",
         source_id="source:pptx",
@@ -71,3 +69,4 @@ def test_real_docling_extracts_three_slides_and_two_pdf_pages_with_previews(
         service._extract_docling_sync(pdf_path, "pdf"), "pdf"
     )
     assert {record[0] for record in pdf_records} == {1, 2}
+    _assert_expected_records(pdf_records, "pdf")

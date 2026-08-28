@@ -1,0 +1,6 @@
+-- Migration 30: dual-track PPTX evidence previews.
+-- preview_path remains the provenance-text SVG fallback. The optional visual
+-- path points at a hash-bound PNG produced by the restricted local renderer.
+
+DEFINE FIELD IF NOT EXISTS visual_preview_path ON TABLE course_evidence_anchor TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS visual_preview_status ON TABLE course_evidence_anchor TYPE string DEFAULT 'text_only';

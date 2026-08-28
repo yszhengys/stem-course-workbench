@@ -227,6 +227,8 @@ export const ptBR = {
     settings: "Configurações",
     advanced: "Avançado",
     nav: "Navegação",
+    expandSidebar: "Expandir barra lateral",
+    collapseSidebar: "Recolher barra lateral",
     language: "Alternar idioma",
     theme: "Tema",
     ask: "Perguntar",

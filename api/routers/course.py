@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import PurePath
 from typing import Any, Awaitable, TypeVar
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, Response
 
 from api.course_command_service import CourseCommandService, CourseJobSubmission
@@ -13,29 +14,75 @@ from api.course_service import (
     CourseConflictError,
     CourseService,
 )
+from api.course_v2_service import course_v2_service
 from api.models import (
     AttemptCreate,
     AttemptStatusUpdate,
     ChapterCreate,
     ChapterPublish,
     ChapterUpdate,
+    CourseAcademicVerificationRequest,
+    CourseActivityEventRequest,
+    CourseBibliographicSourceResponse,
+    CourseBibliographyUpdateRequest,
+    CourseBundleImportResponse,
     CourseChapterAttemptCreate,
     CourseChapterGenerateRequest,
     CourseChapterReviewRequest,
+    CourseCoverageResponse,
     CourseCreate,
+    CourseDraftOperationRequest,
+    CourseDraftResponse,
+    CourseDraftValidateRequest,
+    CourseDraftValidationResponse,
     CourseEvidenceBuildRequest,
+    CourseExerciseBankGenerateRequest,
+    CourseExerciseBuildStatusResponse,
+    CourseExerciseGradeRequest,
+    CourseExerciseGradeResponse,
+    CourseExerciseHintRequest,
+    CourseExerciseHintResponse,
+    CourseExerciseResponse,
+    CourseExerciseRevealRequest,
+    CourseExerciseRevealResponse,
+    CourseExerciseVerificationRequest,
+    CourseExportCreateRequest,
+    CourseExportResponse,
     CourseFindingUpdate,
     CourseJobResponse,
+    CourseLabApprovalRequest,
+    CourseLabApprovalResponse,
+    CourseLearnerChapterResponse,
+    CourseLearnerNoteCreateRequest,
+    CourseLearnerNoteResponse,
+    CourseLearnerNotesResponse,
+    CourseLearnerSourcesResponse,
+    CourseLearningEventResponse,
+    CourseLearningOverviewResponse,
+    CourseLearningUpgradeRequest,
+    CourseLearningUpgradeResponse,
     CourseNoteCreate,
     CourseNoteReattach,
     CourseOutlineApproval,
     CourseOutlineGenerateRequest,
     CourseRetrievalRequest,
     CourseSourceAssociation,
+    CourseTransferGradeRequest,
+    CourseTutorMessageRequest,
+    CourseTutorMessageResponse,
+    CourseTutorSessionCreateRequest,
+    CourseTutorSessionResponse,
     CourseUpdate,
     CourseVersionCreate,
+    ExerciseVerificationResponse,
     LabCreate,
     ProgressUpdate,
+)
+from open_notebook.course.v2_contracts import (
+    AcademicArtifactKind,
+    DraftTargetKey,
+    ReviewQueueItem,
+    StableKey,
 )
 from open_notebook.domain.base import ObjectModel
 from open_notebook.exceptions import InvalidInputError, NotFoundError, OpenNotebookError
@@ -50,6 +97,7 @@ LAB_TYPES = {
     "geometry",
     "kinematics",
 }
+COURSE_BUNDLE_MAX_UPLOAD_BYTES = 256 * 1024 * 1024
 
 
 def _body(model: ObjectModel) -> dict[str, Any]:
@@ -91,6 +139,83 @@ async def create_course(request: CourseCreate):
     return _body(course)
 
 
+@router.post(
+    "/courses/{course_id}/versions/prepare-learning-upgrade",
+    response_model=CourseLearningUpgradeResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def prepare_course_learning_upgrade(
+    course_id: str,
+    request: CourseLearningUpgradeRequest,
+):
+    return await _call(
+        course_v2_service.prepare_learning_upgrade(course_id, request)
+    )
+
+
+@router.post(
+    "/courses/imports",
+    response_model=CourseBundleImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def import_course_bundle(bundle: UploadFile = File(...)):
+    filename = bundle.filename or ""
+    if PurePath(filename).suffix.lower() != ".stemcourse":
+        raise HTTPException(
+            status_code=422,
+            detail="Course bundle filename must end in .stemcourse.",
+        )
+    payload = await bundle.read(COURSE_BUNDLE_MAX_UPLOAD_BYTES + 1)
+    await bundle.close()
+    if len(payload) > COURSE_BUNDLE_MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Course bundle is too large.")
+    return await _call(course_v2_service.import_course_bundle(payload))
+
+
+@router.post(
+    "/courses/{course_id}/exports",
+    response_model=CourseExportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_course_export(
+    course_id: str,
+    request: CourseExportCreateRequest,
+):
+    return await _call(
+        course_v2_service.create_course_export(
+            course_id,
+            include_originals=request.include_originals,
+        )
+    )
+
+
+@router.get(
+    "/courses/{course_id}/exports/{export_id}",
+    response_model=CourseExportResponse,
+)
+async def get_course_export(course_id: str, export_id: str):
+    return await _call(
+        course_v2_service.get_course_export(course_id, export_id)
+    )
+
+
+@router.get("/courses/{course_id}/exports/{export_id}/download")
+async def download_course_export(course_id: str, export_id: str):
+    bundle_path = await _call(
+        course_v2_service.get_course_export_path(course_id, export_id)
+    )
+    return FileResponse(
+        path=bundle_path,
+        filename=f"{export_id.partition(':')[2]}.stemcourse",
+        media_type="application/zip",
+        content_disposition_type="attachment",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
 @router.get("/courses")
 async def list_courses():
     return [_body(course) for course in await _call(CourseService.list_courses())]
@@ -104,6 +229,271 @@ async def get_course_model_options():
 @router.get("/courses/{course_id}")
 async def get_course(course_id: str):
     return _body(await _call(CourseService.get_course(course_id)))
+
+
+@router.get(
+    "/courses/{course_id}/learning/overview",
+    response_model=CourseLearningOverviewResponse,
+)
+async def get_learning_overview(course_id: str):
+    return await _call(course_v2_service.get_learning_overview(course_id))
+
+
+@router.get(
+    "/courses/{course_id}/learning/review-queue",
+    response_model=list[ReviewQueueItem],
+)
+async def get_learning_review_queue(course_id: str):
+    return await _call(course_v2_service.get_review_queue(course_id))
+
+
+@router.post(
+    "/courses/{course_id}/learning/events",
+    response_model=CourseLearningEventResponse,
+)
+async def append_learning_event(
+    course_id: str,
+    request: CourseActivityEventRequest,
+):
+    return await _call(
+        course_v2_service.append_activity_event(course_id, request)
+    )
+
+
+@router.get(
+    "/courses/{course_id}/learning/chapters/{chapter_key}",
+    response_model=CourseLearnerChapterResponse,
+)
+async def get_learning_chapter(course_id: str, chapter_key: StableKey):
+    return await _call(
+        course_v2_service.get_learning_chapter(course_id, chapter_key)
+    )
+
+
+@router.get(
+    "/courses/{course_id}/learning/chapters/{chapter_key}/sources",
+    response_model=CourseLearnerSourcesResponse,
+)
+async def list_learning_sources(course_id: str, chapter_key: StableKey):
+    return await _call(
+        course_v2_service.list_learning_sources(course_id, chapter_key)
+    )
+
+
+@router.get(
+    "/courses/{course_id}/learning/chapters/{chapter_key}/notes",
+    response_model=CourseLearnerNotesResponse,
+)
+async def list_learning_notes(course_id: str, chapter_key: StableKey):
+    return await _call(
+        course_v2_service.list_learning_notes(course_id, chapter_key)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/learning/chapters/{chapter_key}/notes",
+    response_model=CourseLearnerNoteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_learning_note(
+    course_id: str,
+    chapter_key: StableKey,
+    request: CourseLearnerNoteCreateRequest,
+):
+    return await _call(
+        course_v2_service.create_learning_note(
+            course_id, chapter_key, request
+        )
+    )
+
+
+@router.post(
+    "/courses/{course_id}/tutor/sessions",
+    response_model=CourseTutorSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_tutor_session(
+    course_id: str,
+    request: CourseTutorSessionCreateRequest,
+):
+    return await _call(
+        course_v2_service.create_tutor_session(course_id, request)
+    )
+
+
+@router.get(
+    "/courses/{course_id}/tutor/sessions",
+    response_model=list[CourseTutorSessionResponse],
+)
+async def list_tutor_sessions(course_id: str):
+    return await _call(course_v2_service.list_tutor_sessions(course_id))
+
+
+@router.post(
+    "/courses/{course_id}/tutor/sessions/{session_id}/messages",
+    response_model=CourseTutorMessageResponse,
+)
+async def respond_to_tutor(
+    course_id: str,
+    session_id: str,
+    request: CourseTutorMessageRequest,
+):
+    return await _call(
+        course_v2_service.respond_to_tutor(
+            course_id, session_id, request
+        )
+    )
+
+
+@router.get(
+    "/courses/{course_id}/chapters/{chapter_key}/draft",
+    response_model=CourseDraftResponse,
+)
+async def get_chapter_draft(course_id: str, chapter_key: StableKey):
+    return await _call(
+        course_v2_service.get_chapter_draft(course_id, chapter_key)
+    )
+
+
+@router.patch(
+    "/courses/{course_id}/chapters/{chapter_key}/draft",
+    response_model=CourseDraftResponse,
+)
+async def apply_chapter_draft_operation(
+    course_id: str,
+    chapter_key: StableKey,
+    request: CourseDraftOperationRequest,
+):
+    return await _call(
+        course_v2_service.apply_chapter_draft_operation(
+            course_id, chapter_key, request
+        )
+    )
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/artifacts/"
+    "{target_kind}/{target_key}/verify",
+    response_model=CourseDraftResponse,
+)
+async def verify_academic_artifact(
+    course_id: str,
+    chapter_key: StableKey,
+    target_kind: AcademicArtifactKind,
+    target_key: DraftTargetKey,
+    request: CourseAcademicVerificationRequest,
+):
+    return await _call(
+        course_v2_service.verify_academic_artifact(
+            course_id,
+            chapter_key,
+            target_kind,
+            target_key,
+            request,
+        )
+    )
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/draft/validate",
+    response_model=CourseDraftValidationResponse,
+)
+async def validate_chapter_draft(
+    course_id: str,
+    chapter_key: StableKey,
+    request: CourseDraftValidateRequest,
+):
+    return await _call(
+        course_v2_service.validate_chapter_draft(
+            course_id, chapter_key, request
+        )
+    )
+
+
+@router.get(
+    "/courses/{course_id}/exercises",
+    response_model=list[CourseExerciseResponse],
+)
+async def list_course_exercises(
+    course_id: str,
+    chapter_key: StableKey | None = None,
+):
+    return await _call(
+        course_v2_service.list_exercises(course_id, chapter_key)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/exercises/{exercise_key}/verify",
+    response_model=ExerciseVerificationResponse,
+)
+async def verify_course_exercise(
+    course_id: str,
+    chapter_key: StableKey,
+    exercise_key: StableKey,
+    request: CourseExerciseVerificationRequest,
+):
+    return await _call(
+        course_v2_service.verify_exercise(
+            course_id, chapter_key, exercise_key, request
+        )
+    )
+
+
+@router.post(
+    "/courses/{course_id}/exercises/{exercise_key}/grade",
+    response_model=CourseExerciseGradeResponse,
+)
+async def grade_course_exercise(
+    course_id: str,
+    exercise_key: StableKey,
+    request: CourseExerciseGradeRequest,
+):
+    return await _call(
+        course_v2_service.grade_exercise(course_id, exercise_key, request)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/exercises/{exercise_key}/hints/next",
+    response_model=CourseExerciseHintResponse,
+)
+async def get_next_course_exercise_hint(
+    course_id: str,
+    exercise_key: StableKey,
+    request: CourseExerciseHintRequest,
+):
+    return await _call(
+        course_v2_service.next_hint(course_id, exercise_key, request)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/exercises/{exercise_key}/reveal",
+    response_model=CourseExerciseRevealResponse,
+)
+async def reveal_course_exercise_answer(
+    course_id: str,
+    exercise_key: StableKey,
+    request: CourseExerciseRevealRequest,
+):
+    return await _call(
+        course_v2_service.reveal_answer(course_id, exercise_key, request)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/exercises/{exercise_key}/transfer/grade",
+    response_model=CourseExerciseGradeResponse,
+)
+async def grade_course_transfer(
+    course_id: str,
+    exercise_key: StableKey,
+    request: CourseTransferGradeRequest,
+):
+    return await _call(
+        course_v2_service.grade_transfer(course_id, exercise_key, request)
+    )
 
 
 @router.patch("/courses/{course_id}")
@@ -131,6 +521,75 @@ async def associate_source(course_id: str, request: CourseSourceAssociation):
 @router.get("/courses/{course_id}/sources/eligible")
 async def list_eligible_sources(course_id: str):
     return await _call(course_commands.eligible_sources(course_id))
+
+
+@router.get(
+    "/courses/{course_id}/bibliography",
+    response_model=list[CourseBibliographicSourceResponse],
+)
+async def list_course_bibliography(course_id: str):
+    return await _call(course_v2_service.list_bibliography(course_id))
+
+
+@router.get(
+    "/courses/{course_id}/bibliography/csl-json",
+    response_model=list[dict[str, Any]],
+)
+async def get_course_bibliography_csl_json(course_id: str):
+    return await _call(course_v2_service.csl_json(course_id))
+
+
+@router.get(
+    "/courses/{course_id}/coverage",
+    response_model=CourseCoverageResponse,
+)
+async def get_course_coverage(course_id: str):
+    return await _call(course_v2_service.coverage(course_id))
+
+
+@router.get("/courses/{course_id}/coverage/export")
+async def export_course_coverage(course_id: str):
+    report = await _call(course_v2_service.coverage(course_id))
+    content = course_v2_service._source_quality().canonical_coverage_json(
+        report.model_dump(mode="json")
+    )
+    filename_id = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "-"
+        for character in course_id
+    )[:100].strip("-") or "course"
+    return Response(
+        content=content,
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="course-coverage-{filename_id}.json"'
+            )
+        },
+    )
+
+
+@router.get(
+    "/courses/{course_id}/sources/{source_id}/bibliography",
+    response_model=CourseBibliographicSourceResponse,
+)
+async def get_course_source_bibliography(course_id: str, source_id: str):
+    return await _call(
+        course_v2_service.get_bibliography(course_id, source_id)
+    )
+
+
+@router.put(
+    "/courses/{course_id}/sources/{source_id}/bibliography",
+    response_model=CourseBibliographicSourceResponse,
+)
+async def put_course_source_bibliography(
+    course_id: str,
+    source_id: str,
+    request: CourseBibliographyUpdateRequest,
+):
+    return await _call(
+        course_v2_service.put_bibliography(course_id, source_id, request)
+    )
 
 
 @router.post(
@@ -163,12 +622,13 @@ async def get_evidence_preview(course_id: str, anchor_id: str):
     asset = await _call(CourseService.get_evidence_preview(course_id, anchor_id))
     return Response(
         content=asset.content,
-        media_type="image/svg+xml",
+        media_type=asset.media_type,
         headers={
             "Cache-Control": "private, no-store",
             "Content-Disposition": f'inline; filename="{asset.filename}"',
             "Content-Security-Policy": "default-src 'none'; style-src 'none'; sandbox",
             "X-Content-Type-Options": "nosniff",
+            "X-Course-Preview-Mode": asset.mode,
         },
     )
 
@@ -262,6 +722,42 @@ async def review_chapter(
     return _job(submission)
 
 
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/exercises/generate",
+    response_model=CourseJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def generate_chapter_exercises(
+    course_id: str,
+    chapter_key: str,
+    request: CourseExerciseBankGenerateRequest,
+):
+    submission = await _call(
+        course_commands.submit_exercise_bank(
+            course_id=course_id,
+            chapter_key=chapter_key,
+            anchor_ids=request.anchor_ids,
+            prompt_version=request.prompt_version,
+            model=request.model,
+            review_model=request.review_model,
+            force=request.force,
+        )
+    )
+    return _job(submission)
+
+
+@router.get(
+    "/courses/{course_id}/chapters/{chapter_key}/exercises/build-status",
+    response_model=CourseExerciseBuildStatusResponse,
+)
+async def get_chapter_exercise_build_status(
+    course_id: str, chapter_key: str
+):
+    return await _call(
+        course_v2_service.exercise_build_status(course_id, chapter_key)
+    )
+
+
 @router.get("/courses/{course_id}/chapters/{chapter_key}")
 async def get_current_chapter(course_id: str, chapter_key: str):
     return _body(
@@ -272,6 +768,26 @@ async def get_current_chapter(course_id: str, chapter_key: str):
 @router.get("/courses/{course_id}/chapters/{chapter_key}/labs")
 async def list_current_chapter_labs(course_id: str, chapter_key: str):
     return await _call(CourseService.list_chapter_labs(course_id, chapter_key))
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/labs/{lab_key}/approve",
+    response_model=CourseLabApprovalResponse,
+)
+async def approve_lab_proposal(
+    course_id: str,
+    chapter_key: StableKey,
+    lab_key: StableKey,
+    request: CourseLabApprovalRequest,
+):
+    return await _call(
+        course_v2_service.approve_lab_proposal(
+            course_id,
+            chapter_key,
+            lab_key,
+            request,
+        )
+    )
 
 
 @router.get("/courses/{course_id}/chapters/{chapter_key}/attempts")

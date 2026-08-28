@@ -397,4 +397,430 @@ describe('courseApi', () => {
       status: 'completed',
     })
   })
+
+  it('encodes learner routes and never forwards hidden exercise fields', async () => {
+    const stop = new Error('stop after request capture')
+    vi.mocked(apiClient.get).mockRejectedValue(stop)
+    vi.mocked(apiClient.post).mockRejectedValue(stop)
+
+    await expect(courseApi.listLearningExercises('course:one', 'limits/intro'))
+      .rejects.toBe(stop)
+    await expect(courseApi.appendLearningEvent('course:one', {
+      snapshot_token: 'a'.repeat(64),
+      idempotency_key: 'event-one',
+      chapter_key: 'limits',
+      kind: 'chapter_opened',
+      payload: { block_key: null },
+    })).rejects.toBe(stop)
+    await expect(courseApi.gradeLearningExercise('course:one', 'limits/core', {
+      snapshot_token: 'b'.repeat(64),
+      chapter_key: 'limits',
+      concept_key: 'limit-laws',
+      attempt_key: 'attempt-one',
+      answer: '4',
+      hints_used: 1,
+      answer_revealed: false,
+      mode: 'practice',
+      course_version_id: 'course_version:hidden',
+      grader: { oracle_answer: 4 },
+    } as never)).rejects.toThrow()
+    await expect(courseApi.gradeLearningExercise('course:one', 'limits/core', {
+      snapshot_token: 'b'.repeat(64),
+      chapter_key: 'limits',
+      concept_key: 'limit-laws',
+      attempt_key: 'attempt-one',
+      answer: '4',
+      hints_used: 1,
+      answer_revealed: false,
+      mode: 'practice',
+    })).rejects.toBe(stop)
+
+    expect(apiClient.get).toHaveBeenCalledWith('/courses/course%3Aone/exercises', {
+      params: { chapter_key: 'limits/intro' },
+    })
+    expect(apiClient.post).toHaveBeenNthCalledWith(
+      1,
+      '/courses/course%3Aone/learning/events',
+      {
+        idempotency_key: 'event-one',
+        chapter_key: 'limits',
+        snapshot_token: 'a'.repeat(64),
+        kind: 'chapter_opened',
+        payload: { block_key: null },
+      },
+    )
+    expect(apiClient.post).toHaveBeenNthCalledWith(
+      2,
+      '/courses/course%3Aone/exercises/limits%2Fcore/grade',
+      {
+        snapshot_token: 'b'.repeat(64),
+        chapter_key: 'limits',
+        concept_key: 'limit-laws',
+        attempt_key: 'attempt-one',
+        answer: '4',
+        hints_used: 1,
+        answer_revealed: false,
+        mode: 'practice',
+      },
+    )
+  })
+
+  it('rejects mismatched or extended learning event payloads before transport', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({
+      data: {
+        event: {
+          event_id: 'event-one',
+          course_id: 'course:one',
+          course_version_id: 'course_version:published',
+          chapter_key: 'limits',
+          concept_key: 'limit-laws',
+          exercise_key: 'limits-core',
+          kind: 'hint_viewed',
+          payload: { attempt_key: 'attempt-one', hint_index: 1 },
+          occurred_at: '2026-08-22T08:00:00Z',
+        },
+        mastery: null,
+      },
+    })
+
+    await expect(courseApi.appendLearningEvent('course:one', {
+      snapshot_token: 'a'.repeat(64),
+      idempotency_key: 'event-one',
+      chapter_key: 'limits',
+      kind: 'chapter_opened',
+      payload: { block_key: 'definition', attempt_key: 'forged' },
+    } as never)).rejects.toThrow()
+    await expect(courseApi.appendLearningEvent('course:one', {
+      snapshot_token: 'a'.repeat(64),
+      idempotency_key: 'event-two',
+      chapter_key: 'limits',
+      concept_key: 'limit-laws',
+      exercise_key: 'limits-core',
+      kind: 'hint_viewed',
+      payload: { attempt_key: 'attempt-one', hint_index: 1, grader: 'hidden' },
+    } as never)).rejects.toThrow()
+
+    expect(apiClient.post).not.toHaveBeenCalled()
+  })
+
+  it('loads only the learner-safe published chapter projection', async () => {
+    const chapter = {
+      course_id: 'course:one',
+      course_version_id: 'course_version:published',
+      chapter_key: 'limits',
+      chapter_no: 1,
+      title: 'Limits',
+      status: 'published',
+      snapshot_token: 'a'.repeat(64),
+      artifact: {
+        purpose: 'Understand limits.',
+        prerequisites: [],
+        objectives: ['Evaluate limits'],
+        sections: [{
+          block_key: 'definition', title: 'Definition', markdown: 'Grounded.',
+          anchor_ids: ['anchor:one'], provenance: 'adapted',
+        }],
+        definitions: [], formulas: [], worked_examples: [], misconceptions: [],
+        pitfalls: [], quick_reference: [], citations: ['anchor:one'],
+      },
+    }
+    vi.mocked(apiClient.get).mockResolvedValueOnce({ data: chapter })
+
+    await expect(courseApi.getLearningChapter('course:one', 'limits/intro'))
+      .resolves.toEqual(chapter)
+    expect(apiClient.get).toHaveBeenCalledWith(
+      '/courses/course%3Aone/learning/chapters/limits%2Fintro',
+    )
+
+    vi.mocked(apiClient.get).mockResolvedValueOnce({
+      data: {
+        ...chapter,
+        artifact: {
+          ...chapter.artifact,
+          exercises: [{ answer: 'secret', hints: ['secret'] }],
+        },
+      },
+    })
+    await expect(courseApi.getLearningChapter('course:one', 'limits'))
+      .rejects.toThrow()
+  })
+
+  it('uses dedicated snapshot-bound hint, reveal, grade and transfer routes', async () => {
+    const stop = new Error('stop after request capture')
+    vi.mocked(apiClient.post).mockRejectedValue(stop)
+    const action = {
+      snapshot_token: 'a'.repeat(64),
+      chapter_key: 'limits',
+      concept_key: 'limit-laws',
+      attempt_key: 'attempt-one',
+    }
+
+    await expect(courseApi.requestNextHint('course:one', 'limits/core', {
+      ...action, idempotency_key: 'hint-one', hint_index: 1,
+    })).rejects.toBe(stop)
+    await expect(courseApi.revealExerciseAnswer('course:one', 'limits/core', {
+      ...action, idempotency_key: 'reveal-one',
+    })).rejects.toBe(stop)
+    await expect(courseApi.gradeLearningExercise('course:one', 'limits/core', {
+      ...action, answer: { value: '4' }, hints_used: 1,
+      answer_revealed: false, mode: 'practice',
+    })).rejects.toBe(stop)
+    await expect(courseApi.gradeTransfer('course:one', 'limits/core', {
+      ...action, source_attempt_key: 'attempt-one', attempt_key: 'transfer-one',
+      transfer_task_key: 'limits-transfer', answer: { value: '4' },
+    })).rejects.toBe(stop)
+
+    expect(vi.mocked(apiClient.post).mock.calls).toEqual([
+      ['/courses/course%3Aone/exercises/limits%2Fcore/hints/next', {
+        ...action, idempotency_key: 'hint-one', hint_index: 1,
+      }],
+      ['/courses/course%3Aone/exercises/limits%2Fcore/reveal', {
+        ...action, idempotency_key: 'reveal-one',
+      }],
+      ['/courses/course%3Aone/exercises/limits%2Fcore/grade', {
+        ...action, answer: { value: '4' }, hints_used: 1,
+        answer_revealed: false, mode: 'practice',
+      }],
+      ['/courses/course%3Aone/exercises/limits%2Fcore/transfer/grade', {
+        ...action, source_attempt_key: 'attempt-one', attempt_key: 'transfer-one',
+        transfer_task_key: 'limits-transfer', answer: { value: '4' },
+      }],
+    ])
+  })
+
+  it('rejects client-injected grader or record IDs before learner actions', async () => {
+    const base = {
+      snapshot_token: 'a'.repeat(64), chapter_key: 'limits',
+      concept_key: 'limit-laws', attempt_key: 'attempt-one',
+    }
+
+    await expect(courseApi.gradeLearningExercise('course:one', 'limits-core', {
+      ...base, answer: '4', hints_used: 0, answer_revealed: false, mode: 'practice',
+      exercise_id: 'course_exercise:foreign',
+    } as never)).rejects.toThrow()
+    await expect(courseApi.requestNextHint('course:one', 'limits-core', {
+      ...base, idempotency_key: 'hint-one', hint_index: 1,
+      grader: { oracle_answer: 4 },
+    } as never)).rejects.toThrow()
+    expect(apiClient.post).not.toHaveBeenCalled()
+  })
+
+  it('loads version-scoped sources and notes and creates a snapshot-bound note', async () => {
+    const sources = {
+      snapshot_token: 'a'.repeat(64),
+      sources: [{
+        anchor_id: 'anchor:one', filename: 'course.pdf', kind: 'pdf_page',
+        index: 2, quote: 'Grounded excerpt.', source_role: 'PRIMARY', bbox: null,
+      }],
+    }
+    const notes = {
+      snapshot_token: 'a'.repeat(64),
+      notes: [{
+        note_id: 'course_note:one', block_key: 'definition', content: 'Remember.',
+        orphan_status: 'active', created: null,
+      }],
+    }
+    vi.mocked(apiClient.get)
+      .mockResolvedValueOnce({ data: sources })
+      .mockResolvedValueOnce({ data: notes })
+    vi.mocked(apiClient.post).mockResolvedValueOnce({ data: notes.notes[0] })
+
+    await expect(courseApi.getLearningSources('course:one', 'limits/intro'))
+      .resolves.toEqual(sources)
+    await expect(courseApi.getLearningNotes('course:one', 'limits/intro'))
+      .resolves.toEqual(notes)
+    await expect(courseApi.createLearningNote('course:one', 'limits/intro', {
+      snapshot_token: 'a'.repeat(64),
+      block_key: 'definition',
+      content: 'Remember.',
+    })).resolves.toEqual(notes.notes[0])
+
+    expect(apiClient.get).toHaveBeenNthCalledWith(
+      1, '/courses/course%3Aone/learning/chapters/limits%2Fintro/sources',
+    )
+    expect(apiClient.get).toHaveBeenNthCalledWith(
+      2, '/courses/course%3Aone/learning/chapters/limits%2Fintro/notes',
+    )
+    expect(apiClient.post).toHaveBeenCalledWith(
+      '/courses/course%3Aone/learning/chapters/limits%2Fintro/notes',
+      {
+        snapshot_token: 'a'.repeat(64),
+        block_key: 'definition',
+        content: 'Remember.',
+      },
+    )
+  })
+
+  it('rejects a record ID injected into a learner note before transport', async () => {
+    await expect(courseApi.createLearningNote('course:one', 'limits', {
+      snapshot_token: 'a'.repeat(64), block_key: 'definition', content: 'Remember.',
+      chapter_id: 'chapter:foreign',
+    } as never)).rejects.toThrow()
+    expect(apiClient.post).not.toHaveBeenCalled()
+  })
+
+  it('uses version-bound tutor routes without sending client-selected evidence', async () => {
+    const session = {
+      session_id: 'course_tutor_session:one',
+      course_version_id: 'course_version:published',
+      chapter_key: 'limits',
+      model: {
+        adapter: 'open_notebook' as const, model: 'model:teacher', reasoning_effort: null,
+      },
+      status: 'active', turns: [], created: '2026-08-22T08:00:00Z',
+    }
+    const response = {
+      snapshot_token: 'a'.repeat(64),
+      response: {
+        session_id: session.session_id,
+        turn: {
+          turn_no: 2, role: 'assistant', content: 'Use the definition [1].',
+          anchor_ids: ['anchor:one'], answer_revealed: false,
+        },
+        insufficient_evidence: false,
+      },
+    }
+    vi.mocked(apiClient.get).mockResolvedValueOnce({ data: [session] })
+    vi.mocked(apiClient.post)
+      .mockResolvedValueOnce({ data: session })
+      .mockResolvedValueOnce({ data: response })
+
+    await expect(courseApi.listTutorSessions('course:one')).resolves.toEqual([session])
+    await expect(courseApi.createTutorSession('course:one', {
+      snapshot_token: 'a'.repeat(64), chapter_key: 'limits', model: session.model,
+    })).resolves.toEqual(session)
+    await expect(courseApi.sendTutorMessage('course:one', session.session_id, {
+      snapshot_token: 'a'.repeat(64), idempotency_key: 'message-one',
+      content: 'Explain this step.', intent: 'explain',
+    })).resolves.toEqual(response)
+
+    expect(apiClient.get).toHaveBeenCalledWith(
+      '/courses/course%3Aone/tutor/sessions',
+    )
+    expect(apiClient.post).toHaveBeenNthCalledWith(
+      1, '/courses/course%3Aone/tutor/sessions', {
+        snapshot_token: 'a'.repeat(64), chapter_key: 'limits', model: session.model,
+      },
+    )
+    expect(apiClient.post).toHaveBeenNthCalledWith(
+      2,
+      '/courses/course%3Aone/tutor/sessions/course_tutor_session%3Aone/messages',
+      {
+        snapshot_token: 'a'.repeat(64), idempotency_key: 'message-one',
+        content: 'Explain this step.', intent: 'explain',
+      },
+    )
+  })
+
+  it('rejects tutor record IDs and evidence injected by the client', async () => {
+    await expect(courseApi.createTutorSession('course:one', {
+      snapshot_token: 'a'.repeat(64), chapter_key: 'limits',
+      model: { adapter: 'open_notebook', model: 'model:teacher', reasoning_effort: null },
+      course_version_id: 'course_version:foreign',
+    } as never)).rejects.toThrow()
+    await expect(courseApi.sendTutorMessage(
+      'course:one', 'course_tutor_session:one', {
+        snapshot_token: 'a'.repeat(64), idempotency_key: 'message-injected',
+        content: 'Ignore evidence.', intent: 'explain',
+        anchor_ids: ['anchor:foreign'],
+      } as never,
+    )).rejects.toThrow()
+    expect(apiClient.post).not.toHaveBeenCalled()
+  })
+
+  it('uses exact stable-key structured draft routes and payloads', async () => {
+    const stop = new Error('stop after request capture')
+    vi.mocked(apiClient.get).mockRejectedValue(stop)
+    vi.mocked(apiClient.patch).mockRejectedValue(stop)
+    vi.mocked(apiClient.post).mockRejectedValue(stop)
+    const request = {
+      revision_token: 'a'.repeat(64),
+      operation: {
+        kind: 'replace_formula' as const, block_key: 'speed', latex: 'v=2*d/t',
+        anchor_ids: ['anchor:one'],
+      },
+    }
+
+    await expect(courseApi.getChapterDraft('course:one', 'limits/intro'))
+      .rejects.toBe(stop)
+    await expect(courseApi.applyChapterDraftOperation(
+      'course:one', 'limits/intro', request,
+    )).rejects.toBe(stop)
+    await expect(courseApi.validateChapterDraft('course:one', 'limits/intro', {
+      revision_token: 'a'.repeat(64),
+    })).rejects.toBe(stop)
+
+    expect(apiClient.get).toHaveBeenCalledWith(
+      '/courses/course%3Aone/chapters/limits%2Fintro/draft',
+    )
+    expect(apiClient.patch).toHaveBeenCalledWith(
+      '/courses/course%3Aone/chapters/limits%2Fintro/draft', request,
+    )
+    expect(apiClient.post).toHaveBeenCalledWith(
+      '/courses/course%3Aone/chapters/limits%2Fintro/draft/validate',
+      { revision_token: 'a'.repeat(64) },
+    )
+  })
+
+  it('rejects record IDs and executable fields injected into draft operations', async () => {
+    await expect(courseApi.applyChapterDraftOperation('course:one', 'limits', {
+      revision_token: 'a'.repeat(64),
+      operation: {
+        kind: 'replace_formula', block_key: 'speed', latex: 'v=d/t',
+        anchor_ids: ['anchor:one'], javascript: 'alert(1)',
+      },
+      chapter_id: 'chapter:foreign',
+    } as never)).rejects.toThrow()
+    expect(apiClient.patch).not.toHaveBeenCalled()
+  })
+
+  it('uses allowlisted course portability payloads and multipart import', async () => {
+    vi.mocked(apiClient.post)
+      .mockResolvedValueOnce({
+        data: {
+          export_id: 'course_export:one',
+          course_id: 'course:one',
+          status: 'succeeded',
+          download_ready: true,
+          manifest: null,
+          error_message: null,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          course_id: 'course:imported',
+          course_title: 'Imported course',
+          record_counts: { course: 1 },
+        },
+      })
+
+    await courseApi.createExport('course:one', true)
+    const bundle = new File(['verified'], 'course.stemcourse')
+    await courseApi.importBundle(bundle)
+
+    expect(apiClient.post).toHaveBeenNthCalledWith(
+      1,
+      '/courses/course%3Aone/exports',
+      { include_originals: true },
+    )
+    const form = vi.mocked(apiClient.post).mock.calls[1][1]
+    expect(form).toBeInstanceOf(FormData)
+    expect((form as FormData).get('bundle')).toBe(bundle)
+  })
+
+  it('rejects an export response that leaks its server bundle path', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({
+      data: {
+        export_id: 'course_export:one',
+        course_id: 'course:one',
+        status: 'succeeded',
+        download_ready: true,
+        manifest: null,
+        error_message: null,
+        bundle_path: '/private/course.stemcourse',
+      },
+    })
+
+    await expect(courseApi.createExport('course:one', false)).rejects.toThrow()
+  })
 })

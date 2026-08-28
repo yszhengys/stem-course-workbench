@@ -127,9 +127,15 @@ export interface LabPoint {
   y: number
 }
 
+export interface LabVector extends LabPoint {
+  u: number
+  v: number
+}
+
 export interface SampledLab {
   paths: LabPoint[][]
   points: LabPoint[]
+  vectors: LabVector[]
   totalSamples: number
 }
 
@@ -159,27 +165,30 @@ export function sampleLab(spec: LabSpec, controlValues: Record<string, number> =
   const variables = defaultVariables(spec, controlValues)
   const paths: LabPoint[][] = []
   const points: LabPoint[] = []
+  const vectors: LabVector[] = []
   let totalSamples = 0
 
   if (spec.kind === 'function_plot') {
     const count = Math.max(2, Math.min(250, Math.floor(MAX_TOTAL_LAB_SAMPLES / Math.max(1, spec.expressions.length))))
     for (const expression of spec.expressions) {
       const xBounds = domain(spec, 'x', [-10, 10])
-      paths.push(sampleCurve(count, xBounds, (x) => ({
+      const path = sampleCurve(count, xBounds, (x) => ({
         x,
         y: evaluateSafeExpression(expression, { ...variables, x }),
-      })))
-      totalSamples += count
+      }))
+      paths.push(path)
+      totalSamples += path.length
     }
   } else if (spec.kind === 'parametric_curve' || spec.kind === 'kinematics') {
     if (spec.expressions.length < 2) throw new Error('This Lab requires two expressions')
     const count = Math.min(500, MAX_TOTAL_LAB_SAMPLES)
     const tBounds = domain(spec, 't', [0, 10])
-    paths.push(sampleCurve(count, tBounds, (t) => ({
+    const path = sampleCurve(count, tBounds, (t) => ({
       x: evaluateSafeExpression(spec.expressions[0], { ...variables, t }),
       y: evaluateSafeExpression(spec.expressions[1], { ...variables, t }),
-    })))
-    totalSamples = count
+    }))
+    paths.push(path)
+    totalSamples = path.length
   } else if (spec.kind === 'vector_field') {
     if (spec.expressions.length < 2) throw new Error('A vector field requires two expressions')
     const side = 16
@@ -192,10 +201,11 @@ export function sampleLab(spec: LabSpec, controlValues: Record<string, number> =
         const dx = evaluateSafeExpression(spec.expressions[0], { ...variables, x, y })
         const dy = evaluateSafeExpression(spec.expressions[1], { ...variables, x, y })
         const magnitude = Math.hypot(dx, dy) || 1
+        vectors.push({ x, y, u: dx, v: dy })
         paths.push([{ x, y }, { x: x + dx / magnitude * 0.3, y: y + dy / magnitude * 0.3 }])
       }
     }
-    totalSamples = side * side
+    totalSamples = vectors.length
   } else {
     for (const object of spec.objects) {
       if (object.type === 'point' && typeof object.x === 'number' && typeof object.y === 'number') {
@@ -217,5 +227,5 @@ export function sampleLab(spec: LabSpec, controlValues: Record<string, number> =
   }
 
   if (totalSamples > MAX_TOTAL_LAB_SAMPLES) throw new Error('Lab sample limit exceeded')
-  return { paths, points, totalSamples }
+  return { paths, points, vectors, totalSamples }
 }

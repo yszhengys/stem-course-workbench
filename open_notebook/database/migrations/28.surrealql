@@ -1,0 +1,13 @@
+-- Migration 28: immutable learning-upgrade lineage on Course versions.
+-- Existing versions remain unchanged; only explicitly prepared upgrades set
+-- these optional fields.
+
+DEFINE FIELD IF NOT EXISTS upgrade_source_version ON TABLE course_version
+    TYPE option<record<course_version>>;
+DEFINE FIELD IF NOT EXISTS upgrade_idempotency_key ON TABLE course_version
+    TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS upgrade_confirmation ON TABLE course_version
+    TYPE option<string>;
+
+DEFINE INDEX IF NOT EXISTS course_version_upgrade_source_idx
+    ON TABLE course_version FIELDS course, upgrade_source_version;

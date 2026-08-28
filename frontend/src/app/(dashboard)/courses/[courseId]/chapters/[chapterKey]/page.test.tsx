@@ -7,6 +7,7 @@ import {
   useCourse,
   useCourseAnchors,
   useCourseAttempts,
+  useCourseExerciseBuildStatus,
   useCourseFindings,
   useCourseLabs,
   useCourseModelOptions,
@@ -17,11 +18,13 @@ import {
   useCurrentCourseChapter,
   useCurrentCourseOutline,
   useGenerateCourseChapter,
+  useGenerateCourseExerciseBank,
   usePublishCourseChapter,
   useReattachCourseNote,
   useReviewCourseChapter,
   useUpdateCourseFinding,
   useUpdateCourseProgress,
+  useVerifyCourseExercise,
 } from '@/lib/hooks/use-courses'
 
 vi.mock('next/navigation', () => ({
@@ -36,7 +39,32 @@ vi.mock('@/components/layout/AppShell', () => ({
   AppShell: ({ children }: { children: React.ReactNode }) => <main>{children}</main>,
 }))
 vi.mock('@/components/course/ChapterPublicationGate', () => ({
-  ChapterPublicationGate: () => <div />,
+  ChapterPublicationGate: ({ additionalBlockedReason }: { additionalBlockedReason?: string | null }) => (
+    <div data-testid="publication-extra-block">{additionalBlockedReason ?? ''}</div>
+  ),
+}))
+vi.mock('@/components/course/authoring/ExerciseBankReview', () => ({
+  ExerciseBankReview: ({ onGenerate, status }: { onGenerate: () => void; status?: { status: string } }) => (
+    <section>
+      <span data-testid="exercise-build-status">{status?.status ?? 'loading'}</span>
+      <button type="button" onClick={onGenerate}>course.generateExerciseBank</button>
+    </section>
+  ),
+}))
+vi.mock('@/components/course/authoring/StructuredDraftEditor', () => ({
+  StructuredDraftEditor: ({ courseId, chapterKey }: { courseId: string; chapterKey: string }) => (
+    <section>{`draft-editor:${courseId}:${chapterKey}`}</section>
+  ),
+}))
+vi.mock('@/components/course/authoring/AcademicVerificationReview', () => ({
+  AcademicVerificationReview: ({ courseId, chapterKey }: { courseId: string; chapterKey: string }) => (
+    <section>{`academic-review:${courseId}:${chapterKey}`}</section>
+  ),
+}))
+vi.mock('@/components/course/authoring/LabProposalReview', () => ({
+  LabProposalReview: ({ courseId, chapterKey }: { courseId: string; chapterKey: string }) => (
+    <section>{`lab-proposal-review:${courseId}:${chapterKey}`}</section>
+  ),
 }))
 vi.mock('@/components/course/CourseExercises', () => ({ CourseExercises: () => <div /> }))
 vi.mock('@/components/course/LabRenderer', () => ({ LabRenderer: () => <div /> }))
@@ -48,6 +76,7 @@ vi.mock('@/lib/hooks/use-courses', () => ({
   useCourse: vi.fn(),
   useCourseAnchors: vi.fn(),
   useCourseAttempts: vi.fn(),
+  useCourseExerciseBuildStatus: vi.fn(),
   useCourseFindings: vi.fn(),
   useCourseLabs: vi.fn(),
   useCourseModelOptions: vi.fn(),
@@ -58,11 +87,13 @@ vi.mock('@/lib/hooks/use-courses', () => ({
   useCurrentCourseChapter: vi.fn(),
   useCurrentCourseOutline: vi.fn(),
   useGenerateCourseChapter: vi.fn(),
+  useGenerateCourseExerciseBank: vi.fn(),
   usePublishCourseChapter: vi.fn(),
   useReattachCourseNote: vi.fn(),
   useReviewCourseChapter: vi.fn(),
   useUpdateCourseFinding: vi.fn(),
   useUpdateCourseProgress: vi.fn(),
+  useVerifyCourseExercise: vi.fn(),
 }))
 
 function queryResult(data: unknown) {
@@ -96,13 +127,48 @@ const options = [sol, luna].map((selection) => ({
   configured: true,
   selectable: true,
 }))
+const approvedLabHash = 'a'.repeat(64)
+const approvedLab = {
+  id: 'lab:one',
+  lab_key: 'limits-plot',
+  lab_type: 'function_plot',
+  proposal_hash: approvedLabHash,
+  approved_hash: approvedLabHash,
+  approved_at: '2026-08-29T02:00:00Z',
+  approval_reason: 'Checked every teaching field.',
+  spec: {
+    kind: 'function_plot',
+    key: 'limits-plot',
+    title: 'Limits plot',
+    anchor_ids: [],
+    provenance: 'pedagogical',
+    expressions: ['x'],
+    domain: { x: [-2, 2] },
+    controls: [],
+    objects: [],
+    pedagogy: {
+      learning_objectives: ['Interpret a graph.'],
+      prerequisite_concepts: [],
+      variables: [],
+      prediction_prompt: 'Predict the graph.',
+      steps: ['Inspect the graph.'],
+      expected_observations: ['The graph is continuous.'],
+      student_submission: 'Record one observation.',
+      rubric: ['Uses graph evidence.'],
+      error_boundaries: ['Use the displayed domain.'],
+      accessible_alternative: 'Read the data table.',
+    },
+  },
+}
 
 describe('CourseChapterPage review models', () => {
   const reviewMutation = mutationResult()
+  const exerciseMutation = mutationResult()
 
   beforeEach(() => {
     vi.clearAllMocks()
     reviewMutation.mutateAsync.mockResolvedValue({ command_id: 'command:review' })
+    exerciseMutation.mutateAsync.mockResolvedValue({ command_id: 'command:exercise' })
     vi.mocked(useCourse).mockReturnValue(queryResult({
       id: 'course:one', title: 'Calculus', status: 'generating', outline_version_id: 'course_version:one',
     }) as never)
@@ -124,8 +190,22 @@ describe('CourseChapterPage review models', () => {
       locator: { kind: 'pdf_page', index: 1, quote: 'Grounded.' },
     }]) as never)
     vi.mocked(useCourseModelOptions).mockReturnValue(queryResult({
-      defaults: { chapter_content: sol, review: luna, escalation: sol },
+      defaults: {
+        chapter_content: sol,
+        review: luna,
+        escalation: sol,
+        exercise_bank: sol,
+        exercise_bank_review: luna,
+      },
       options,
+    }) as never)
+    vi.mocked(useCourseExerciseBuildStatus).mockReturnValue(queryResult({
+      run_id: null,
+      command_id: null,
+      status: 'not_started',
+      error_message: null,
+      exercise_count: 0,
+      exercises: [],
     }) as never)
     for (const hook of [useCourseAttempts, useCourseFindings, useCourseLabs, useCourseNotes, useCourseProgress]) {
       vi.mocked(hook).mockReturnValue(queryResult([]) as never)
@@ -141,6 +221,8 @@ describe('CourseChapterPage review models', () => {
     ]) {
       vi.mocked(hook).mockReturnValue(mutationResult() as never)
     }
+    vi.mocked(useGenerateCourseExerciseBank).mockReturnValue(exerciseMutation as never)
+    vi.mocked(useVerifyCourseExercise).mockReturnValue(mutationResult() as never)
     vi.mocked(useReviewCourseChapter).mockReturnValue(reviewMutation as never)
     vi.mocked(useCommandStatus).mockReturnValue({
       status: undefined, errorMessage: null, isTimedOut: false, isFetching: false,
@@ -149,6 +231,9 @@ describe('CourseChapterPage review models', () => {
 
   it('defaults three independent stages and submits Luna plus explicit Sol', async () => {
     render(<CourseChapterPage />)
+
+    expect(screen.getByText('draft-editor:course:one:limits')).toBeInTheDocument()
+    expect(screen.getByText('academic-review:course:one:limits')).toBeInTheDocument()
 
     await waitFor(() => {
       expect(document.querySelector('#course-content-model')).toHaveValue('codex_cli|gpt-5.6-sol')
@@ -164,5 +249,49 @@ describe('CourseChapterPage review models', () => {
       escalation_model: sol,
       force: false,
     }))
+  })
+
+  it('submits explicit exercise generation and review models with the selected evidence', async () => {
+    render(<CourseChapterPage />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'course.generateExerciseBank' }))
+
+    await waitFor(() => expect(exerciseMutation.mutateAsync).toHaveBeenCalledWith({
+      anchor_ids: ['anchor:one'],
+      prompt_version: 'v2',
+      model: sol,
+      review_model: luna,
+      force: false,
+    }))
+    expect(screen.getByTestId('publication-extra-block')).toHaveTextContent(
+      'course.exercisePublicationBlocked'
+    )
+  })
+
+  it('removes the UI publication block only for a succeeded L2/L3 core bank', () => {
+    vi.mocked(useCourseExerciseBuildStatus).mockReturnValue(queryResult({
+      run_id: 'course_generation_run:one',
+      command_id: 'command:one',
+      status: 'succeeded',
+      error_message: null,
+      exercise_count: 1,
+      exercises: [{
+        key: 'limits-core',
+        blueprint: {
+          is_core: true,
+          is_gating: true,
+          answer_type: 'numeric',
+          grader: { kind: 'numeric' },
+          transfer_task: {},
+        },
+        verification: { level: 'L2' },
+      }],
+    }) as never)
+    vi.mocked(useCourseLabs).mockReturnValue(queryResult([approvedLab]) as never)
+
+    render(<CourseChapterPage />)
+
+    expect(screen.getByTestId('exercise-build-status')).toHaveTextContent('succeeded')
+    expect(screen.getByTestId('publication-extra-block')).toBeEmptyDOMElement()
   })
 })

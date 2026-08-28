@@ -227,6 +227,8 @@ export const jaJP = {
     settings: "設定",
     advanced: "詳細設定",
     nav: "ナビゲーション",
+    expandSidebar: "サイドバーを展開",
+    collapseSidebar: "サイドバーを折りたたむ",
     language: "言語を切り替え",
     theme: "テーマ",
     ask: "質問",

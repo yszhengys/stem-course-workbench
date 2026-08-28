@@ -1,0 +1,6 @@
+-- Roll back only Course bibliography metadata and its isolated cascade events.
+
+REMOVE EVENT IF EXISTS course_bibliography_course_delete ON TABLE course;
+REMOVE EVENT IF EXISTS course_bibliography_source_delete ON TABLE source;
+REMOVE INDEX IF EXISTS course_bibliography_identity_unique ON TABLE course_bibliographic_source;
+REMOVE TABLE IF EXISTS course_bibliographic_source;

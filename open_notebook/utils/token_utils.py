@@ -40,7 +40,20 @@ def token_count(input_string: str) -> int:
         logger.warning(
             "tiktoken unavailable, falling back to word-count estimation: {}", e
         )
-        return int(len(input_string.split()) * 1.3)
+        if not input_string:
+            return 0
+
+        word_estimate = int(len(input_string.split()) * 1.3)
+        non_ascii_characters = sum(
+            1 for character in input_string
+            if not character.isspace() and not character.isascii()
+        )
+        ascii_characters = sum(
+            1 for character in input_string
+            if not character.isspace() and character.isascii()
+        )
+        character_estimate = non_ascii_characters + (ascii_characters + 3) // 4
+        return max(1, word_estimate, character_estimate)
 
 
 def token_cost(token_count: int, cost_per_million: float = 0.150) -> float:

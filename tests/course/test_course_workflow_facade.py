@@ -542,6 +542,10 @@ async def test_chapter_labs_map_stable_keys_to_current_persistent_records(
             "lab_key": "limit-plot",
             "lab_type": "function_plot",
             "spec": current.payload,
+            "proposal_hash": None,
+            "approved_hash": None,
+            "approved_at": None,
+            "approval_reason": None,
         }
     ]
 
@@ -699,6 +703,14 @@ async def test_publish_rechecks_unresolved_findings_as_final_defense(
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
     monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
+    monkeypatch.setattr(
+        "api.course_service.PublicationService.assert_exercises_ready",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "api.course_service.PublicationService.assert_labs_ready",
+        AsyncMock(),
+    )
     monkeypatch.setattr(
         "api.course_service.repo_query",
         AsyncMock(

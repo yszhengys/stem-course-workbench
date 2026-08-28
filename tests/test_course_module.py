@@ -181,6 +181,58 @@ class TestCourseRouter:
         response = client.post("/api/courses", json={"title": ""})
         assert response.status_code == 422  # pydantic validation
 
+    @pytest.mark.parametrize("subject", ["computer_science", "chemistry", "mathematics"])
+    def test_create_course_rejects_unopened_subjects(self, client, subject):
+        response = client.post(
+            "/api/courses",
+            json={"title": "Unsupported", "subject": subject},
+        )
+
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize("subject", ["math", "physics"])
+    def test_create_course_accepts_open_subjects(self, client, monkeypatch, subject):
+        create = AsyncMock(
+            return_value=Course(
+                id="course:1",
+                title="Supported",
+                notebook="notebook:1",
+                subject=subject,
+            )
+        )
+        monkeypatch.setattr(CourseService, "create_course", create)
+
+        response = client.post(
+            "/api/courses",
+            json={"title": "Supported", "subject": subject},
+        )
+
+        assert response.status_code == 201
+        assert response.json()["subject"] == subject
+        assert create.await_args is not None
+        assert create.await_args.kwargs["subject"] == subject
+
+    def test_create_course_rejects_unknown_fields(self, client):
+        response = client.post(
+            "/api/courses",
+            json={"title": "Calculus", "client_record_id": "course:foreign"},
+        )
+
+        assert response.status_code == 422
+
+    def test_update_course_rejects_unopened_subjects_and_unknown_fields(self, client):
+        invalid_subject = client.patch(
+            "/api/courses/course:1",
+            json={"subject": "computer_science"},
+        )
+        unknown_field = client.patch(
+            "/api/courses/course:1",
+            json={"client_record_id": "course:foreign"},
+        )
+
+        assert invalid_subject.status_code == 422
+        assert unknown_field.status_code == 422
+
     def test_list_courses_empty(self, client, monkeypatch):
         async def fake_get_all(order_by=None):
             return []

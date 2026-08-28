@@ -38,6 +38,8 @@ export const QUERY_KEYS = {
   courses: ['courses'] as const,
   course: (id: string) => ['courses', id] as const,
   courseSources: (id: string) => ['courses', id, 'sources', 'eligible'] as const,
+  courseBibliography: (id: string) => ['courses', id, 'bibliography'] as const,
+  courseCoverage: (id: string) => ['courses', id, 'coverage'] as const,
   courseAnchors: (id: string) => ['courses', id, 'evidence', 'anchors'] as const,
   courseModels: ['courses', 'model-options'] as const,
   courseOutline: (id: string) => ['courses', id, 'outline'] as const,
@@ -47,4 +49,19 @@ export const QUERY_KEYS = {
   courseNotes: (id: string) => ['courses', id, 'notes'] as const,
   courseLabs: (id: string, chapterKey: string) => ['courses', id, 'chapters', chapterKey, 'labs'] as const,
   courseAttempts: (id: string, chapterKey: string) => ['courses', id, 'chapters', chapterKey, 'attempts'] as const,
+  courseLearningOverview: (id: string) => ['courses', id, 'learning', 'overview'] as const,
+  courseLearningChapter: (id: string, chapterKey: string) =>
+    ['courses', id, 'learning', 'chapters', chapterKey] as const,
+  courseLearningSources: (id: string, chapterKey: string) =>
+    ['courses', id, 'learning', 'chapters', chapterKey, 'sources'] as const,
+  courseLearningNotes: (id: string, chapterKey: string) =>
+    ['courses', id, 'learning', 'chapters', chapterKey, 'notes'] as const,
+  courseTutorSessions: (id: string) => ['courses', id, 'tutor', 'sessions'] as const,
+  courseChapterDraft: (id: string, chapterKey: string) => (
+    ['courses', id, 'chapters', chapterKey, 'draft'] as const
+  ),
+  courseReviewQueue: (id: string) => ['courses', id, 'learning', 'review-queue'] as const,
+  courseExercises: (id: string, chapterKey?: string) => ['courses', id, 'exercises', chapterKey] as const,
+  courseExerciseBuild: (id: string, chapterKey: string) =>
+    ['courses', id, 'chapters', chapterKey, 'exercises', 'build'] as const,
 }

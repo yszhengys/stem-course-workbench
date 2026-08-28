@@ -1,0 +1,210 @@
+{
+  "fixture_version": 1,
+  "fixture_id": "synthetic-mechanics-constant-acceleration",
+  "subject": "physics",
+  "topic": "constant-acceleration",
+  "license": "CC0-1.0",
+  "generation_note": "Original synthetic fixture authored for deterministic Course V2 quality tests; it is not copied from a textbook.",
+  "source_title": "Synthetic Mechanics Notes",
+  "source_evidence": [
+    {
+      "anchor_id": "anchor:mechanics_basic",
+      "category": "exercise",
+      "source_number": "M-3",
+      "text": "Exercise M-3. A cart changes velocity from 2 m/s to 8 m/s in 3 s. Find the constant acceleration with direction and units."
+    },
+    {
+      "anchor_id": "anchor:mechanics_advanced",
+      "category": "exercise",
+      "source_number": "M-14",
+      "text": "Exercise M-14. Reconstruct a two-dimensional velocity vector from perpendicular components, change reference axes, and verify the units."
+    },
+    {
+      "anchor_id": "anchor:mechanics_answer",
+      "category": "answer",
+      "source_number": "M-3",
+      "text": "Answer M-3. a=(8-2)/3=2 m/s² in the positive direction."
+    },
+    {
+      "anchor_id": "anchor:mechanics_figure",
+      "category": "figure",
+      "source_number": "Figure M-1",
+      "text": "Figure M-1. Velocity-time graph: a straight line rises from (0 s, 2 m/s) to (3 s, 8 m/s); its slope is the acceleration."
+    }
+  ],
+  "worked_example": {
+    "prompt": "A bicycle speeds up from 1 m/s to 7 m/s in 2 s. Find its average acceleration.",
+    "steps": [
+      "Choose the forward direction as positive.",
+      "Compute the velocity change: 7 m/s - 1 m/s = 6 m/s.",
+      "Divide by 2 s and verify that (m/s)/s has dimension m/s²."
+    ],
+    "answer": "3 m/s² forward"
+  },
+  "figure_description": "A labeled velocity-time graph with axes in seconds and metres per second; the slope triangle has rise 6 m/s and run 3 s.",
+  "unit_expectation": "Every objective mechanics result states a compatible physical unit and reference direction where relevant.",
+  "exercises": [
+    {
+      "key": "mechanics-source-basic",
+      "chapter_key": "constant-acceleration",
+      "prompt": "Exercise M-3. A cart changes velocity from 2 m/s to 8 m/s in 3 s. Find its acceleration.",
+      "concept_keys": ["constant-acceleration"],
+      "exercise_type": "source_practice",
+      "answer_type": "unit",
+      "source_anchor_ids": ["anchor:mechanics_basic"],
+      "source_number": "M-3",
+      "source_section": "Velocity and acceleration",
+      "difficulty": {
+        "concept_count": 1,
+        "reasoning_steps": 3,
+        "symbolic_depth": 1,
+        "representation_shifts": 0,
+        "proof_burden": 0,
+        "physics_constraints": 2
+      },
+      "grader": {
+        "kind": "unit",
+        "expected_value": "2",
+        "expected_unit": "m/s^2",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0
+      },
+      "is_source_level": true
+    },
+    {
+      "key": "mechanics-source-advanced",
+      "chapter_key": "constant-acceleration",
+      "prompt": "Exercise M-14. Reconstruct velocity components after rotating the reference axes and preserve units.",
+      "concept_keys": ["constant-acceleration"],
+      "exercise_type": "source_practice",
+      "answer_type": "vector",
+      "source_anchor_ids": ["anchor:mechanics_advanced"],
+      "source_number": "M-14",
+      "source_section": "Vectors and reference frames",
+      "difficulty": {
+        "concept_count": 3,
+        "reasoning_steps": 7,
+        "symbolic_depth": 4,
+        "representation_shifts": 3,
+        "proof_burden": 1,
+        "physics_constraints": 5
+      },
+      "grader": {
+        "kind": "vector",
+        "expected_components": ["3", "4"],
+        "expected_unit": "m/s",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0
+      },
+      "is_source_level": true
+    },
+    {
+      "key": "mechanics-core",
+      "chapter_key": "constant-acceleration",
+      "prompt": "Find the cart acceleration, state the reference direction, and check the dimensions of every quantity.",
+      "concept_keys": ["constant-acceleration"],
+      "exercise_type": "generated_core",
+      "answer_type": "unit",
+      "hints": [
+        "Choose and state the positive direction before assigning signs.",
+        "Represent acceleration as change in velocity divided by elapsed time.",
+        "Substitute the two signed velocities and the time interval.",
+        "Check both the numerical slope and the resulting m/s² dimension."
+      ],
+      "source_anchor_ids": ["anchor:mechanics_basic", "anchor:mechanics_figure"],
+      "difficulty": {
+        "concept_count": 1,
+        "reasoning_steps": 4,
+        "symbolic_depth": 2,
+        "representation_shifts": 1,
+        "proof_burden": 0,
+        "physics_constraints": 3
+      },
+      "grader": {
+        "kind": "unit",
+        "expected_value": "2",
+        "expected_unit": "m/s^2",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0
+      },
+      "is_core": true,
+      "is_gating": true,
+      "transfer_task": {
+        "key": "mechanics-core-transfer",
+        "prompt": "Read the acceleration from the slope of the velocity-time graph and verify it with the symbolic relation.",
+        "invariant_concept_keys": ["constant-acceleration"],
+        "dimensions": ["representation"],
+        "change_evidence": [
+          {
+            "dimension": "representation",
+            "source_structure": "symbolic equation",
+            "target_structure": "graphical intersection",
+            "rationale": "The constant velocity slope is invariant while the representation changes from values in an equation to a plotted line."
+          }
+        ],
+        "answer_type": "unit",
+        "difficulty": {
+          "concept_count": 1,
+          "reasoning_steps": 5,
+          "symbolic_depth": 2,
+          "representation_shifts": 2,
+          "proof_burden": 0,
+          "physics_constraints": 3
+        },
+        "grader": {
+          "kind": "unit",
+          "expected_value": "2",
+          "expected_unit": "m/s^2",
+          "absolute_tolerance": 0,
+          "relative_tolerance": 0
+        },
+        "anchor_ids": ["anchor:mechanics_basic", "anchor:mechanics_figure"]
+      }
+    },
+    {
+      "key": "mechanics-challenge",
+      "chapter_key": "constant-acceleration",
+      "prompt": "Give the velocity vector with components 3 m/s and 4 m/s in the declared reference frame.",
+      "concept_keys": ["constant-acceleration"],
+      "exercise_type": "generated_challenge",
+      "answer_type": "vector",
+      "difficulty": {
+        "concept_count": 2,
+        "reasoning_steps": 6,
+        "symbolic_depth": 3,
+        "representation_shifts": 3,
+        "proof_burden": 1,
+        "physics_constraints": 4
+      },
+      "grader": {
+        "kind": "vector",
+        "expected_components": ["3", "4"],
+        "expected_unit": "m/s",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0
+      }
+    }
+  ],
+  "correct_answers": {
+    "mechanics-source-basic": {
+      "value": "200",
+      "unit": "cm/s^2"
+    },
+    "mechanics-source-advanced": {
+      "components": ["300", "400"],
+      "unit": "cm/s"
+    },
+    "mechanics-core": {
+      "value": "2",
+      "unit": "m/s^2"
+    },
+    "mechanics-challenge": {
+      "components": ["3", "4"],
+      "unit": "m/s"
+    },
+    "mechanics-core-transfer": {
+      "value": "2",
+      "unit": "m/s^2"
+    }
+  }
+}

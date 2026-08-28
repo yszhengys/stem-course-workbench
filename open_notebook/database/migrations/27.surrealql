@@ -1,0 +1,21 @@
+-- Migration 27: exercise verification provenance and generation lineage.
+-- Existing migration 26 exercises remain unchanged except for an explicit L1 default.
+
+DEFINE FIELD IF NOT EXISTS verification ON TABLE course_exercise FLEXIBLE TYPE object DEFAULT {
+    level: 'L1',
+    method: 'self_consistency',
+    anchor_ids: []
+};
+DEFINE FIELD IF NOT EXISTS generation_run ON TABLE course_exercise TYPE option<record<course_generation_run>>;
+DEFINE FIELD IF NOT EXISTS review_run_ids ON TABLE course_exercise TYPE array<record<course_generation_run>> DEFAULT [];
+
+-- Backfill both newly-required fields in one write. Updating either field alone
+-- would fail SCHEMAFULL validation while the other is still missing.
+UPDATE course_exercise SET
+    verification = IF verification = NONE {
+        { level: 'L1', method: 'self_consistency', anchor_ids: [] }
+    } ELSE { verification },
+    review_run_ids = IF review_run_ids = NONE { [] } ELSE { review_run_ids }
+WHERE verification = NONE OR review_run_ids = NONE;
+
+DEFINE INDEX IF NOT EXISTS course_exercise_generation_run_idx ON TABLE course_exercise FIELDS generation_run;

@@ -1,0 +1,6 @@
+-- Roll back only migration 30 preview metadata; evidence anchors remain intact.
+
+REMOVE FIELD IF EXISTS visual_preview_path ON TABLE course_evidence_anchor;
+REMOVE FIELD IF EXISTS visual_preview_status ON TABLE course_evidence_anchor;
+
+UPDATE course_evidence_anchor UNSET visual_preview_path, visual_preview_status;

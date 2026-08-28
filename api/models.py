@@ -1,11 +1,43 @@
+import json
+import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from open_notebook.course.contracts import (
+    ChapterArtifact,
     LabSpecVariant,
     ModelSelection,
+    ProvenanceLabel,
     SafeLabKey,
+    ValidationFinding,
+)
+from open_notebook.course.models import (
+    normalize_bibliographic_authors,
+    normalize_bibliographic_text,
+    normalize_doi,
+    normalize_isbn,
+)
+from open_notebook.course.v2_contracts import (
+    AnswerType,
+    ConceptMastery,
+    CourseBundleManifest,
+    DifficultyVector,
+    EditableDraftOperation,
+    ExerciseBlueprint,
+    ExerciseVerification,
+    GradeResult,
+    LearningEvent,
+    LearningEventPayload,
+    PositionPayload,
+    ReviewQueueItem,
+    Sha256,
+    StableKey,
+    TransferDimension,
+    TutorResponse,
+    TutorTurn,
+    ValidationCheck,
 )
 
 
@@ -811,6 +843,738 @@ class StrictCourseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class CourseBibliographyUpdateRequest(StrictCourseRequest):
+    expected_updated: datetime | None
+    authors: tuple[str, ...] = Field(default_factory=tuple, max_length=20)
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    edition: str | None = Field(default=None, min_length=1, max_length=100)
+    publisher: str | None = Field(default=None, min_length=1, max_length=300)
+    year: int | None = Field(default=None, ge=1000, le=2100)
+    doi: str | None = Field(default=None, min_length=7, max_length=255)
+    isbn: str | None = Field(default=None, min_length=10, max_length=13)
+    license: str | None = Field(default=None, min_length=1, max_length=200)
+    manually_reviewed: bool
+
+    @field_validator("expected_updated")
+    @classmethod
+    def expected_revision_is_aware(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("expected_updated must include a UTC offset")
+        return value.astimezone(timezone.utc) if value is not None else None
+
+    @field_validator("authors", mode="before")
+    @classmethod
+    def authors_are_normalized(cls, value: Any) -> tuple[str, ...]:
+        return normalize_bibliographic_authors(value)
+
+    @field_validator("title", "edition", "publisher", "license", mode="before")
+    @classmethod
+    def text_is_normalized(cls, value: Any) -> str | None:
+        return normalize_bibliographic_text(value)
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def doi_is_normalized(cls, value: Any) -> str | None:
+        return normalize_doi(value)
+
+    @field_validator("isbn", mode="before")
+    @classmethod
+    def isbn_is_normalized(cls, value: Any) -> str | None:
+        return normalize_isbn(value)
+
+
+class CourseBibliographicSourceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^course_bibliographic_source:[^:]+$")
+    course: str = Field(pattern=r"^course:[^:]+$")
+    source: str = Field(pattern=r"^source:[^:]+$")
+    source_role: Literal["PRIMARY", "SUPPLEMENT"]
+    authors: tuple[str, ...] = Field(max_length=20)
+    title: str | None
+    edition: str | None
+    publisher: str | None
+    year: int | None
+    doi: str | None
+    isbn: str | None
+    license: str | None
+    manually_reviewed: bool
+    created: datetime
+    updated: datetime
+
+
+class CourseCoverageLocator(BaseModel):
+    """Portable locator metadata; intentionally excludes quotes and local paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["pdf_page", "pptx_slide"]
+    index: int = Field(ge=1)
+    block_key: str = Field(min_length=1, max_length=200)
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bbox: tuple[float, float, float, float] | None
+
+    @field_validator("bbox")
+    @classmethod
+    def bbox_is_normalized(
+        cls, value: tuple[float, float, float, float] | None
+    ) -> tuple[float, float, float, float] | None:
+        if value is not None and any(point < 0 or point > 1 for point in value):
+            raise ValueError("coverage bbox coordinates must be normalized")
+        return value
+
+
+class CourseCoverageUsage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["concept", "chapter", "example", "exercise", "lab"]
+    key: str = Field(min_length=1, max_length=300)
+    chapter_key: str | None = Field(default=None, max_length=100)
+
+
+class CourseCoverageRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    anchor_id: str = Field(pattern=r"^anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}$")
+    source_id: str = Field(pattern=r"^source:[^:]+$")
+    source_role: Literal["PRIMARY", "SUPPLEMENT"]
+    locator: CourseCoverageLocator
+    category: Literal[
+        "definition",
+        "theorem",
+        "worked_example",
+        "exercise",
+        "answer",
+        "figure",
+        "prerequisite",
+        "unclassified",
+    ]
+    confidence: Literal["low", "medium", "high"]
+    source_number: str | None = Field(default=None, min_length=1, max_length=100)
+    usages: tuple[CourseCoverageUsage, ...] = Field(max_length=1000)
+    flags: tuple[
+        Literal[
+            "unused",
+            "low_confidence",
+            "supplement_only",
+            "missing_bibliography",
+        ],
+        ...,
+    ] = Field(max_length=4)
+
+
+class CourseCoverageSourceHash(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str = Field(pattern=r"^source:[^:]+$")
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CourseCoverageChapterFlag(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_key: str = Field(min_length=1, max_length=100)
+    flags: tuple[Literal["no_answer_source"], ...] = Field(max_length=1)
+
+
+class CourseCoverageResponse(BaseModel):
+    """Deterministic evidence-use audit, not a learner-quality score."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    course_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    source_hashes: tuple[CourseCoverageSourceHash, ...] = Field(max_length=50)
+    rows: tuple[CourseCoverageRow, ...] = Field(max_length=100_000)
+    chapter_flags: tuple[CourseCoverageChapterFlag, ...] = Field(max_length=200)
+    flags: tuple[Literal["generation_limit_exceeded"], ...] = Field(max_length=1)
+    report_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def _bounded_json_answer(value: Any) -> Any:
+    try:
+        encoded = json.dumps(
+            value,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("answer must be valid JSON") from exc
+    if len(encoded.encode("utf-8")) > 32_000:
+        raise ValueError("answer is too large")
+    return value
+
+
+CourseClientLearningEventKind = Literal[
+    "chapter_opened",
+    "hint_viewed",
+    "answer_revealed",
+    "transfer_required",
+    "transfer_completed",
+    "reading_position",
+]
+
+
+class CourseLearningEventRequest(StrictCourseRequest):
+    """Client-authored action; Course ownership is added by the server."""
+
+    snapshot_token: Sha256
+    idempotency_key: StableKey
+    chapter_key: StableKey
+    concept_key: StableKey | None = None
+    exercise_key: StableKey | None = None
+    kind: CourseClientLearningEventKind
+    payload: LearningEventPayload
+
+    @model_validator(mode="after")
+    def transition_shape_is_valid(self) -> "CourseLearningEventRequest":
+        is_activity = self.kind in {"chapter_opened", "reading_position"}
+        if is_activity:
+            if self.concept_key is not None or self.exercise_key is not None:
+                raise ValueError("activity events cannot claim a concept or exercise")
+        elif self.concept_key is None or self.exercise_key is None:
+            raise ValueError(
+                "exercise events require concept_key and exercise_key stable keys"
+            )
+        LearningEvent(
+            event_id="action-request",
+            course_id="course:request",
+            course_version_id="course_version:request",
+            chapter_key=self.chapter_key,
+            concept_key=self.concept_key,
+            exercise_key=self.exercise_key,
+            kind=self.kind,
+            payload=self.payload,
+            occurred_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
+        )
+        return self
+
+
+class CourseActivityEventRequest(StrictCourseRequest):
+    """Only non-mastery reading activity may use the generic public event route."""
+
+    snapshot_token: Sha256
+    idempotency_key: StableKey
+    chapter_key: StableKey
+    kind: Literal["chapter_opened", "reading_position"]
+    payload: PositionPayload
+
+    @model_validator(mode="after")
+    def reading_position_has_a_block(self) -> "CourseActivityEventRequest":
+        if self.kind == "reading_position" and self.payload.block_key is None:
+            raise ValueError("reading_position requires a stable block key")
+        return self
+
+
+class CourseExerciseGradeRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    chapter_key: StableKey
+    concept_key: StableKey
+    attempt_key: StableKey
+    answer: Any
+    hints_used: int = Field(default=0, ge=0, le=4)
+    answer_revealed: bool = False
+    mode: Literal["practice", "review"] = "practice"
+
+    @field_validator("answer")
+    @classmethod
+    def answer_is_bounded_json(cls, value: Any) -> Any:
+        return _bounded_json_answer(value)
+
+
+class CourseExerciseHintRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    idempotency_key: StableKey
+    chapter_key: StableKey
+    concept_key: StableKey
+    attempt_key: StableKey
+    hint_index: int = Field(ge=1, le=4)
+
+
+class CourseExerciseRevealRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    idempotency_key: StableKey
+    chapter_key: StableKey
+    concept_key: StableKey
+    attempt_key: StableKey
+
+
+class CourseExerciseVerificationRequest(StrictCourseRequest):
+    """Bind a human approval to the exact current exercise answer snapshot."""
+
+    snapshot_token: Sha256
+    expected_answer_confirmation: Any
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("expected_answer_confirmation")
+    @classmethod
+    def confirmation_is_bounded_json(cls, value: Any) -> Any:
+        return _bounded_json_answer(value)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_not_blank(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("verification reason must not be blank")
+        return clean
+
+
+class CourseTransferGradeRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    chapter_key: StableKey
+    concept_key: StableKey
+    source_attempt_key: StableKey
+    attempt_key: StableKey
+    transfer_task_key: StableKey
+    answer: Any
+
+    _bounded_answer = field_validator("answer")(_bounded_json_answer)
+
+
+class CourseLearningEventResponse(BaseModel):
+    event: LearningEvent
+    mastery: ConceptMastery | None = None
+
+
+class CourseExerciseGradeResponse(BaseModel):
+    grade: GradeResult
+    mastery: ConceptMastery | None = None
+    event_key: StableKey | None = None
+    snapshot_token: Sha256
+
+
+class CourseAnswerFormat(BaseModel):
+    """Input shape metadata with no expected value or grading oracle."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: AnswerType
+    component_count: int | None = Field(default=None, ge=1, le=20)
+    unit_required: bool = False
+    parts: tuple["CourseAnswerFormat", ...] = Field(
+        default_factory=tuple, max_length=20
+    )
+
+    @model_validator(mode="after")
+    def shape_matches_kind(self) -> "CourseAnswerFormat":
+        if self.kind == "vector" and self.component_count is None:
+            raise ValueError("vector answer format requires component_count")
+        if self.kind != "vector" and self.component_count is not None:
+            raise ValueError("only vector formats declare component_count")
+        if self.kind == "multipart" and not self.parts:
+            raise ValueError("multipart answer format requires parts")
+        if self.kind != "multipart" and self.parts:
+            raise ValueError("only multipart formats declare parts")
+        if self.kind == "unit" and not self.unit_required:
+            raise ValueError("unit answer format requires a unit")
+        if self.kind not in {"unit", "vector"} and self.unit_required:
+            raise ValueError("this answer format does not accept a unit")
+        return self
+
+
+class CourseTransferTaskResponse(BaseModel):
+    """Learner-safe transfer task with its deterministic grader withheld."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    key: StableKey
+    prompt: str
+    invariant_concept_keys: tuple[StableKey, ...]
+    dimensions: tuple[TransferDimension, ...]
+    answer_type: AnswerType
+    answer_format: CourseAnswerFormat
+    difficulty: DifficultyVector
+    anchor_ids: tuple[str, ...]
+
+
+class ExerciseVerificationResponse(ExerciseVerification):
+    """Public exercise verification provenance shared by Build and Learn."""
+
+
+class CourseExerciseResponse(BaseModel):
+    """Learner-safe exercise projection with every grading oracle removed."""
+
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    key: StableKey
+    chapter_key: StableKey
+    prompt: str
+    concept_keys: tuple[StableKey, ...]
+    exercise_type: Literal[
+        "worked_source",
+        "source_practice",
+        "generated_core",
+        "generated_challenge",
+        "transfer",
+    ]
+    answer_type: AnswerType
+    answer_format: CourseAnswerFormat
+    snapshot_token: Sha256
+    source_anchor_ids: tuple[str, ...]
+    source_number: str | None = None
+    source_section: str | None = None
+    difficulty: DifficultyVector
+    is_core: bool
+    is_gating: bool
+    is_source_level: bool
+    verification: ExerciseVerificationResponse
+    learning_blocked_reason: Literal["verification_required"] | None = None
+    transfer: CourseTransferTaskResponse | None = None
+
+
+class CourseExerciseHintResponse(BaseModel):
+    snapshot_token: Sha256
+    hint_index: int = Field(ge=1, le=4)
+    total_hints: int = Field(ge=1, le=4)
+    hint: str = Field(min_length=1, max_length=2000)
+    event: LearningEvent
+    mastery: ConceptMastery | None = None
+
+
+class CourseExerciseRevealResponse(BaseModel):
+    snapshot_token: Sha256
+    answer: Any
+    transfer: CourseTransferTaskResponse | None = None
+    events: tuple[LearningEvent, ...] = Field(min_length=1, max_length=2)
+    mastery: ConceptMastery | None = None
+
+
+class CourseLearnerChapterSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    block_key: StableKey
+    title: str = Field(min_length=1, max_length=300)
+    markdown: str = Field(min_length=1, max_length=100_000)
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=200)
+    provenance: ProvenanceLabel
+
+
+class CourseLearnerFormula(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: StableKey
+    latex: str = Field(min_length=1, max_length=4000)
+    meaning: str = Field(min_length=1, max_length=2000)
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    unit_expression: str | None = Field(default=None, max_length=500)
+    provenance: ProvenanceLabel
+
+
+class CourseLearnerWorkedExample(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: StableKey
+    prompt: str = Field(min_length=1, max_length=4000)
+    steps: tuple[str, ...] = Field(min_length=1, max_length=50)
+    answer: str = Field(min_length=1, max_length=4000)
+    anchor_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    unit_expression: str | None = Field(default=None, max_length=500)
+    provenance: ProvenanceLabel
+
+
+class CourseLearnerChapterArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    purpose: str = Field(min_length=1, max_length=4000)
+    prerequisites: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    objectives: tuple[str, ...] = Field(min_length=1, max_length=100)
+    sections: tuple[CourseLearnerChapterSection, ...] = Field(
+        min_length=1, max_length=100
+    )
+    definitions: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    formulas: tuple[CourseLearnerFormula, ...] = Field(
+        default_factory=tuple, max_length=100
+    )
+    worked_examples: tuple[CourseLearnerWorkedExample, ...] = Field(
+        default_factory=tuple, max_length=100
+    )
+    misconceptions: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    pitfalls: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    quick_reference: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+    citations: tuple[str, ...] = Field(default_factory=tuple, max_length=500)
+
+
+class CourseLearnerChapterResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    course_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    chapter_key: StableKey
+    chapter_no: int = Field(ge=1)
+    title: str = Field(min_length=1)
+    status: Literal["published"]
+    snapshot_token: Sha256
+    artifact: CourseLearnerChapterArtifact
+
+
+class CourseLearnerSourceResponse(BaseModel):
+    """Current-chapter evidence metadata without Source record IDs or paths."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    anchor_id: str = Field(min_length=1, max_length=300)
+    filename: str = Field(min_length=1, max_length=500)
+    kind: Literal["pdf_page", "pptx_slide"]
+    index: int = Field(ge=1)
+    quote: str = Field(min_length=1, max_length=4000)
+    source_role: Literal["PRIMARY", "SUPPLEMENT"]
+    bbox: tuple[float, float, float, float] | None = None
+
+
+class CourseLearnerSourcesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_token: Sha256
+    sources: tuple[CourseLearnerSourceResponse, ...]
+
+
+class CourseLearnerNoteResponse(BaseModel):
+    """A note bound to one exact published chapter record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note_id: str = Field(pattern=r"^course_note:[^:]+$")
+    block_key: StableKey
+    content: str = Field(min_length=1, max_length=20_000)
+    orphan_status: Literal["active", "orphaned"]
+    created: datetime | None = None
+
+
+class CourseLearnerNotesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_token: Sha256
+    notes: tuple[CourseLearnerNoteResponse, ...]
+
+
+class CourseLearnerNoteCreateRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    block_key: StableKey
+    content: str = Field(min_length=1, max_length=20_000)
+
+
+class CourseTutorSessionCreateRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    chapter_key: StableKey
+    model: ModelSelection
+
+
+class CourseTutorSessionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(pattern=r"^course_tutor_session:[^:]+$")
+    course_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    chapter_key: StableKey
+    model: ModelSelection
+    status: Literal["active", "closed", "stale"]
+    turns: tuple[TutorTurn, ...] = Field(default_factory=tuple, max_length=2000)
+    created: datetime | None = None
+
+
+class CourseTutorMessageRequest(StrictCourseRequest):
+    snapshot_token: Sha256
+    idempotency_key: StableKey
+    content: str = Field(min_length=1, max_length=20_000)
+    intent: Literal["explain", "diagnose", "hint", "reveal"]
+    exercise_key: StableKey | None = None
+    concept_key: StableKey | None = None
+    attempt_key: StableKey | None = None
+
+    @model_validator(mode="after")
+    def reveal_scope_is_explicit(self) -> "CourseTutorMessageRequest":
+        scoped_values = (
+            self.exercise_key,
+            self.concept_key,
+            self.attempt_key,
+        )
+        if self.intent in {"diagnose", "hint", "reveal"} and any(
+            value is None for value in scoped_values
+        ):
+            raise ValueError(
+                "diagnose, hint, and reveal require exercise_key, concept_key, and attempt_key"
+            )
+        if self.intent == "explain" and any(
+            value is not None for value in scoped_values
+        ):
+            raise ValueError(
+                "exercise and attempt identities are not accepted for explain"
+            )
+        return self
+
+
+class CourseTutorMessageResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_token: Sha256
+    response: TutorResponse
+
+
+class CourseDraftOperationRequest(StrictCourseRequest):
+    revision_token: Sha256
+    operation: EditableDraftOperation
+
+
+class CourseAcademicVerificationRequest(StrictCourseRequest):
+    revision_token: Sha256
+    exact_value_confirmation: str = Field(min_length=1, max_length=4000)
+    reason: str = Field(min_length=1, max_length=4000)
+    anchor_ids: tuple[str, ...] = Field(min_length=1, max_length=100)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_not_blank(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("verification reason must not be blank")
+        return clean
+
+    @field_validator("anchor_ids")
+    @classmethod
+    def anchors_are_stable_and_unique(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)):
+            raise ValueError("verification anchors must be unique")
+        if any(
+            re.fullmatch(r"anchor:[A-Za-z0-9][A-Za-z0-9_-]{0,199}", value)
+            is None
+            for value in values
+        ):
+            raise ValueError("verification anchors must use stable anchor IDs")
+        return values
+
+
+class CourseLabApprovalRequest(StrictCourseRequest):
+    confirmation: Literal["确认实验方案"]
+    proposal_hash: Sha256
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_not_blank(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("Lab approval reason must not be blank")
+        return clean
+
+
+class CourseLabApprovalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^lab:[^:]+$")
+    lab_key: SafeLabKey
+    lab_type: Literal[
+        "function_plot",
+        "parametric_curve",
+        "vector_field",
+        "geometry",
+        "kinematics",
+    ]
+    spec: LabSpecVariant
+    proposal_hash: Sha256 | None
+    approved_hash: Sha256 | None
+    approved_at: datetime | None
+    approval_reason: str | None
+
+
+class CourseDraftValidateRequest(StrictCourseRequest):
+    revision_token: Sha256
+
+
+class CourseDraftResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_key: StableKey
+    chapter_status: str = Field(min_length=1, max_length=50)
+    editable: bool
+    revision_no: int = Field(ge=0)
+    revision_token: Sha256
+    revision_status: Literal["draft", "validated"] | None = None
+    artifact_hash: Sha256
+    artifact: ChapterArtifact
+    exercises: tuple[ExerciseBlueprint, ...] = Field(default_factory=tuple, max_length=500)
+
+
+class CourseDraftValidationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    draft: CourseDraftResponse
+    valid: bool
+    checked: tuple[ValidationCheck, ...] = Field(max_length=6)
+    findings: tuple[ValidationFinding, ...] = Field(default_factory=tuple, max_length=500)
+
+
+class CourseExportCreateRequest(StrictCourseRequest):
+    include_originals: bool = False
+
+
+class CourseExportResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    export_id: str = Field(pattern=r"^course_export:[^:]+$")
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
+    download_ready: bool
+    manifest: CourseBundleManifest | None = None
+    error_message: str | None = None
+
+
+class CourseBundleImportResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    course_title: str = Field(min_length=1, max_length=300)
+    record_counts: Dict[StableKey, int]
+
+    @field_validator("record_counts")
+    @classmethod
+    def counts_are_bounded(cls, value: Dict[str, int]) -> Dict[str, int]:
+        if len(value) > 100 or any(count < 0 for count in value.values()):
+            raise ValueError("record counts are invalid")
+        return value
+
+
+class CourseLearningChapterOverview(BaseModel):
+    chapter_key: StableKey
+    chapter_no: int = Field(ge=1)
+    title: str
+    snapshot_token: Sha256
+    latest_position: LearningEvent | None = None
+
+
+class CourseConceptResponse(BaseModel):
+    key: StableKey
+    label: str = Field(min_length=1, max_length=300)
+
+
+class CourseLearningOverviewResponse(BaseModel):
+    course_id: str
+    course_version_id: str
+    chapters: tuple[CourseLearningChapterOverview, ...]
+    concepts: tuple[CourseConceptResponse, ...] = ()
+    masteries: tuple[ConceptMastery, ...]
+    review_queue: tuple[ReviewQueueItem, ...]
+
+
+class CourseLearningUpgradeRequest(StrictCourseRequest):
+    confirmation: Literal["创建学习升级版本"]
+    idempotency_key: StableKey
+
+
+class CourseLearningUpgradeResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: str = Field(pattern=r"^course:[^:]+$")
+    source_version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    version_id: str = Field(pattern=r"^course_version:[^:]+$")
+    version_no: int = Field(ge=1)
+    status: Literal["generating", "published"]
+    chapter_keys: tuple[StableKey, ...] = Field(min_length=1, max_length=500)
+
+
 class CourseJobRequest(StrictCourseRequest):
     prompt_version: str = Field("v1", min_length=1, max_length=100)
     force: bool = False
@@ -855,6 +1619,47 @@ class CourseChapterReviewRequest(CourseAnchoredJobRequest):
     escalation_model: ModelSelection
 
 
+class CourseExerciseBankGenerateRequest(CourseAnchoredJobRequest):
+    prompt_version: str = Field("v2", min_length=1, max_length=100)
+    review_model: ModelSelection
+
+
+class CourseExerciseAuthoringResponse(BaseModel):
+    """Build-only exercise projection; grading oracles never use the Learn route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: StableKey
+    blueprint: ExerciseBlueprint
+    snapshot_token: Sha256
+    expected_answer: Any
+    verification: ExerciseVerificationResponse
+    review_run_ids: tuple[str, ...] = Field(default_factory=tuple, max_length=100)
+
+    @field_validator("expected_answer")
+    @classmethod
+    def expected_answer_is_bounded_json(cls, value: Any) -> Any:
+        return _bounded_json_answer(value)
+
+
+class CourseExerciseBuildStatusResponse(BaseModel):
+    run_id: str | None = None
+    command_id: str | None = None
+    status: Literal[
+        "not_started",
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+    ]
+    error_message: str | None = None
+    exercise_count: int = Field(default=0, ge=0)
+    exercises: tuple[CourseExerciseAuthoringResponse, ...] = Field(
+        default_factory=tuple, max_length=500
+    )
+
+
 class CourseRetrievalRequest(StrictCourseRequest):
     anchor_ids: List[str] = Field(..., min_length=1, max_length=500)
 
@@ -876,9 +1681,11 @@ class CourseJobResponse(BaseModel):
     run_id: str
     status: str
 
-class CourseCreate(BaseModel):
+class CourseCreate(StrictCourseRequest):
     title: str = Field(..., min_length=1, description="Course title")
-    subject: Optional[str] = Field(None, description="Subject area")
+    subject: Optional[Literal["math", "physics"]] = Field(
+        None, description="Open Course subject"
+    )
     description: Optional[str] = Field(None, description="Course description")
     language: str = Field("zh-CN", min_length=2, max_length=20)
     notebook_id: Optional[str] = Field(
@@ -889,9 +1696,11 @@ class CourseCreate(BaseModel):
     )
 
 
-class CourseUpdate(BaseModel):
+class CourseUpdate(StrictCourseRequest):
     title: Optional[str] = Field(None, min_length=1, description="Course title")
-    subject: Optional[str] = Field(None, description="Subject area")
+    subject: Optional[Literal["math", "physics"]] = Field(
+        None, description="Open Course subject"
+    )
     description: Optional[str] = Field(None, description="Course description")
     language: Optional[str] = Field(None, min_length=2, max_length=20)
     config: Optional[Dict[str, Any]] = Field(

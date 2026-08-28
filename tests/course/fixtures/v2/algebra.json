@@ -1,0 +1,182 @@
+{
+  "fixture_version": 1,
+  "fixture_id": "synthetic-algebra-linear-equations",
+  "subject": "math",
+  "topic": "linear-equations",
+  "license": "CC0-1.0",
+  "generation_note": "Original synthetic fixture authored for deterministic Course V2 quality tests; it is not copied from a textbook.",
+  "source_title": "Synthetic Algebra Notes",
+  "source_evidence": [
+    {
+      "anchor_id": "anchor:algebra_basic",
+      "category": "exercise",
+      "source_number": "A-1",
+      "text": "Exercise A-1. Solve 2x + 3 = 11 and check the result by substitution."
+    },
+    {
+      "anchor_id": "anchor:algebra_advanced",
+      "category": "exercise",
+      "source_number": "A-9",
+      "text": "Exercise A-9. Classify the solution set of ax + b = c for every parameter regime and justify the boundary cases."
+    },
+    {
+      "anchor_id": "anchor:algebra_answer",
+      "category": "answer",
+      "source_number": "A-1",
+      "text": "Answer A-1. x = 4; substitution gives 2(4) + 3 = 11."
+    }
+  ],
+  "worked_example": {
+    "prompt": "Solve 3x - 5 = 16.",
+    "steps": [
+      "Add 5 to both sides to preserve equality.",
+      "Divide both sides by 3.",
+      "Substitute x = 7 into the original equation."
+    ],
+    "answer": "x = 7"
+  },
+  "figure_description": "A balance diagram with equal inverse operations applied to both pans.",
+  "exercises": [
+    {
+      "key": "algebra-source-basic",
+      "chapter_key": "linear-equations",
+      "prompt": "Exercise A-1. Solve 2x + 3 = 11 and check by substitution.",
+      "concept_keys": ["linear-equations"],
+      "exercise_type": "source_practice",
+      "answer_type": "numeric",
+      "source_anchor_ids": ["anchor:algebra_basic"],
+      "source_number": "A-1",
+      "source_section": "Linear equations",
+      "difficulty": {
+        "concept_count": 1,
+        "reasoning_steps": 2,
+        "symbolic_depth": 1,
+        "representation_shifts": 0,
+        "proof_burden": 0,
+        "physics_constraints": 0
+      },
+      "grader": {
+        "kind": "numeric",
+        "expected": "4",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0
+      },
+      "is_source_level": true
+    },
+    {
+      "key": "algebra-source-advanced",
+      "chapter_key": "linear-equations",
+      "prompt": "Exercise A-9. For ax + b = c, classify unique, none, and infinitely many solutions.",
+      "concept_keys": ["linear-equations"],
+      "exercise_type": "source_practice",
+      "answer_type": "set",
+      "source_anchor_ids": ["anchor:algebra_advanced"],
+      "source_number": "A-9",
+      "source_section": "Parameter regimes",
+      "difficulty": {
+        "concept_count": 2,
+        "reasoning_steps": 6,
+        "symbolic_depth": 4,
+        "representation_shifts": 2,
+        "proof_burden": 1,
+        "physics_constraints": 0
+      },
+      "grader": {
+        "kind": "set",
+        "expected_items": ["unique-if-a-nonzero", "none-if-a-zero-b-not-c", "infinite-if-a-zero-b-equals-c"],
+        "order_matters": false
+      },
+      "is_source_level": true
+    },
+    {
+      "key": "algebra-core",
+      "chapter_key": "linear-equations",
+      "prompt": "Solve 2x + 3 = 11, justify each inverse operation, and verify the invariant equality.",
+      "concept_keys": ["linear-equations"],
+      "exercise_type": "generated_core",
+      "answer_type": "numeric",
+      "hints": [
+        "Identify the equality that must remain invariant.",
+        "Represent undoing +3 with the same operation on both sides.",
+        "Apply one inverse operation at a time.",
+        "Check the candidate in the original equation."
+      ],
+      "source_anchor_ids": ["anchor:algebra_basic"],
+      "difficulty": {
+        "concept_count": 1,
+        "reasoning_steps": 3,
+        "symbolic_depth": 2,
+        "representation_shifts": 1,
+        "proof_burden": 0,
+        "physics_constraints": 0
+      },
+      "grader": {
+        "kind": "numeric",
+        "expected": "4",
+        "absolute_tolerance": 0,
+        "relative_tolerance": 0
+      },
+      "is_core": true,
+      "is_gating": true,
+      "transfer_task": {
+        "key": "algebra-core-transfer",
+        "prompt": "Construct a linear expression equal to zero whose unique root is x = 4.",
+        "invariant_concept_keys": ["linear-equations"],
+        "dimensions": ["inverse_or_constructive"],
+        "change_evidence": [
+          {
+            "dimension": "inverse_or_constructive",
+            "source_structure": "solve a supplied equation for its unknown",
+            "target_structure": "construct an equation from a supplied solution",
+            "rationale": "The equality invariant is preserved while the direction of the task is reversed."
+          }
+        ],
+        "answer_type": "symbolic",
+        "difficulty": {
+          "concept_count": 1,
+          "reasoning_steps": 4,
+          "symbolic_depth": 2,
+          "representation_shifts": 1,
+          "proof_burden": 0,
+          "physics_constraints": 0
+        },
+        "grader": {
+          "kind": "symbolic",
+          "expected_expression": "2*x - 8",
+          "allowed_symbols": ["x"]
+        },
+        "anchor_ids": ["anchor:algebra_basic"]
+      }
+    },
+    {
+      "key": "algebra-challenge",
+      "chapter_key": "linear-equations",
+      "prompt": "For ax + b = c, state the expression for the unique solution when a is nonzero.",
+      "concept_keys": ["linear-equations"],
+      "exercise_type": "generated_challenge",
+      "answer_type": "symbolic",
+      "difficulty": {
+        "concept_count": 2,
+        "reasoning_steps": 5,
+        "symbolic_depth": 3,
+        "representation_shifts": 2,
+        "proof_burden": 1,
+        "physics_constraints": 0
+      },
+      "grader": {
+        "kind": "symbolic",
+        "expected_expression": "(c-b)/a",
+        "allowed_symbols": ["a", "b", "c"]
+      }
+    }
+  ],
+  "correct_answers": {
+    "algebra-source-basic": "4",
+    "algebra-source-advanced": {
+      "items": ["unique-if-a-nonzero", "none-if-a-zero-b-not-c", "infinite-if-a-zero-b-equals-c"]
+    },
+    "algebra-core": "4",
+    "algebra-challenge": "(c-b)/a",
+    "algebra-core-transfer": "2*x - 8"
+  }
+}

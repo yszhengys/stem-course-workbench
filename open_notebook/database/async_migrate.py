@@ -33,16 +33,36 @@ class AsyncMigration:
             sql = " ".join(lines)
             return cls(sql)
 
-    async def run(self, bump: bool = True) -> None:
-        """Run the migration."""
+    async def run(self, *, current_version: int, target_version: int) -> None:
+        """Run one adjacent migration and its version mutation atomically."""
+        if (
+            current_version < 0
+            or target_version < 0
+            or abs(target_version - current_version) != 1
+        ):
+            raise ValueError("Migration versions must be adjacent non-negative integers")
+
+        if target_version > current_version:
+            version_sql = (
+                "CREATE ONLY type::thing('_sbl_migrations', "
+                f"{target_version}) SET version = {target_version}, "
+                "applied_at = time::now();"
+            )
+        else:
+            version_sql = f"DELETE type::thing('_sbl_migrations', {current_version});"
+        transaction_sql = "\n".join(
+            (
+                "BEGIN TRANSACTION;",
+                self.sql,
+                version_sql,
+                "COMMIT TRANSACTION;",
+            )
+        )
         try:
             async with db_connection() as connection:
-                await connection.query(self.sql)
-
-            if bump:
-                await bump_version()
-            else:
-                await lower_version()
+                result = await connection.query(transaction_sql)
+                if isinstance(result, str):
+                    raise RuntimeError(result)
 
         except Exception as e:
             logger.error(f"Migration failed: {str(e)}")
@@ -69,7 +89,10 @@ class AsyncMigrationRunner:
 
         for i in range(current_version, len(self.up_migrations)):
             logger.info(f"Running migration {i + 1}")
-            await self.up_migrations[i].run(bump=True)
+            await self.up_migrations[i].run(
+                current_version=i,
+                target_version=i + 1,
+            )
 
     async def run_one_up(self) -> None:
         """Run one up migration."""
@@ -77,7 +100,10 @@ class AsyncMigrationRunner:
 
         if current_version < len(self.up_migrations):
             logger.info(f"Running migration {current_version + 1}")
-            await self.up_migrations[current_version].run(bump=True)
+            await self.up_migrations[current_version].run(
+                current_version=current_version,
+                target_version=current_version + 1,
+            )
 
     async def run_one_down(self) -> None:
         """Run one down migration."""
@@ -85,7 +111,10 @@ class AsyncMigrationRunner:
 
         if current_version > 0:
             logger.info(f"Rolling back migration {current_version}")
-            await self.down_migrations[current_version - 1].run(bump=False)
+            await self.down_migrations[current_version - 1].run(
+                current_version=current_version,
+                target_version=current_version - 1,
+            )
 
 
 class AsyncMigrationManager:
@@ -150,6 +179,24 @@ class AsyncMigrationManager:
             ),
             AsyncMigration.from_file(
                 "open_notebook/database/migrations/25.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/26.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/27.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/28.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/29.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/30.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/31.surrealql"
             ),
         ]
         self.down_migrations = [
@@ -227,6 +274,24 @@ class AsyncMigrationManager:
             ),
             AsyncMigration.from_file(
                 "open_notebook/database/migrations/25_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/26_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/27_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/28_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/29_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/30_down.surrealql"
+            ),
+            AsyncMigration.from_file(
+                "open_notebook/database/migrations/31_down.surrealql"
             ),
         ]
         self.runner = AsyncMigrationRunner(

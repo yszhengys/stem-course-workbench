@@ -6,9 +6,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug! Please fill out the information below to help us understand and fix the issue.
+        Thanks for reporting a STEM Course Workbench bug. Please fill out the information below to help us reproduce and fix it.
 
-        Issues are for **reproducible bugs** and maintainer-created work items. Feature requests, ideas, behavior changes, product/design/architecture proposals, and contribution proposals belong in [Discussions](https://github.com/lfnovo/open-notebook/discussions/new?category=ideas).
+        Issues are for **reproducible Workbench bugs** and maintainer-created work items. Feature requests, ideas, behavior changes, product/design/architecture proposals, and contribution proposals belong in [Workbench Discussions](https://github.com/yszhengys/stem-course-workbench/discussions).
 
         **Installation or setup problem?** Use the "Installation Issue" template instead.
 
@@ -65,12 +65,11 @@ body:
   - type: dropdown
     id: version
     attributes:
-      label: Open Notebook Version
-      description: Which version are you using?
+      label: STEM Course Workbench version
+      description: Which Workbench product version and commit are you using? See workbench.toml and `git rev-parse HEAD`.
       options:
-        - v1-latest (Docker)
-        - v1-latest-single (Docker, deprecated)
-        - Latest from main branch
+        - 2.0.0-dev from main
+        - 2.0.0-dev from another branch or commit
         - Other (please specify in additional context)
     validations:
       required: true
@@ -112,4 +111,4 @@ body:
         1. A maintainer will review your bug report
         2. If you checked the box above and want to fix it, please propose your solution approach
         3. Wait for assignment before starting development
-        4. See our [Contributing Guide](https://github.com/lfnovo/open-notebook/blob/main/CONTRIBUTING.md) for more details
+        4. See the [Workbench Contributing Guide](https://github.com/yszhengys/stem-course-workbench/blob/main/CONTRIBUTING.md) for more details

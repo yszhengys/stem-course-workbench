@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -13,6 +14,10 @@ import httpx
 
 from open_notebook.ai.models import Model
 from open_notebook.course import state_machine as sm
+from open_notebook.course.authoring_service import (
+    DraftConflictError,
+    DraftScope,
+)
 from open_notebook.course.contracts import (
     ChapterArtifact,
     CourseOutlineArtifact,
@@ -39,6 +44,22 @@ from open_notebook.course.models import (
     CourseVersion,
     Lab,
     Progress,
+)
+from open_notebook.course.publication_service import (
+    DraftPublicationError,
+    ExercisePublicationError,
+    LabPublicationError,
+    PublicationService,
+)
+from open_notebook.course.v2_contracts import (
+    ConceptMastery,
+    ExerciseVerification,
+    LearningEvent,
+)
+from open_notebook.course.v2_models import (
+    CourseConceptMastery,
+    CourseExercise,
+    CourseLearningEvent,
 )
 from open_notebook.course.workflow_service import (
     CourseWorkflowService,
@@ -364,6 +385,14 @@ async def _current_chapter_labs(
 
 class CourseService:
     @staticmethod
+    def chapter_artifact_anchor_ids(
+        artifact: ChapterArtifact,
+    ) -> tuple[str, ...]:
+        """Return every evidence-bearing chapter anchor in stable order."""
+
+        return tuple(_chapter_artifact_anchor_ids(artifact))
+
+    @staticmethod
     async def get_model_options() -> dict[str, Any]:
         """Return explicit Course-only selections without changing global defaults."""
         configured_models = await Model.get_models_by_type("language")
@@ -438,6 +467,164 @@ class CourseService:
         }
 
     @staticmethod
+    async def get_current_authoring_exercise(
+        course_id: str,
+        chapter_key: str,
+        exercise_key: str,
+    ) -> tuple[CourseVersion, Chapter, CourseExercise]:
+        """Resolve one exercise only inside the current unpublished authoring scope."""
+
+        version, chapter, records = (
+            await CourseService.list_current_authoring_exercises(
+                course_id, chapter_key, require_mutable=True
+            )
+        )
+        matches = [
+            exercise
+            for exercise in records
+            if exercise.exercise_key == exercise_key
+        ]
+        if not matches:
+            raise NotFoundError("Current Course exercise not found")
+        if len(matches) != 1:
+            raise CourseConflictError("Course exercise stable key is ambiguous")
+        return version, chapter, matches[0]
+
+    @staticmethod
+    async def list_current_authoring_exercises(
+        course_id: str,
+        chapter_key: str,
+        *,
+        require_mutable: bool = False,
+    ) -> tuple[CourseVersion, Chapter, tuple[CourseExercise, ...]]:
+        """Return the exact current Build exercise bank, including its grader."""
+
+        _course, version, chapter = await _current_chapter_records(
+            course_id, chapter_key
+        )
+        if require_mutable and version.status == sm.VersionStatus.PUBLISHED:
+            raise CourseImmutableError("Course version is immutable")
+        if require_mutable and chapter.status == sm.ChapterStatus.PUBLISHED:
+            raise CourseImmutableError("Course artifact is immutable")
+        if version.id is None or chapter.id is None:
+            raise CourseConflictError("Current Course exercise scope is not persisted")
+        rows = await repo_query(
+            """
+            SELECT * FROM course_exercise
+            WHERE course = $course AND course_version = $version
+              AND chapter_key = $chapter_key
+            ORDER BY exercise_key;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(str(version.id)),
+                "chapter_key": chapter_key,
+            },
+        )
+        try:
+            records = tuple(
+                CourseExercise(**row) for row in rows if isinstance(row, dict)
+            )
+        except (TypeError, ValueError) as exc:
+            raise CourseConflictError("Current Course exercise is invalid") from exc
+        if any(
+            exercise.course != course_id
+            or exercise.course_version != str(version.id)
+            or exercise.chapter != str(chapter.id)
+            or exercise.chapter_key != chapter_key
+            for exercise in records
+        ):
+            raise CourseConflictError("Current Course exercise scope changed")
+        if len({exercise.exercise_key for exercise in records}) != len(records):
+            raise CourseConflictError("Course exercise stable key is ambiguous")
+        return version, chapter, tuple(
+            sorted(records, key=lambda exercise: exercise.exercise_key)
+        )
+
+    @staticmethod
+    async def set_exercise_verification(
+        *,
+        course_id: str,
+        version: CourseVersion,
+        chapter: Chapter,
+        exercise: CourseExercise,
+        verification: ExerciseVerification,
+    ) -> CourseExercise:
+        """Atomically write server-authored provenance to an unchanged exercise."""
+
+        if version.id is None or chapter.id is None or exercise.id is None:
+            raise CourseConflictError("Current Course exercise scope is not persisted")
+        if version.status == sm.VersionStatus.PUBLISHED:
+            raise CourseImmutableError("Course version is immutable")
+        if chapter.status == sm.ChapterStatus.PUBLISHED:
+            raise CourseImmutableError("Course artifact is immutable")
+        if exercise.updated is None:
+            raise CourseConflictError("Current Course exercise has no revision timestamp")
+        version_id = str(version.id)
+        chapter_id = str(chapter.id)
+        exercise_id = str(exercise.id)
+        try:
+            await repo_query(
+                """
+                BEGIN TRANSACTION;
+                LET $current_course = (
+                    SELECT VALUE id FROM course
+                    WHERE id = $course AND outline_version_id = $version
+                );
+                LET $mutable_version = (
+                    SELECT VALUE id FROM course_version
+                    WHERE id = $version AND course = $course
+                      AND status != 'published'
+                );
+                LET $mutable_chapter = (
+                    SELECT VALUE id FROM chapter
+                    WHERE id = $chapter AND course_version = $version
+                      AND chapter_key = $chapter_key AND status != 'published'
+                );
+                LET $updated_exercise = (
+                    UPDATE $exercise SET verification = $verification
+                    WHERE course = $course AND course_version = $version
+                      AND chapter = $chapter AND chapter_key = $chapter_key
+                      AND exercise_key = $exercise_key
+                      AND time::micros(updated) = time::micros($expected_updated)
+                    RETURN VALUE id
+                );
+                IF array::len($current_course) != 1
+                   OR array::len($mutable_version) != 1
+                   OR array::len($mutable_chapter) != 1
+                   OR array::len($updated_exercise) != 1 {
+                    THROW 'Course exercise verification snapshot changed'
+                };
+                COMMIT TRANSACTION;
+                """,
+                {
+                    "course": ensure_record_id(course_id),
+                    "version": ensure_record_id(version_id),
+                    "chapter": ensure_record_id(chapter_id),
+                    "exercise": ensure_record_id(exercise_id),
+                    "chapter_key": chapter.chapter_key,
+                    "exercise_key": exercise.exercise_key,
+                    "expected_updated": exercise.updated,
+                    "verification": verification.model_dump(mode="json"),
+                },
+            )
+        except RuntimeError as exc:
+            rows = await repo_query(
+                "SELECT * FROM $exercise;",
+                {"exercise": ensure_record_id(exercise_id)},
+            )
+            current = tuple(
+                CourseExercise(**row) for row in rows if isinstance(row, dict)
+            )
+            if len(current) == 1 and current[0].verification == verification:
+                return current[0]
+            raise CourseConflictError(
+                "Course exercise verification snapshot changed"
+            ) from exc
+        exercise.verification = verification
+        return exercise
+
+    @staticmethod
     async def create_course(
         *,
         title: str,
@@ -482,6 +669,314 @@ class CourseService:
     @staticmethod
     async def get_course(course_id: str) -> Course:
         return await _typed_get(Course, course_id, "course")
+
+    @staticmethod
+    async def get_current_published_version(course_id: str) -> CourseVersion:
+        """Resolve the only version that may receive V2 learning activity."""
+
+        course = await CourseService.get_course(course_id)
+        if course.outline_version_id is not None:
+            try:
+                pointed = await _typed_get(
+                    CourseVersion,
+                    course.outline_version_id,
+                    "course_version",
+                )
+            except NotFoundError as exc:
+                raise CourseConflictError(
+                    "Course current version was not found"
+                ) from exc
+            if pointed.course != course_id:
+                raise CourseConflictError(
+                    "Course current version does not belong to the Course"
+                )
+            if pointed.status == sm.VersionStatus.PUBLISHED:
+                return pointed
+
+        versions = await Course.versions(course_id)
+        published = [
+            version
+            for version in versions
+            if version.course == course_id
+            and version.status == sm.VersionStatus.PUBLISHED
+        ]
+        if not published:
+            raise NotFoundError("Current published Course version not found")
+        return max(published, key=lambda version: version.version_no)
+
+    @staticmethod
+    async def _confirm_current_published_version(
+        course_id: str,
+        expected_version_id: str,
+    ) -> None:
+        confirmed = await CourseService.get_current_published_version(course_id)
+        if confirmed.id is None or str(confirmed.id) != expected_version_id:
+            raise CourseConflictError(
+                "Current Course version changed during the read; retry"
+            )
+
+    @staticmethod
+    def _published_chapter_ids(
+        chapters: list[Chapter] | tuple[Chapter, ...],
+        version_id: str,
+    ) -> dict[str, str]:
+        result: dict[str, str] = {}
+        for chapter in chapters:
+            if (
+                chapter.course_version != version_id
+                or chapter.status != sm.ChapterStatus.PUBLISHED
+            ):
+                continue
+            if chapter.id is None:
+                raise OpenNotebookError("Published Course chapter has no identity")
+            if chapter.chapter_key in result:
+                raise CourseConflictError(
+                    "Course has multiple published chapters with the same stable key"
+                )
+            result[chapter.chapter_key] = str(chapter.id)
+        return result
+
+    @staticmethod
+    async def confirm_current_published_scope(
+        course_id: str,
+        version_id: str,
+        expected_chapter_ids: dict[str, str],
+        *,
+        exact: bool,
+    ) -> None:
+        await CourseService._confirm_current_published_version(
+            course_id, version_id
+        )
+        current = await CourseVersion.chapters(version_id)
+        current_ids = CourseService._published_chapter_ids(current, version_id)
+        matches = (
+            current_ids == expected_chapter_ids
+            if exact
+            else all(
+                current_ids.get(key) == record_id
+                for key, record_id in expected_chapter_ids.items()
+            )
+        )
+        if not matches:
+            raise CourseConflictError(
+                "Published Course chapter scope changed during the read; retry"
+            )
+        await CourseService._confirm_current_published_version(
+            course_id, version_id
+        )
+
+    @staticmethod
+    async def list_current_published_chapters(
+        course_id: str,
+    ) -> tuple[CourseVersion, tuple[Chapter, ...]]:
+        version = await CourseService.get_current_published_version(course_id)
+        if version.id is None:
+            raise OpenNotebookError("Published Course version has no identity")
+        chapters = await CourseVersion.chapters(str(version.id))
+        published = tuple(
+            chapter
+            for chapter in chapters
+            if chapter.course_version == str(version.id)
+            and chapter.status == sm.ChapterStatus.PUBLISHED
+        )
+        chapter_ids = CourseService._published_chapter_ids(
+            published, str(version.id)
+        )
+        await CourseService.confirm_current_published_scope(
+            course_id,
+            str(version.id),
+            chapter_ids,
+            exact=True,
+        )
+        return version, tuple(
+            sorted(published, key=lambda chapter: (chapter.chapter_no, chapter.chapter_key))
+        )
+
+    @staticmethod
+    async def resolve_current_published_chapter(
+        course_id: str,
+        chapter_key: str,
+    ) -> tuple[CourseVersion, Chapter]:
+        version, chapters = await CourseService.list_current_published_chapters(
+            course_id
+        )
+        chapter = next(
+            (item for item in chapters if item.chapter_key == chapter_key),
+            None,
+        )
+        if chapter is None:
+            raise NotFoundError("Current published chapter not found")
+        return version, chapter
+
+    @staticmethod
+    async def list_current_exercises(
+        course_id: str,
+        chapter_key: str | None = None,
+    ) -> tuple[CourseVersion, tuple[CourseExercise, ...]]:
+        if chapter_key is None:
+            version, chapters = await CourseService.list_current_published_chapters(
+                course_id
+            )
+        else:
+            version, chapter = (
+                await CourseService.resolve_current_published_chapter(
+                    course_id, chapter_key
+                )
+            )
+            chapters = (chapter,)
+        if version.id is None:
+            raise OpenNotebookError("Published Course version has no identity")
+
+        rows = await repo_query(
+            """
+            SELECT * FROM course_exercise
+            WHERE course = $course AND course_version = $version;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(str(version.id)),
+            },
+        )
+        chapter_ids = CourseService._published_chapter_ids(
+            chapters, str(version.id)
+        )
+        records = tuple(
+            CourseExercise(**row)
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+        )
+        current = tuple(
+            record
+            for record in records
+            if record.course == course_id
+            and record.course_version == str(version.id)
+            and chapter_ids.get(record.chapter_key) == record.chapter
+        )
+        await CourseService.confirm_current_published_scope(
+            course_id,
+            str(version.id),
+            chapter_ids,
+            exact=chapter_key is None,
+        )
+        return version, tuple(
+            sorted(
+                current,
+                key=lambda record: (record.chapter_key, record.exercise_key),
+            )
+        )
+
+    @staticmethod
+    async def get_current_exercise(
+        course_id: str,
+        chapter_key: str,
+        exercise_key: str,
+    ) -> CourseExercise:
+        _version, exercises = await CourseService.list_current_exercises(
+            course_id, chapter_key
+        )
+        matches = [
+            exercise
+            for exercise in exercises
+            if exercise.exercise_key == exercise_key
+        ]
+        if not matches:
+            raise NotFoundError("Current Course exercise not found")
+        if len(matches) != 1:
+            raise CourseConflictError("Course exercise stable key is ambiguous")
+        return matches[0]
+
+    @staticmethod
+    async def get_learning_event(
+        course_id: str,
+        event_key: str,
+    ) -> LearningEvent | None:
+        rows = await repo_query(
+            """
+            SELECT * FROM course_learning_event
+            WHERE course = $course AND event_key = $event_key LIMIT 1;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "event_key": event_key,
+            },
+        )
+        if not isinstance(rows, list) or not rows:
+            return None
+        record = CourseLearningEvent(**rows[0])
+        if record.course != course_id:
+            raise InvalidInputError("Learning event is outside the Course scope.")
+        return LearningEvent(
+            event_id=record.event_key,
+            course_id=record.course,
+            course_version_id=record.course_version,
+            chapter_key=record.chapter_key,
+            concept_key=record.concept_key,
+            exercise_key=record.exercise_key,
+            kind=record.kind,
+            payload=record.payload,
+            occurred_at=record.occurred_at,
+        )
+
+    @staticmethod
+    async def list_current_masteries(
+        course_id: str,
+    ) -> tuple[CourseVersion, tuple[ConceptMastery, ...]]:
+        version, chapters = await CourseService.list_current_published_chapters(
+            course_id
+        )
+        if version.id is None:
+            raise OpenNotebookError("Published Course version has no identity")
+        rows = await repo_query(
+            """
+            SELECT * FROM course_concept_mastery
+            WHERE course = $course AND course_version = $version;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(str(version.id)),
+            },
+        )
+        chapter_ids = CourseService._published_chapter_ids(
+            chapters, str(version.id)
+        )
+        chapter_keys = set(chapter_ids)
+        records = tuple(
+            CourseConceptMastery(**row)
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+        )
+        masteries = tuple(
+            ConceptMastery(
+                course_id=record.course,
+                course_version_id=record.course_version,
+                chapter_key=record.chapter_key,
+                concept_key=record.concept_key,
+                status=record.status,
+                successful_exercise_keys=record.successful_exercise_keys,
+                unrevealed_success_count=record.unrevealed_success_count,
+                pending_transfers=record.pending_transfers,
+                review_level=record.review_level,
+                review_due_at=record.review_due_at,
+                last_event_at=record.last_event_at,
+                snapshot_hash=record.snapshot_hash,
+            )
+            for record in records
+            if record.course == course_id
+            and record.course_version == str(version.id)
+            and record.chapter_key in chapter_keys
+        )
+        await CourseService.confirm_current_published_scope(
+            course_id,
+            str(version.id),
+            chapter_ids,
+            exact=True,
+        )
+        return version, tuple(
+            sorted(
+                masteries,
+                key=lambda mastery: (mastery.chapter_key, mastery.concept_key),
+            )
+        )
 
     @staticmethod
     async def update_course(course_id: str, values: dict[str, Any]) -> Course:
@@ -551,45 +1046,129 @@ class CourseService:
     ]:
         """Resolve a current Course anchor to its unchanged, server-owned original."""
 
+        resolved = await CourseService._owned_evidence_assets(
+            course_id, (anchor_id,)
+        )
+        return resolved[0]
+
+    @staticmethod
+    async def _owned_evidence_assets(
+        course_id: str,
+        anchor_ids: tuple[str, ...],
+    ) -> tuple[
+        tuple[
+            CourseEvidenceAnchor,
+            EvidenceService,
+            EvidenceSourceAsset,
+            str,
+        ],
+        ...,
+    ]:
+        """Resolve anchors in bulk and inspect each unique source file once."""
+
+        if len(anchor_ids) != len(set(anchor_ids)):
+            raise CourseConflictError("Course evidence anchor identity is ambiguous")
         course = await CourseService.get_course(course_id)
+        if not anchor_ids:
+            return ()
         rows = await repo_query(
             """
             SELECT * FROM course_evidence_anchor
             WHERE course = $course
-              AND anchor_id = $anchor_id
+              AND anchor_id IN $anchor_ids
               AND is_current = true;
             """,
             {
                 "course": ensure_record_id(course_id),
-                "anchor_id": anchor_id,
+                "anchor_ids": list(anchor_ids),
             },
         )
-        if len(rows) != 1:
+        anchors = tuple(
+            CourseEvidenceAnchor(**row)
+            for row in rows
+            if isinstance(row, dict)
+        )
+        by_id = {anchor.anchor_id: anchor for anchor in anchors}
+        if len(anchors) != len(anchor_ids) or set(by_id) != set(anchor_ids):
             raise NotFoundError("Course evidence anchor not found")
-        anchor = CourseEvidenceAnchor(**rows[0])
-        if anchor.course != course_id or anchor.source not in course.source_ids:
+        if any(
+            anchor.course != course_id or anchor.source not in course.source_ids
+            for anchor in anchors
+        ):
             raise NotFoundError("Course evidence anchor not found")
-        source = await _typed_get(Source, anchor.source, "source")
-        file_path = source.asset.file_path if source.asset else None
-        if not file_path:
-            raise NotFoundError("Course evidence source not found")
+
         evidence = EvidenceService()
-        path, kind = evidence.validate_local_source_file(file_path)
-        source_hash = evidence.sha256_file(path)
-        evidence.validate_anchor_integrity(
-            anchor,
-            course_id=course_id,
-            source_hash=source_hash,
+        source_ids = tuple(sorted({anchor.source for anchor in anchors}))
+        sources = await asyncio.gather(
+            *(_typed_get(Source, source_id, "source") for source_id in source_ids)
         )
-        expected_kind = "pdf_page" if kind == "pdf" else "pptx_slide"
-        if anchor.locator.kind != expected_kind:
-            raise EvidenceInputError("Evidence anchor source kind does not match.")
-        return (
-            anchor,
-            evidence,
-            EvidenceSourceAsset(path=path, filename=path.name, kind=kind),
-            source_hash,
+
+        def inspect_source(source: Source) -> tuple[EvidenceSourceAsset, str]:
+            file_path = source.asset.file_path if source.asset else None
+            if not file_path:
+                raise NotFoundError("Course evidence source not found")
+            path, kind = evidence.validate_local_source_file(file_path)
+            return (
+                EvidenceSourceAsset(path=path, filename=path.name, kind=kind),
+                evidence.sha256_file(path),
+            )
+
+        inspected = await asyncio.gather(
+            *(asyncio.to_thread(inspect_source, source) for source in sources)
         )
+        source_assets = dict(zip(source_ids, inspected, strict=True))
+        resolved: list[
+            tuple[
+                CourseEvidenceAnchor,
+                EvidenceService,
+                EvidenceSourceAsset,
+                str,
+            ]
+        ] = []
+        for anchor_id in anchor_ids:
+            anchor = by_id[anchor_id]
+            source_asset, source_hash = source_assets[anchor.source]
+            evidence.validate_anchor_integrity(
+                anchor,
+                course_id=course_id,
+                source_hash=source_hash,
+            )
+            expected_kind = (
+                "pdf_page" if source_asset.kind == "pdf" else "pptx_slide"
+            )
+            if anchor.locator.kind != expected_kind:
+                raise EvidenceInputError(
+                    "Evidence anchor source kind does not match."
+                )
+            resolved.append((anchor, evidence, source_asset, source_hash))
+        return tuple(resolved)
+
+    @staticmethod
+    async def list_owned_current_anchor_ids(course_id: str) -> tuple[str, ...]:
+        """Return unique current Course anchors for server-side authoring scope."""
+
+        course = await CourseService.get_course(course_id)
+        rows = await repo_query(
+            """
+            SELECT * FROM course_evidence_anchor
+            WHERE course = $course AND is_current = true
+            ORDER BY anchor_id;
+            """,
+            {"course": ensure_record_id(course_id)},
+        )
+        anchors = tuple(
+            CourseEvidenceAnchor(**row)
+            for row in rows
+            if isinstance(row, dict)
+        )
+        if any(anchor.source not in course.source_ids for anchor in anchors):
+            raise CourseConflictError(
+                "Current evidence anchor is outside the Course Source scope"
+            )
+        anchor_ids = tuple(anchor.anchor_id for anchor in anchors)
+        if len(anchor_ids) != len(set(anchor_ids)):
+            raise CourseConflictError("Current evidence anchor identity is ambiguous")
+        return anchor_ids
 
     @staticmethod
     async def get_evidence_preview(
@@ -888,6 +1467,27 @@ class CourseService:
             or chapter.validation_status != sm.ChapterValidationStatus.PASSED
         ):
             raise CourseConflictError("Chapter review and validation must pass")
+        try:
+            publication = PublicationService(revision_query=repo_query)
+            scope = DraftScope(
+                course_id=course_id,
+                course_version_id=version_id,
+                chapter_id=chapter_id,
+                chapter_key=chapter.chapter_key,
+                chapter_status=chapter.status,
+                version_status=version.status,
+                allowed_anchor_ids=(),
+            )
+            await publication.assert_draft_ready(scope)
+            await publication.assert_exercises_ready(scope)
+            await publication.assert_labs_ready(scope)
+        except (
+            DraftConflictError,
+            DraftPublicationError,
+            ExercisePublicationError,
+            LabPublicationError,
+        ) as exc:
+            raise CourseConflictError(str(exc)) from exc
         _, finding_records = (
             await CourseWorkflowService.authoritative_review_findings(
                 course_id=course_id,
@@ -1208,6 +1808,10 @@ class CourseService:
                     "lab_key": lab_key,
                     "lab_type": lab.lab_type,
                     "spec": lab.payload,
+                    "proposal_hash": lab.proposal_hash,
+                    "approved_hash": lab.approved_hash,
+                    "approved_at": lab.approved_at,
+                    "approval_reason": lab.approval_reason,
                 }
             )
         return result

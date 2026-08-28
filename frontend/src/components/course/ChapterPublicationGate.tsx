@@ -14,6 +14,7 @@ export function ChapterPublicationGate({
   isError,
   isUpdating,
   isPublishing,
+  additionalBlockedReason,
   onRetry,
   onUpdate,
   onPublish,
@@ -24,15 +25,19 @@ export function ChapterPublicationGate({
   isError: boolean
   isUpdating: boolean
   isPublishing: boolean
+  additionalBlockedReason?: string | null
   onRetry: () => void
   onUpdate: (findingId: string, status: 'resolved' | 'acknowledged', reason: string) => void
   onPublish: () => void
 }) {
   const { t } = useTranslation()
   const findingsKnown = !isLoading && !isError && findings !== undefined
-  const publicationBlocked = !findingsKnown || findings.some((record) =>
+  const findingsBlockPublication = findings?.some((record) =>
     isFindingBlockingPublication(record.finding)
-  )
+  ) ?? false
+  const publicationBlocked = !findingsKnown
+    || findingsBlockPublication
+    || Boolean(additionalBlockedReason)
 
   return (
     <div className="space-y-5">
@@ -47,8 +52,11 @@ export function ChapterPublicationGate({
           onUpdate={onUpdate}
         />
       )}
-      {findingsKnown && publicationBlocked && (
+      {findingsKnown && findingsBlockPublication && (
         <p className="text-sm text-destructive">{t('course.publishBlocked')}</p>
+      )}
+      {findingsKnown && additionalBlockedReason && (
+        <p className="text-sm text-destructive">{additionalBlockedReason}</p>
       )}
       <Button
         onClick={onPublish}

@@ -1,0 +1,64 @@
+{
+  "fixture_version": 1,
+  "license": "CC0-1.0",
+  "files": [
+    {
+      "path": "stem-evidence-gold.pdf",
+      "sha256": "21da6597e29796ae02ae493162ed826642e7f03e7d66e44d5fff37276161b95b",
+      "kind": "pdf",
+      "page_count": 2,
+      "expected": [
+        {
+          "index": 1,
+          "text": "v(t) = v0 + a*t",
+          "category": "formula",
+          "bbox_required": true
+        },
+        {
+          "index": 1,
+          "text": "ANSWER: 12 m/s",
+          "category": "answer",
+          "bbox_required": true
+        },
+        {
+          "index": 2,
+          "text": "Projectile-motion question",
+          "category": "question",
+          "bbox_required": true
+        },
+        {
+          "index": 2,
+          "text": "x-y component diagram",
+          "category": "diagram",
+          "bbox_required": true
+        }
+      ]
+    },
+    {
+      "path": "stem-evidence-gold.pptx",
+      "sha256": "e01dc8738a3340bc6878602b6da6a97297f3520d565020ac7678ca3fc9f52917",
+      "kind": "pptx",
+      "page_count": 3,
+      "expected": [
+        {
+          "index": 1,
+          "text": "Vector diagram",
+          "category": "diagram",
+          "bbox_required": true
+        },
+        {
+          "index": 2,
+          "text": "v(t) = v0 + a*t",
+          "category": "formula",
+          "bbox_required": true
+        },
+        {
+          "index": 3,
+          "text": "ANSWER: 12 m/s",
+          "category": "answer",
+          "bbox_required": true
+        }
+      ]
+    }
+  ]
+}
