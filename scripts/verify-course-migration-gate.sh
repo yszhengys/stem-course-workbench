@@ -47,6 +47,7 @@ start_container() {
   docker run --detach \
     --name "$CONTAINER_NAME" \
     --publish 127.0.0.1::8000 \
+    --user "$(id -u):$(id -g)" \
     --volume "$DATA_ROOT:/gate-data" \
     "$SURREAL_IMAGE" \
     start --log warn --user root --pass root \
