@@ -33,6 +33,12 @@ GitHub Actions 会在 `macos-14` Apple Silicon runner 上，从不存在 `.tools
 
 该预检会拒绝已有 `.tools/` 或 `.venv/` 的日常开发目录，且不会读取 `.env`、启动服务或调用模型。
 
+### 发布质量门与证据边界
+
+Pull Request 会分别执行后端/前端覆盖率下限、仓库自有 CC0 PDF/PPTX 金样本的真实 Docling 提取、临时 RocksDB 上下迁移与回滚，以及真实 Course 页面上的 Chromium 键盘/axe 检查。详见[架构与维护说明](docs/course-workbench.md)和[人工无障碍发布清单](docs/7-DEVELOPMENT/course-accessibility-checklist.md)。
+
+这些门的含义彼此独立：覆盖率只防止未执行代码比例回退；金样本只验证受控文件的完整性和当前解析链；浏览器自动化只检查覆盖到的键盘路径和可自动检测的规则。它们**不证明**生成内容正确、学生学习效果提升、用户材料拥有版权许可，也不等同于完整 WCAG 2.2 AA 符合性。用户仍需确认所导入材料的使用权；学习成效与完整无障碍声明分别需要研究证据和有日期的人工复核记录。
+
 ## 基于 Open Notebook
 
 本项目是 [Open Notebook](https://github.com/lfnovo/open-notebook) `v1.14.0` 的独立维护衍生项目，保留其完整历史、MIT License、FastAPI、Next.js、SurrealDB、异步任务和多模型供应商体系。Workbench 的问题、功能建议和安全报告由本仓库接收；如问题可复现于未修改的上游版本，再由报告者或维护者转交上游。

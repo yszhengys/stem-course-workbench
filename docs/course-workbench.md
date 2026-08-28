@@ -153,16 +153,38 @@ Course 书目记录存放在隔离的 `course_bibliographic_source` 表，不修
 完整检查：
 
 ```bash
-UV_CACHE_DIR=/private/tmp/stem-course-uv-cache ./.tools/bin/uv run pytest tests/
+UV_CACHE_DIR=/private/tmp/stem-course-uv-cache ./.tools/bin/uv run \
+  pytest tests/ --cov=open_notebook --cov=api --cov-fail-under=75
 UV_CACHE_DIR=/private/tmp/stem-course-uv-cache ./.tools/bin/uv run ruff check .
 UV_CACHE_DIR=/private/tmp/stem-course-uv-cache ./.tools/bin/uv run python -m mypy .
+./scripts/verify-course-migration-gate.sh
 cd frontend
-npm test
+npm run test:coverage
+npm run test:e2e
 npm run lint
 npm run build
 ```
 
-另外运行 `bash -n scripts/course-workbench.sh`、`git diff --check`，并做真实 SurrealDB migration 28→29→28、Docling PDF/PPTX、`.stemcourse` 往返、重启恢复和浏览器 Build/Learn 验收。真实 Codex/Ollama 冒烟必须显式启用；CI 使用 fake adapters。
+仓库中的两份 CC0 金样本是发布门唯一允许提交的原始教学文件。真实 Docling 门可复现为：
+
+```bash
+OPEN_NOTEBOOK_RUN_REAL_DOCLING_SMOKE=1 ./.tools/bin/uv run \
+  pytest tests/course/test_real_docling_preview_smoke.py -v
+```
+
+另外运行 `bash -n scripts/course-workbench.sh`、`git diff --check`，并做 `.stemcourse` 往返、重启恢复和浏览器 Build/Learn 验收。真实 Codex/Ollama 冒烟必须显式启用；CI 使用 fake adapters。
+
+### 质量门能证明什么
+
+| 门 | 直接证据 | 不能据此声称 |
+|---|---|---|
+| Python/Vitest 覆盖率 | 当前测试执行代码比例未低于固定下限 | 业务逻辑正确、边界完整或学习质量良好 |
+| CC0 金样本 + 真实 Docling | 两份仓库自有 PDF/PPTX 的哈希、页数、文本、答案、bbox 与当前解析链一致 | 任意用户教材都能正确识别，或用户拥有传播/改编权 |
+| 临时 RocksDB migration | 声明版本范围内旧数据在升级、重启、降级、再升级及失败回滚中保持一致 | 所有未来 SurrealDB 版本或外部损坏场景均安全 |
+| Playwright 键盘 + axe | 被覆盖的真实 Course 路由可完成关键键盘路径，且无已扫描的 A/AA 自动规则 violation | 已达到完整 WCAG 2.2 AA；正式声明前还需完成[有日期的人工清单](7-DEVELOPMENT/course-accessibility-checklist.md) |
+| 确定性 grader/掌握规则 | 给定事件与答案会得到可重放结果 | 学生因此学得更好；该结论需要预先设计的学习研究 |
+
+用户提供材料的许可与合法使用责任仍由用户承担。覆盖报告、人工 `manually_reviewed` 标记和来源哈希是审计工具，不是版权授权。项目仍为 `2.0.0-dev` 时不得把这些工程门描述为正式 Release 或学习效果认证。
 
 ## 上游同步
 

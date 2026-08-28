@@ -22,7 +22,13 @@ export default defineConfig({
     },
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'json', 'html']
+      reporter: ['text', 'json', 'html'],
+      thresholds: {
+        statements: 55,
+        branches: 58,
+        functions: 50,
+        lines: 55,
+      },
       // Note: reportsDirectory is NOT specified - vitest 4.x uses default location
     }
   }
