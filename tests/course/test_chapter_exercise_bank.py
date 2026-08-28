@@ -17,7 +17,7 @@ from open_notebook.course.contracts import (
 )
 from open_notebook.course.evidence_service import EvidenceInputError, EvidenceService
 from open_notebook.course.generation_service import CourseGenerationService
-from open_notebook.course.model_adapters import CourseModelAdapter
+from open_notebook.course.model_adapters import CourseModelAdapter, OutputT
 from open_notebook.course.models import Chapter, CourseEvidenceAnchor
 from open_notebook.course.v2_contracts import (
     DifficultyVector,
@@ -37,10 +37,10 @@ class SequenceAdapter(CourseModelAdapter):
     async def generate(
         self,
         request: GenerationRequest,
-        output_model: type[BaseModel],
+        output_model: type[OutputT],
         *,
         prompt: str,
-    ) -> BaseModel:
+    ) -> OutputT:
         self.calls.append((request, output_model, prompt))
         output = self.outputs.pop(0)
         return output_model.model_validate(output.model_dump(mode="json"))

@@ -5,6 +5,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock
 
 import pytest
@@ -54,11 +55,11 @@ def _hash(value: object) -> str:
 
 @dataclass
 class WorkflowHarness:
-    database: AsyncSurreal
+    database: Any
     service: ExerciseWorkflowService
     adapter: SequenceAdapter
     anchor_id: str
-    repository: object
+    repository: Any
 
     async def create_parent_run(
         self,
@@ -145,7 +146,7 @@ class WorkflowHarness:
 @pytest_asyncio.fixture
 async def workflow_harness(
     monkeypatch: pytest.MonkeyPatch,
-) -> WorkflowHarness:
+) -> AsyncIterator[WorkflowHarness]:
     import open_notebook.course.assessment_service as assessment_module
     import open_notebook.course.exercise_workflow_service as exercise_module
     import open_notebook.course.models as models_module
@@ -170,7 +171,7 @@ async def workflow_harness(
     for version in ("24", "25", "26", "27"):
         await database.query(_migration(version))
 
-    outline = {
+    outline: dict[str, Any] = {
         "title": "Algebra",
         "chapters": [
             {

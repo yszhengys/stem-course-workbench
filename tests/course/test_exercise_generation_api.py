@@ -1,3 +1,4 @@
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -298,12 +299,14 @@ async def test_submit_exercise_bank_binds_current_chapter_and_both_models(
     selectable.assert_awaited_once_with(
         [_selection("qwen3.5:9b"), _selection("gpt-oss:20b")]
     )
+    assert submit.await_args is not None
     call = submit.await_args.kwargs
     assert call["stage"] == "exercise_bank"
     assert call["command_name"] == "course_generate_exercise_bank"
     assert call["course_version_id"] == "course_version:one"
     assert call["chapter_id"] == "chapter:one"
-    assert call["command_args"]["review_model"] == _selection(
+    command_args = cast(dict[str, Any], call["command_args"])
+    assert command_args["review_model"] == _selection(
         "gpt-oss:20b"
     ).model_dump(mode="json")
 
@@ -341,18 +344,20 @@ async def test_exercise_submission_dedupes_active_run_and_force_creates_attempt(
     monkeypatch.setattr(
         module, "ensure_course_models_selectable", AsyncMock()
     )
-    arguments = {
-        "course_id": "course:one",
-        "chapter_key": "linear-equations",
-        "anchor_ids": ["anchor:one"],
-        "prompt_version": "v2",
-        "model": _selection("qwen3.5:9b"),
-        "review_model": _selection("gpt-oss:20b"),
-    }
+    async def submit_exercises(*, force: bool = False) -> CourseJobSubmission:
+        return await service.submit_exercise_bank(
+            course_id="course:one",
+            chapter_key="linear-equations",
+            anchor_ids=["anchor:one"],
+            prompt_version="v2",
+            model=_selection("qwen3.5:9b"),
+            review_model=_selection("gpt-oss:20b"),
+            force=force,
+        )
 
-    first = await service.submit_exercise_bank(**arguments)
-    replay = await service.submit_exercise_bank(**arguments)
-    forced = await service.submit_exercise_bank(**arguments, force=True)
+    first = await submit_exercises()
+    replay = await submit_exercises()
+    forced = await submit_exercises(force=True)
 
     assert replay == first
     assert forced.run_id != first.run_id
@@ -449,4 +454,5 @@ async def test_worker_permanent_exercise_failure_is_synchronized(
 
     selectable.assert_awaited_once_with([request.model, request.review_model])
     permanent.assert_awaited_once()
+    assert generate.await_args is not None
     assert generate.await_args.kwargs["review_model"] == request.review_model
