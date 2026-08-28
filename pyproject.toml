@@ -50,6 +50,7 @@ dependencies = [
     "sympy>=1.14.0",
     "pint>=0.25.3",
     "pypdf>=6.0.0,<7",
+    "pypdfium2>=5.11.0,<6",
     "ollama>=0.6.0,<1",
 ]
 
