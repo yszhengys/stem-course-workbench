@@ -157,6 +157,7 @@ class GenerationRequest(CourseContract):
         "review",
         "escalation",
         "exercise_bank",
+        "exercise_bank_review",
         "transfer_task",
         "tutor",
     ]

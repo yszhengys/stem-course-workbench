@@ -21,6 +21,8 @@ DEFAULT_MODEL_POLICY: dict[str, ModelSelection] = {
     "outline": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
     "chapter_content": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
     "practice_labs": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
+    "exercise_bank": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
+    "exercise_bank_review": ModelSelection(adapter="codex_cli", model="gpt-5.6-luna", reasoning_effort="max"),
     "review": ModelSelection(adapter="codex_cli", model="gpt-5.6-luna", reasoning_effort="max"),
     "escalation": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
 }

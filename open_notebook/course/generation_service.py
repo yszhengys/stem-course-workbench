@@ -49,6 +49,7 @@ COURSE_PROMPT_STAGES = {
     "review",
     "escalation",
     "exercise_bank",
+    "exercise_bank_review",
     "transfer_task",
     "tutor",
 }
@@ -309,6 +310,76 @@ class CourseGenerationService:
         if not set(canonical.anchor_ids).issubset(set(anchor_ids)):
             raise ValueError("Transfer task contains an unknown evidence anchor")
         return canonical
+
+    async def review_exercise_transfer(
+        self,
+        *,
+        course_id: str,
+        chapter_key: str,
+        core: ExerciseBlueprint,
+        evidence_by_anchor: Mapping[str, str],
+        model: ModelSelection,
+        prompt_version: str = "v2",
+    ) -> tuple[ValidationFinding, ...]:
+        """Independently review one core/transfer pair with minimal evidence."""
+
+        transfer = core.transfer_task
+        if core.chapter_key != chapter_key or not core.is_core or transfer is None:
+            raise ValueError(
+                "Exercise review requires the matching core exercise and transfer"
+            )
+        required_anchor_ids = list(
+            dict.fromkeys((*core.source_anchor_ids, *transfer.anchor_ids))
+        )
+        if not required_anchor_ids:
+            raise ValueError("Exercise review requires source evidence")
+        missing = [
+            anchor_id
+            for anchor_id in required_anchor_ids
+            if anchor_id not in evidence_by_anchor
+        ]
+        if missing:
+            raise ValueError("Exercise review is missing required evidence")
+        request = GenerationRequest(
+            stage="exercise_bank_review",
+            course_id=course_id,
+            chapter_key=chapter_key,
+            model=model,
+            anchor_ids=required_anchor_ids,
+            prompt_version=prompt_version,
+            schema_name="course_exercise_review",
+        )
+        core_payload = core.model_dump_json(
+            exclude={"transfer_task"}, exclude_none=True
+        )
+        adapter = self.adapter or build_adapter(model)
+        generated = await adapter.generate(
+            request,
+            ReviewArtifact,
+            prompt=self.prompt_for(
+                "exercise_bank_review",
+                [
+                    f"[{anchor_id}]: {evidence_by_anchor[anchor_id]}"
+                    for anchor_id in required_anchor_ids
+                ],
+                "Review only this core exercise and its transfer task.\n"
+                f"Core exercise:\n{core_payload}\n"
+                f"Transfer task:\n{transfer.model_dump_json(exclude_none=True)}\n"
+                "Do not regenerate or alter the grader.",
+                format_instructions=self._format_instructions(ReviewArtifact),
+            ),
+        )
+        canonical = self.canonicalize_anchor_references(
+            generated, set(required_anchor_ids)
+        )
+        for finding in canonical.findings:
+            if (
+                finding.kind != "review"
+                or finding.item_key != core.key
+                or not set(finding.anchor_ids).issubset(required_anchor_ids)
+            ):
+                raise ValueError("Exercise review finding is not bound to its input")
+        return tuple(canonical.findings)
 
     async def generate_outline(
         self,

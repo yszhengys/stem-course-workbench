@@ -25,7 +25,7 @@ from open_notebook.exceptions import ConfigurationError, InvalidInputError
 from .contracts import CourseOutlineArtifact, ModelSelection, ValidationFinding
 from .evidence_service import EvidenceInputError, EvidenceService
 from .generation_service import UNIT_REGISTRY, CourseGenerationService
-from .models import Course, CourseEvidenceAnchor, CourseVersion
+from .models import Chapter, Course, CourseEvidenceAnchor, CourseVersion
 from .task_backend import CourseTaskBackend
 from .v2_contracts import (
     DifficultyVector,
@@ -50,6 +50,7 @@ AssessmentAnchorLoader: TypeAlias = Callable[
 AssessmentOutlineLoader: TypeAlias = Callable[
     [str, str], Awaitable[CourseOutlineArtifact]
 ]
+AssessmentChapterLoader: TypeAlias = Callable[[str, str], Awaitable[Chapter]]
 TransferReviewer: TypeAlias = Callable[
     [ExerciseBlueprint, TransferTaskSpec],
     Awaitable[tuple[ValidationFinding, ...]],
@@ -233,8 +234,10 @@ class AssessmentService:
     generation_service: CourseGenerationService | None = None
     evidence_service: EvidenceService = field(default_factory=EvidenceService)
     model: ModelSelection | None = None
+    review_model: ModelSelection | None = None
     anchor_loader: AssessmentAnchorLoader | None = None
     outline_loader: AssessmentOutlineLoader | None = None
+    chapter_loader: AssessmentChapterLoader | None = None
     transfer_reviewer: TransferReviewer | None = None
 
     @staticmethod
@@ -1206,6 +1209,76 @@ class AssessmentService:
             }
         )
 
+    @classmethod
+    def _chapter_assessment_input_snapshot(
+        cls,
+        outline: CourseOutlineArtifact,
+        chapter: Chapter,
+        anchors: tuple[CourseEvidenceAnchor, ...],
+    ) -> str:
+        return cls._artifact_hash(
+            {
+                "outline": outline.model_dump(mode="json"),
+                "chapter": chapter.model_dump(mode="json"),
+                "anchors": [anchor.model_dump(mode="json") for anchor in anchors],
+            }
+        )
+
+    @staticmethod
+    def _scoped_outline(
+        outline: CourseOutlineArtifact, chapter_key: str
+    ) -> CourseOutlineArtifact:
+        chapter = next(
+            (item for item in outline.chapters if item.key == chapter_key), None
+        )
+        if chapter is None:
+            raise EvidenceInputError("Target chapter is not in the current outline.")
+        concept_keys = set(chapter.objective_keys)
+        concepts = [
+            concept for concept in outline.concepts if concept.key in concept_keys
+        ]
+        dependencies = [
+            edge
+            for edge in outline.dependency_edges
+            if edge.from_key in concept_keys and edge.to_key in concept_keys
+        ]
+        return CourseOutlineArtifact(
+            title=outline.title,
+            chapters=[chapter],
+            concepts=concepts,
+            dependency_edges=dependencies,
+        )
+
+    async def _load_current_chapter(
+        self, version_id: str, chapter_key: str
+    ) -> Chapter:
+        rows = await repo_query(
+            """
+            SELECT * FROM chapter
+            WHERE course_version = $version AND chapter_key = $chapter_key
+            ORDER BY version_no DESC LIMIT 1;
+            """,
+            {
+                "version": ensure_record_id(version_id),
+                "chapter_key": chapter_key,
+            },
+        )
+        chapters = [
+            Chapter(**row)
+            for row in (rows if isinstance(rows, list) else [])
+            if isinstance(row, dict)
+        ]
+        if len(chapters) != 1:
+            raise EvidenceInputError("Current target chapter is missing.")
+        chapter = chapters[0]
+        if (
+            chapter.course_version != version_id
+            or chapter.chapter_key != chapter_key
+            or chapter.input_hash is None
+        ):
+            raise EvidenceInputError("Current target chapter is invalid.")
+        return chapter
+
     async def _load_current_outline(
         self, course_id: str, version_id: str
     ) -> CourseOutlineArtifact:
@@ -1292,6 +1365,185 @@ class AssessmentService:
                 source_hash=source_hashes[anchor.source],
             )
         return tuple(selected)
+
+    async def build_chapter_exercise_bank(
+        self,
+        course_id: str,
+        version_id: str,
+        chapter_key: str,
+        anchor_ids: list[str],
+    ) -> list[ExerciseBlueprint]:
+        """Generate and independently review one current outline chapter."""
+
+        if re.fullmatch(r"course:[^:]+", course_id) is None:
+            raise EvidenceInputError("course_id must be a Course record ID.")
+        if re.fullmatch(r"course_version:[^:]+", version_id) is None:
+            raise EvidenceInputError("version_id must be a Course version record ID.")
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,99}", chapter_key) is None:
+            raise EvidenceInputError("chapter_key is invalid.")
+        if not anchor_ids or len(anchor_ids) != len(set(anchor_ids)):
+            raise EvidenceInputError(
+                "Exercise-bank anchor IDs must be non-empty and unique."
+            )
+        selected_ids = tuple(anchor_ids)
+        anchor_loader = self.anchor_loader or self._load_owned_anchors
+        loaded = await anchor_loader(course_id, version_id, selected_ids)
+        if any(not isinstance(anchor, CourseEvidenceAnchor) for anchor in loaded):
+            raise EvidenceInputError("Assessment anchor loader returned invalid data.")
+        by_id = {anchor.anchor_id: anchor for anchor in loaded}
+        if set(by_id) != set(selected_ids):
+            raise EvidenceInputError(
+                "Assessment anchor loader did not return the exact selected anchors."
+            )
+        anchors = tuple(by_id[anchor_id] for anchor_id in selected_ids)
+        if any(
+            anchor.course != course_id or not anchor.is_current for anchor in anchors
+        ):
+            raise EvidenceInputError(
+                "Assessment anchors must be current and owned by the Course."
+            )
+
+        outline_loader = self.outline_loader or self._load_current_outline
+        outline = await outline_loader(course_id, version_id)
+        if not isinstance(outline, CourseOutlineArtifact):
+            raise EvidenceInputError("Assessment outline loader returned invalid data.")
+        scoped_outline = self._scoped_outline(outline, chapter_key)
+        target_outline_chapter = scoped_outline.chapters[0]
+        concept_anchors = {
+            concept.key: set(concept.anchor_ids) for concept in scoped_outline.concepts
+        }
+        allowed_anchors = set(target_outline_chapter.anchor_ids).union(
+            *(
+                concept_anchors.get(key, set())
+                for key in target_outline_chapter.objective_keys
+            )
+        )
+        if not set(selected_ids).issubset(allowed_anchors):
+            raise EvidenceInputError(
+                "Assessment anchors must belong to the target outline chapter."
+            )
+
+        chapter_loader = self.chapter_loader or self._load_current_chapter
+        chapter = await chapter_loader(version_id, chapter_key)
+        if not isinstance(chapter, Chapter):
+            raise EvidenceInputError("Assessment chapter loader returned invalid data.")
+        if (
+            chapter.course_version != version_id
+            or chapter.chapter_key != chapter_key
+            or chapter.input_hash is None
+        ):
+            raise EvidenceInputError("Current target chapter is invalid.")
+        input_snapshot = self._chapter_assessment_input_snapshot(
+            outline, chapter, anchors
+        )
+
+        generation_model = self.model
+        review_model = self.review_model
+        if generation_model is None or review_model is None:
+            try:
+                course = await Course.get(course_id)
+                generation_model = generation_model or course.model_for(
+                    "exercise_bank"
+                )
+                review_model = review_model or course.model_for(
+                    "exercise_bank_review"
+                )
+            except Exception as exc:
+                raise ConfigurationError(
+                    "Explicit exercise generation and review models are required."
+                ) from exc
+
+        classifications = tuple(
+            self.evidence_service.classify_assessment_anchor(anchor)
+            for anchor in anchors
+        )
+        context = tuple(
+            self.evidence_service.assessment_context(anchor, classification)
+            for anchor, classification in zip(
+                anchors, classifications, strict=True
+            )
+        )
+        generation = self.generation_service or CourseGenerationService()
+        artifact = await generation.generate_exercise_bank(
+            course_id=course_id,
+            course_version_id=version_id,
+            anchor_ids=list(selected_ids),
+            evidence=context,
+            classifications=classifications,
+            outline=scoped_outline,
+            model=generation_model,
+        )
+        evidence_by_anchor = {
+            anchor.anchor_id: anchor.locator.quote for anchor in anchors
+        }
+        transfer_reviews: dict[str, tuple[ValidationFinding, ...]] = {}
+        for exercise in artifact.exercises:
+            if exercise.is_core and exercise.transfer_task is not None:
+                transfer_reviews[exercise.key] = (
+                    await generation.review_exercise_transfer(
+                        course_id=course_id,
+                        chapter_key=chapter_key,
+                        core=exercise,
+                        evidence_by_anchor=evidence_by_anchor,
+                        model=review_model,
+                    )
+                )
+
+        refreshed_loaded = await anchor_loader(course_id, version_id, selected_ids)
+        if any(
+            not isinstance(anchor, CourseEvidenceAnchor)
+            for anchor in refreshed_loaded
+        ):
+            raise EvidenceInputError("Assessment anchor loader returned invalid data.")
+        refreshed_by_id = {anchor.anchor_id: anchor for anchor in refreshed_loaded}
+        if set(refreshed_by_id) != set(selected_ids):
+            raise EvidenceInputError("Assessment inputs changed during generation.")
+        refreshed_anchors = tuple(
+            refreshed_by_id[anchor_id] for anchor_id in selected_ids
+        )
+        if any(
+            anchor.course != course_id or not anchor.is_current
+            for anchor in refreshed_anchors
+        ):
+            raise EvidenceInputError("Assessment inputs changed during generation.")
+        refreshed_outline = await outline_loader(course_id, version_id)
+        refreshed_chapter = await chapter_loader(version_id, chapter_key)
+        if not isinstance(refreshed_outline, CourseOutlineArtifact) or not isinstance(
+            refreshed_chapter, Chapter
+        ):
+            raise EvidenceInputError("Assessment inputs changed during generation.")
+        if (
+            refreshed_chapter.course_version != version_id
+            or refreshed_chapter.chapter_key != chapter_key
+            or refreshed_chapter.input_hash is None
+            or self._chapter_assessment_input_snapshot(
+                refreshed_outline, refreshed_chapter, refreshed_anchors
+            )
+            != input_snapshot
+        ):
+            raise EvidenceInputError("Assessment inputs changed during generation.")
+
+        findings = self.validate_bank(
+            artifact.exercises,
+            known_anchor_ids=set(selected_ids),
+            classifications=classifications,
+            expected_chapter_keys={chapter_key},
+            expected_concept_keys_by_chapter={
+                chapter_key: set(target_outline_chapter.objective_keys)
+            },
+            expected_anchor_ids_by_chapter={chapter_key: allowed_anchors},
+            transfer_reviews=transfer_reviews,
+            require_independent_review=True,
+        )
+        blocking = [
+            finding
+            for finding in findings
+            if finding.severity in {"high", "error"}
+            or finding.status in {"manual_check", "uncertain"}
+        ]
+        if blocking:
+            raise AssessmentValidationError(blocking)
+        return list(artifact.exercises)
 
     async def build_exercise_bank(
         self, course_id: str, version_id: str, anchor_ids: list[str]
@@ -1433,6 +1685,7 @@ class AssessmentService:
 
 __all__ = [
     "AssessmentAnchorLoader",
+    "AssessmentChapterLoader",
     "AssessmentService",
     "AssessmentValidationError",
     "dominates",
