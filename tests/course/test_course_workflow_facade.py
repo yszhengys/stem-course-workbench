@@ -700,6 +700,10 @@ async def test_publish_rechecks_unresolved_findings_as_final_defense(
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
     monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
     monkeypatch.setattr(
+        "api.course_service.PublicationService.assert_exercises_ready",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
         "api.course_service.repo_query",
         AsyncMock(
             return_value=[

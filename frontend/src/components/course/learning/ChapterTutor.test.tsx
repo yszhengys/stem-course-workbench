@@ -63,6 +63,14 @@ const exercise: CourseExercise = {
   is_core: true,
   is_gating: true,
   is_source_level: false,
+  verification: {
+    level: 'L2',
+    method: 'deterministic_solver',
+    anchor_ids: [],
+    reason: 'Deterministic answer check transcript sha256:abc',
+    verified_at: null,
+  },
+  learning_blocked_reason: null,
   transfer: {
     key: 'limits-core-transfer',
     prompt: 'Apply it to a graph.',

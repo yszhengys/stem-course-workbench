@@ -921,6 +921,8 @@ export const courseExerciseSchema = z.object({
   is_core: z.boolean(),
   is_gating: z.boolean(),
   is_source_level: z.boolean(),
+  verification: z.lazy(() => exerciseVerificationSchema),
+  learning_blocked_reason: z.literal('verification_required').nullable(),
   transfer: courseTransferTaskSchema.nullable(),
 }).strict()
 export type CourseExercise = z.infer<typeof courseExerciseSchema>

@@ -265,6 +265,10 @@ def _patch_publication_dependencies(
         "api.course_service.PublicationService.assert_draft_ready",
         AsyncMock(),
     )
+    monkeypatch.setattr(
+        "api.course_service.PublicationService.assert_exercises_ready",
+        AsyncMock(),
+    )
     monkeypatch.setattr(CourseVersion, "chapters", AsyncMock(return_value=chapters))
 
     async def promotion(*, chapter_key: str, **_kwargs):

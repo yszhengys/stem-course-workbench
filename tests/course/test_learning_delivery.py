@@ -30,6 +30,7 @@ from open_notebook.course.v2_contracts import (
     ConceptMastery,
     DifficultyVector,
     ExerciseBlueprint,
+    ExerciseVerification,
     LearningEvent,
     NumericGraderSpec,
 )
@@ -103,6 +104,11 @@ def _exercise(*, hints: tuple[str, ...] | None = None) -> CourseExercise:
         is_core=blueprint.is_core,
         is_gating=blueprint.is_gating,
         is_source_level=blueprint.is_source_level,
+        verification=ExerciseVerification(
+            level="L2",
+            method="deterministic_solver",
+            reason="Deterministic answer check transcript sha256:abc",
+        ),
     )
 
 

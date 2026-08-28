@@ -945,6 +945,27 @@ class CourseExerciseRevealRequest(StrictCourseRequest):
     attempt_key: StableKey
 
 
+class CourseExerciseVerificationRequest(StrictCourseRequest):
+    """Bind a human approval to the exact current exercise answer snapshot."""
+
+    snapshot_token: Sha256
+    expected_answer_confirmation: Any
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("expected_answer_confirmation")
+    @classmethod
+    def confirmation_is_bounded_json(cls, value: Any) -> Any:
+        return _bounded_json_answer(value)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_is_not_blank(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("verification reason must not be blank")
+        return clean
+
+
 class CourseTransferGradeRequest(StrictCourseRequest):
     snapshot_token: Sha256
     chapter_key: StableKey
@@ -1043,6 +1064,8 @@ class CourseExerciseResponse(BaseModel):
     is_core: bool
     is_gating: bool
     is_source_level: bool
+    verification: ExerciseVerificationResponse
+    learning_blocked_reason: Literal["verification_required"] | None = None
     transfer: CourseTransferTaskResponse | None = None
 
 

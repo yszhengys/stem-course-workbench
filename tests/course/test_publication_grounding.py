@@ -197,6 +197,10 @@ def _patch_records(monkeypatch, course, version, chapter) -> None:
     monkeypatch.setattr(Course, "get", AsyncMock(return_value=course))
     monkeypatch.setattr(CourseVersion, "get", AsyncMock(return_value=version))
     monkeypatch.setattr(Chapter, "get", AsyncMock(return_value=chapter))
+    monkeypatch.setattr(
+        "api.course_service.PublicationService.assert_exercises_ready",
+        AsyncMock(),
+    )
 
 
 @pytest.mark.asyncio

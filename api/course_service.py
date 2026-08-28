@@ -47,9 +47,14 @@ from open_notebook.course.models import (
 )
 from open_notebook.course.publication_service import (
     DraftPublicationError,
+    ExercisePublicationError,
     PublicationService,
 )
-from open_notebook.course.v2_contracts import ConceptMastery, LearningEvent
+from open_notebook.course.v2_contracts import (
+    ConceptMastery,
+    ExerciseVerification,
+    LearningEvent,
+)
 from open_notebook.course.v2_models import (
     CourseConceptMastery,
     CourseExercise,
@@ -459,6 +464,140 @@ class CourseService:
             },
             "options": options,
         }
+
+    @staticmethod
+    async def get_current_authoring_exercise(
+        course_id: str,
+        chapter_key: str,
+        exercise_key: str,
+    ) -> tuple[CourseVersion, Chapter, CourseExercise]:
+        """Resolve one exercise only inside the current unpublished authoring scope."""
+
+        _course, version, chapter = await _current_chapter_records(
+            course_id, chapter_key
+        )
+        if version.status == sm.VersionStatus.PUBLISHED:
+            raise CourseImmutableError("Course version is immutable")
+        if chapter.status == sm.ChapterStatus.PUBLISHED:
+            raise CourseImmutableError("Course artifact is immutable")
+        if version.id is None or chapter.id is None:
+            raise CourseConflictError("Current Course exercise scope is not persisted")
+        rows = await repo_query(
+            """
+            SELECT * FROM course_exercise
+            WHERE course = $course AND course_version = $version
+              AND chapter_key = $chapter_key AND exercise_key = $exercise_key;
+            """,
+            {
+                "course": ensure_record_id(course_id),
+                "version": ensure_record_id(str(version.id)),
+                "chapter_key": chapter_key,
+                "exercise_key": exercise_key,
+            },
+        )
+        try:
+            records = tuple(
+                CourseExercise(**row) for row in rows if isinstance(row, dict)
+            )
+        except (TypeError, ValueError) as exc:
+            raise CourseConflictError("Current Course exercise is invalid") from exc
+        if not records:
+            raise NotFoundError("Current Course exercise not found")
+        if len(records) != 1:
+            raise CourseConflictError("Course exercise stable key is ambiguous")
+        exercise = records[0]
+        if (
+            exercise.course != course_id
+            or exercise.course_version != str(version.id)
+            or exercise.chapter != str(chapter.id)
+            or exercise.chapter_key != chapter_key
+            or exercise.exercise_key != exercise_key
+        ):
+            raise CourseConflictError("Current Course exercise scope changed")
+        return version, chapter, exercise
+
+    @staticmethod
+    async def set_exercise_verification(
+        *,
+        course_id: str,
+        version: CourseVersion,
+        chapter: Chapter,
+        exercise: CourseExercise,
+        verification: ExerciseVerification,
+    ) -> CourseExercise:
+        """Atomically write server-authored provenance to an unchanged exercise."""
+
+        if version.id is None or chapter.id is None or exercise.id is None:
+            raise CourseConflictError("Current Course exercise scope is not persisted")
+        if version.status == sm.VersionStatus.PUBLISHED:
+            raise CourseImmutableError("Course version is immutable")
+        if chapter.status == sm.ChapterStatus.PUBLISHED:
+            raise CourseImmutableError("Course artifact is immutable")
+        if exercise.updated is None:
+            raise CourseConflictError("Current Course exercise has no revision timestamp")
+        version_id = str(version.id)
+        chapter_id = str(chapter.id)
+        exercise_id = str(exercise.id)
+        try:
+            await repo_query(
+                """
+                BEGIN TRANSACTION;
+                LET $current_course = (
+                    SELECT VALUE id FROM course
+                    WHERE id = $course AND outline_version_id = $version
+                );
+                LET $mutable_version = (
+                    SELECT VALUE id FROM course_version
+                    WHERE id = $version AND course = $course
+                      AND status != 'published'
+                );
+                LET $mutable_chapter = (
+                    SELECT VALUE id FROM chapter
+                    WHERE id = $chapter AND course_version = $version
+                      AND chapter_key = $chapter_key AND status != 'published'
+                );
+                LET $updated_exercise = (
+                    UPDATE $exercise SET verification = $verification
+                    WHERE course = $course AND course_version = $version
+                      AND chapter = $chapter AND chapter_key = $chapter_key
+                      AND exercise_key = $exercise_key
+                      AND time::micros(updated) = time::micros($expected_updated)
+                    RETURN VALUE id
+                );
+                IF array::len($current_course) != 1
+                   OR array::len($mutable_version) != 1
+                   OR array::len($mutable_chapter) != 1
+                   OR array::len($updated_exercise) != 1 {
+                    THROW 'Course exercise verification snapshot changed'
+                };
+                COMMIT TRANSACTION;
+                """,
+                {
+                    "course": ensure_record_id(course_id),
+                    "version": ensure_record_id(version_id),
+                    "chapter": ensure_record_id(chapter_id),
+                    "exercise": ensure_record_id(exercise_id),
+                    "chapter_key": chapter.chapter_key,
+                    "exercise_key": exercise.exercise_key,
+                    "expected_updated": exercise.updated,
+                    "verification": verification.model_dump(mode="json"),
+                },
+            )
+        except RuntimeError as exc:
+            rows = await repo_query(
+                "SELECT * FROM $exercise;",
+                {"exercise": ensure_record_id(exercise_id)},
+            )
+            current = tuple(
+                CourseExercise(**row) for row in rows if isinstance(row, dict)
+            )
+            if len(current) == 1 and current[0].verification == verification:
+                return current[0]
+            raise CourseConflictError(
+                "Course exercise verification snapshot changed"
+            ) from exc
+        exercise.verification = verification
+        return exercise
 
     @staticmethod
     async def create_course(
@@ -1304,18 +1443,23 @@ class CourseService:
         ):
             raise CourseConflictError("Chapter review and validation must pass")
         try:
-            await PublicationService(revision_query=repo_query).assert_draft_ready(
-                DraftScope(
-                    course_id=course_id,
-                    course_version_id=version_id,
-                    chapter_id=chapter_id,
-                    chapter_key=chapter.chapter_key,
-                    chapter_status=chapter.status,
-                    version_status=version.status,
-                    allowed_anchor_ids=(),
-                )
+            publication = PublicationService(revision_query=repo_query)
+            scope = DraftScope(
+                course_id=course_id,
+                course_version_id=version_id,
+                chapter_id=chapter_id,
+                chapter_key=chapter.chapter_key,
+                chapter_status=chapter.status,
+                version_status=version.status,
+                allowed_anchor_ids=(),
             )
-        except (DraftConflictError, DraftPublicationError) as exc:
+            await publication.assert_draft_ready(scope)
+            await publication.assert_exercises_ready(scope)
+        except (
+            DraftConflictError,
+            DraftPublicationError,
+            ExercisePublicationError,
+        ) as exc:
             raise CourseConflictError(str(exc)) from exc
         _, finding_records = (
             await CourseWorkflowService.authoritative_review_findings(

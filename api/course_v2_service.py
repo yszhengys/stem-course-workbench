@@ -30,6 +30,7 @@ from api.models import (
     CourseExerciseResponse,
     CourseExerciseRevealRequest,
     CourseExerciseRevealResponse,
+    CourseExerciseVerificationRequest,
     CourseExportResponse,
     CourseLearnerChapterArtifact,
     CourseLearnerChapterResponse,
@@ -51,6 +52,7 @@ from api.models import (
     CourseTutorMessageResponse,
     CourseTutorSessionCreateRequest,
     CourseTutorSessionResponse,
+    ExerciseVerificationResponse,
 )
 from open_notebook.course.assessment_service import AssessmentService
 from open_notebook.course.authoring_service import (
@@ -70,6 +72,7 @@ from open_notebook.course.models import Chapter, CourseNote, CourseVersion
 from open_notebook.course.portability_service import PortabilityService
 from open_notebook.course.publication_service import (
     DraftPublicationError,
+    ExercisePublicationError,
     PublicationService,
 )
 from open_notebook.course.tutor_service import (
@@ -81,6 +84,7 @@ from open_notebook.course.tutor_service import (
 from open_notebook.course.v2_contracts import (
     AdvisoryGraderSpec,
     AnswerType,
+    ExerciseVerification,
     GradedPayload,
     GraderSpec,
     LearningEvent,
@@ -600,6 +604,10 @@ class CourseV2Service:
             course_id, version, exercise
         )
         self._require_snapshot(current_snapshot, snapshot_token)
+        if not exercise.verification.mastery_eligible:
+            raise InvalidInputError(
+                "Exercise verification level L2 or L3 is required before learning actions."
+            )
         return version, chapter, version_id, exercise, current_snapshot
 
     async def get_learning_chapter(
@@ -1020,9 +1028,72 @@ class CourseV2Service:
         scope = await self._draft_scope(course_id, chapter_key)
         try:
             await self._publication().assert_draft_ready(scope)
-        except (DraftConflictError, DraftPublicationError) as exc:
+            await self._publication().assert_exercises_ready(scope)
+        except (
+            DraftConflictError,
+            DraftPublicationError,
+            ExercisePublicationError,
+        ) as exc:
             raise CourseConflictError(str(exc)) from exc
         return await CourseService.publish_current_chapter(course_id, chapter_key)
+
+    async def verify_exercise(
+        self,
+        course_id: str,
+        chapter_key: str,
+        exercise_key: str,
+        request: CourseExerciseVerificationRequest,
+    ) -> ExerciseVerificationResponse:
+        version, chapter, exercise = (
+            await CourseService.get_current_authoring_exercise(
+                course_id, chapter_key, exercise_key
+            )
+        )
+        current_snapshot = self._exercise_snapshot_token(
+            course_id, version, exercise
+        )
+        if not secrets.compare_digest(current_snapshot, request.snapshot_token):
+            raise CourseConflictError(
+                "The exercise snapshot changed; reload before verification."
+            )
+        expected = self.assessment_service.reveal_grader_answer(
+            exercise.blueprint.grader
+        )
+        expected_json = json.dumps(
+            expected,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        received_json = json.dumps(
+            request.expected_answer_confirmation,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        if not secrets.compare_digest(expected_json, received_json):
+            raise CourseConflictError(
+                "The displayed expected answer changed; reload before verification."
+            )
+        verification = ExerciseVerification(
+            level="L3",
+            method="human_review",
+            anchor_ids=exercise.source_anchor_ids,
+            reason=request.reason,
+            verified_at=self.clock().astimezone(timezone.utc),
+        )
+        persisted = await CourseService.set_exercise_verification(
+            course_id=course_id,
+            version=version,
+            chapter=chapter,
+            exercise=exercise,
+            verification=verification,
+        )
+        return ExerciseVerificationResponse.model_validate(
+            persisted.verification
+        )
 
     async def get_learning_overview(
         self, course_id: str
@@ -1266,6 +1337,14 @@ class CourseV2Service:
                 is_core=exercise.blueprint.is_core,
                 is_gating=exercise.blueprint.is_gating,
                 is_source_level=exercise.blueprint.is_source_level,
+                verification=ExerciseVerificationResponse.model_validate(
+                    exercise.verification
+                ),
+                learning_blocked_reason=(
+                    None
+                    if exercise.verification.mastery_eligible
+                    else "verification_required"
+                ),
                 transfer=(
                     self._transfer_response(exercise.blueprint.transfer_task)
                     if exercise.blueprint.transfer_task is not None

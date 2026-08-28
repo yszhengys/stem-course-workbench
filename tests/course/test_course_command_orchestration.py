@@ -3041,6 +3041,11 @@ async def test_fake_adapter_outline_approval_chapter_review_publish_replays_once
         Lab,
     )
 
+    monkeypatch.setattr(
+        "api.course_service.PublicationService.assert_exercises_ready",
+        AsyncMock(),
+    )
+
     source_hash = "a" * 64
     anchor = EvidenceService().make_anchor(
         course_id="course:e2e",

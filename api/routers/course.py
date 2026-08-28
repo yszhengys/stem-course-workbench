@@ -41,6 +41,7 @@ from api.models import (
     CourseExerciseResponse,
     CourseExerciseRevealRequest,
     CourseExerciseRevealResponse,
+    CourseExerciseVerificationRequest,
     CourseExportCreateRequest,
     CourseExportResponse,
     CourseFindingUpdate,
@@ -65,6 +66,7 @@ from api.models import (
     CourseTutorSessionResponse,
     CourseUpdate,
     CourseVersionCreate,
+    ExerciseVerificationResponse,
     LabCreate,
     ProgressUpdate,
 )
@@ -368,6 +370,23 @@ async def list_course_exercises(
 ):
     return await _call(
         course_v2_service.list_exercises(course_id, chapter_key)
+    )
+
+
+@router.post(
+    "/courses/{course_id}/chapters/{chapter_key}/exercises/{exercise_key}/verify",
+    response_model=ExerciseVerificationResponse,
+)
+async def verify_course_exercise(
+    course_id: str,
+    chapter_key: StableKey,
+    exercise_key: StableKey,
+    request: CourseExerciseVerificationRequest,
+):
+    return await _call(
+        course_v2_service.verify_exercise(
+            course_id, chapter_key, exercise_key, request
+        )
     )
 
 

@@ -12,13 +12,20 @@ from fastapi.testclient import TestClient
 
 from api.course_service import CourseConflictError, CourseService
 from api.course_v2_service import CourseV2Service, course_v2_service
-from api.models import CourseExerciseGradeRequest, CourseLearningEventRequest
+from api.models import (
+    CourseExerciseGradeRequest,
+    CourseExerciseHintRequest,
+    CourseExerciseRevealRequest,
+    CourseLearningEventRequest,
+    CourseTransferGradeRequest,
+)
 from open_notebook.course.learning_service import LearningService
 from open_notebook.course.models import Chapter, Course, CourseVersion
 from open_notebook.course.v2_contracts import (
     ConceptMastery,
     DifficultyVector,
     ExerciseBlueprint,
+    ExerciseVerification,
     LearningEvent,
     NumericGraderSpec,
     ReviewQueueItem,
@@ -91,7 +98,12 @@ def _blueprint(*, advisory: bool = False) -> ExerciseBlueprint:
     return ExerciseBlueprint.model_validate(values)
 
 
-def _exercise(*, course_id: str = "course:abc", advisory: bool = False) -> CourseExercise:
+def _exercise(
+    *,
+    course_id: str = "course:abc",
+    advisory: bool = False,
+    verified: bool = True,
+) -> CourseExercise:
     blueprint = _blueprint(advisory=advisory)
     return CourseExercise(
         id="course_exercise:one",
@@ -107,6 +119,17 @@ def _exercise(*, course_id: str = "course:abc", advisory: bool = False) -> Cours
         is_core=blueprint.is_core,
         is_gating=blueprint.is_gating,
         is_source_level=blueprint.is_source_level,
+        verification=(
+            ExerciseVerification(
+                level="L2",
+                method="deterministic_solver",
+                reason="Deterministic answer check transcript sha256:abc",
+            )
+            if verified
+            else ExerciseVerification(
+                level="L1", method="independent_model_review"
+            )
+        ),
     )
 
 
@@ -307,9 +330,17 @@ def test_learning_read_routes_return_only_public_v2_contracts(
         "source_number": blueprint.source_number,
         "source_section": blueprint.source_section,
         "difficulty": blueprint.difficulty,
-        "is_core": blueprint.is_core,
-        "is_gating": blueprint.is_gating,
-        "is_source_level": blueprint.is_source_level,
+            "is_core": blueprint.is_core,
+            "is_gating": blueprint.is_gating,
+            "is_source_level": blueprint.is_source_level,
+            "verification": {
+                "level": "L2",
+                "method": "deterministic_solver",
+                "anchor_ids": [],
+                "reason": "Deterministic answer check transcript sha256:abc",
+                "verified_at": None,
+            },
+            "learning_blocked_reason": None,
         "transfer": {
             "key": "core-1-transfer",
             "prompt": "Apply the invariant in a changed representation.",
@@ -861,6 +892,108 @@ async def test_public_exercise_keeps_transfer_prompt_but_withholds_oracles(
     assert "grader" not in public
     assert "grader" not in public["transfer"]
     assert "change_evidence" not in public["transfer"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_l1_exercise_is_listed_with_explicit_learning_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    version, _chapter = _scope()
+    service = CourseV2Service()
+    monkeypatch.setattr(
+        CourseService,
+        "list_current_exercises",
+        AsyncMock(return_value=(version, (_exercise(verified=False),))),
+    )
+
+    exercises = await service.list_exercises("course:abc", "linear")
+
+    assert exercises[0].verification.level == "L1"
+    assert exercises[0].learning_blocked_reason == "verification_required"
+
+
+@pytest.mark.asyncio
+async def test_legacy_l1_exercise_blocks_all_learning_actions_before_event_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exercise = _exercise(verified=False)
+    append_event = AsyncMock()
+    append_reveal_events = AsyncMock()
+    learning = cast(
+        LearningService,
+        SimpleNamespace(
+            append_event=append_event,
+            append_reveal_events=append_reveal_events,
+        ),
+    )
+    service = CourseV2Service(learning_service=learning, clock=lambda: NOW)
+    monkeypatch.setattr(
+        CourseService,
+        "resolve_current_published_chapter",
+        AsyncMock(return_value=_scope()),
+    )
+    monkeypatch.setattr(
+        CourseService,
+        "get_current_exercise",
+        AsyncMock(return_value=exercise),
+    )
+    snapshot = _exercise_snapshot(service, exercise)
+    calls = (
+        service.next_hint(
+            "course:abc",
+            "core-1",
+            CourseExerciseHintRequest(
+                snapshot_token=snapshot,
+                idempotency_key="hint-1",
+                chapter_key="linear",
+                concept_key="linear-equations",
+                attempt_key="attempt-1",
+                hint_index=1,
+            ),
+        ),
+        service.reveal_answer(
+            "course:abc",
+            "core-1",
+            CourseExerciseRevealRequest(
+                snapshot_token=snapshot,
+                idempotency_key="reveal-1",
+                chapter_key="linear",
+                concept_key="linear-equations",
+                attempt_key="attempt-1",
+            ),
+        ),
+        service.grade_exercise(
+            "course:abc",
+            "core-1",
+            CourseExerciseGradeRequest(
+                snapshot_token=snapshot,
+                chapter_key="linear",
+                concept_key="linear-equations",
+                attempt_key="attempt-1",
+                answer="4",
+            ),
+        ),
+        service.grade_transfer(
+            "course:abc",
+            "core-1",
+            CourseTransferGradeRequest(
+                snapshot_token=snapshot,
+                chapter_key="linear",
+                concept_key="linear-equations",
+                source_attempt_key="attempt-1",
+                attempt_key="transfer-1",
+                transfer_task_key="core-1-transfer",
+                answer="8",
+            ),
+        ),
+    )
+
+    for call in calls:
+        with pytest.raises(InvalidInputError, match="L2 or L3"):
+            await call
+
+    append_event.assert_not_awaited()
+    append_reveal_events.assert_not_awaited()
 
 
 @pytest.mark.asyncio

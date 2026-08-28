@@ -264,6 +264,14 @@ const learnerExercise = () => ({
   is_core: true,
   is_gating: true,
   is_source_level: true,
+  verification: {
+    level: 'L2',
+    method: 'deterministic_solver',
+    anchor_ids: [],
+    reason: 'Deterministic answer check transcript sha256:abc',
+    verified_at: null,
+  },
+  learning_blocked_reason: null,
   transfer: {
     key: 'limits-transfer',
     prompt: 'Apply the same invariant to a graph.',
@@ -305,7 +313,10 @@ describe('learner-safe Course V2 schemas', () => {
   })
 
   it('accepts learner exercise metadata but rejects hidden grading material', () => {
-    expect(courseExerciseSchema.parse(learnerExercise()).key).toBe('limits-core')
+    const parsed = courseExerciseSchema.parse(learnerExercise())
+    expect(parsed.key).toBe('limits-core')
+    expect(parsed.verification.level).toBe('L2')
+    expect(parsed.learning_blocked_reason).toBeNull()
 
     expect(() => courseExerciseSchema.parse({
       ...learnerExercise(),
@@ -319,6 +330,24 @@ describe('learner-safe Course V2 schemas', () => {
         grader: { kind: 'numeric', oracle_answer: 4 },
       },
     })).toThrow()
+  })
+
+  it('requires an explicit block reason for a legacy L1 learning exercise', () => {
+    const legacy = {
+      ...learnerExercise(),
+      verification: {
+        level: 'L1',
+        method: 'independent_model_review',
+        anchor_ids: [],
+        reason: null,
+        verified_at: null,
+      },
+      learning_blocked_reason: 'verification_required',
+    }
+
+    expect(courseExerciseSchema.parse(legacy).learning_blocked_reason).toBe(
+      'verification_required'
+    )
   })
 
   it('requires current-version record IDs and strict learning overview fields', () => {

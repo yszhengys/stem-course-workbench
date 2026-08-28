@@ -166,6 +166,10 @@ def patch_publication_evidence(monkeypatch) -> AsyncMock:
     monkeypatch.setattr(
         "api.course_service.CourseWorkflowService.grounded_inputs", grounded
     )
+    monkeypatch.setattr(
+        "api.course_service.PublicationService.assert_exercises_ready",
+        AsyncMock(),
+    )
     return grounded
 
 
