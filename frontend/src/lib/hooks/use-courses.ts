@@ -6,6 +6,7 @@ import { useToast } from '@/lib/hooks/use-toast'
 import { useTranslation } from '@/lib/hooks/use-translation'
 import type {
   BuildEvidenceRequest,
+  CourseBibliographyUpdateRequest,
   CourseExerciseGradeRequest,
   CourseExerciseHintRequest,
   CourseExerciseRevealRequest,
@@ -58,6 +59,42 @@ export function useEligibleCourseSources(courseId: string) {
     queryKey: QUERY_KEYS.courseSources(courseId),
     queryFn: () => courseApi.listEligibleSources(courseId),
     enabled: Boolean(courseId),
+    retry: false,
+  })
+}
+
+export function useCourseBibliography(courseId: string) {
+  return useQuery({
+    queryKey: QUERY_KEYS.courseBibliography(courseId),
+    queryFn: () => courseApi.listBibliography(courseId),
+    enabled: Boolean(courseId),
+    retry: false,
+  })
+}
+
+export function useSaveCourseBibliography(courseId: string) {
+  const client = useQueryClient()
+  const feedback = useMutationFeedback()
+  return useMutation({
+    mutationFn: ({
+      sourceId,
+      request,
+    }: {
+      sourceId: string
+      request: CourseBibliographyUpdateRequest
+    }) => courseApi.saveBibliography(courseId, sourceId, request),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({
+          queryKey: QUERY_KEYS.courseBibliography(courseId),
+        }),
+        client.invalidateQueries({
+          queryKey: QUERY_KEYS.courseCoverage(courseId),
+        }),
+      ])
+      feedback.success()
+    },
+    onError: feedback.error,
     retry: false,
   })
 }

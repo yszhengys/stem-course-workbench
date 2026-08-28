@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Literal, TypeVar
 
@@ -19,6 +20,79 @@ from .contracts import LabSpecVariant, ModelSelection, SourceLocator
 
 T = TypeVar("T", bound="CourseRecord")
 _LAB_SPEC_ADAPTER: TypeAdapter[LabSpecVariant] = TypeAdapter(LabSpecVariant)
+
+
+def normalize_bibliographic_authors(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Bibliographic authors must be a list")
+    if len(value) > 20:
+        raise ValueError("Bibliographic authors exceed the limit")
+    authors: list[str] = []
+    identities: set[str] = set()
+    for raw_author in value:
+        if not isinstance(raw_author, str):
+            raise ValueError("Bibliographic authors must be text")
+        author = " ".join(raw_author.split())
+        if not author or len(author) > 200:
+            raise ValueError("Bibliographic author is invalid")
+        identity = author.casefold()
+        if identity in identities:
+            raise ValueError("Bibliographic authors must be unique")
+        identities.add(identity)
+        authors.append(author)
+    return tuple(authors)
+
+
+def normalize_bibliographic_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("Bibliographic field must be text")
+    normalized = " ".join(value.split())
+    return normalized or None
+
+
+def normalize_doi(value: Any) -> str | None:
+    normalized = normalize_bibliographic_text(value)
+    if normalized is None:
+        return None
+    identifier = re.sub(
+        r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    ).lower()
+    if (
+        len(identifier) > 255
+        or re.fullmatch(r"10\.\d{4,9}/[^\s\x00-\x1f]+", identifier) is None
+    ):
+        raise ValueError("DOI is invalid")
+    return identifier
+
+
+def normalize_isbn(value: Any) -> str | None:
+    normalized = normalize_bibliographic_text(value)
+    if normalized is None:
+        return None
+    identifier = re.sub(
+        r"^isbn(?:-1[03])?:?\s*", "", normalized, flags=re.IGNORECASE
+    )
+    identifier = re.sub(r"[\s-]", "", identifier).upper()
+    valid = False
+    if re.fullmatch(r"\d{9}[\dX]", identifier):
+        digits = [int(character) for character in identifier[:9]]
+        digits.append(10 if identifier[-1] == "X" else int(identifier[-1]))
+        valid = sum((10 - index) * digit for index, digit in enumerate(digits)) % 11 == 0
+    elif re.fullmatch(r"\d{13}", identifier):
+        valid = sum(
+            int(character) * (1 if index % 2 == 0 else 3)
+            for index, character in enumerate(identifier)
+        ) % 10 == 0
+    if not valid:
+        raise ValueError("ISBN checksum is invalid")
+    return identifier
 
 DEFAULT_MODEL_POLICY: dict[str, ModelSelection] = {
     "outline": ModelSelection(adapter="codex_cli", model="gpt-5.6-sol", reasoning_effort="max"),
@@ -298,6 +372,62 @@ class Evidence(CourseRecord):
             {"course_id": ensure_record_id(course_id)},
         )
         return _rows(Evidence, result)
+
+
+class BibliographicSource(CourseRecord):
+    """Course-owned metadata for one currently associated upstream Source."""
+
+    table_name: ClassVar[str] = "course_bibliographic_source"
+    nullable_fields: ClassVar[set[str]] = {
+        "title",
+        "edition",
+        "publisher",
+        "year",
+        "doi",
+        "isbn",
+        "license",
+    }
+
+    course: str
+    source: str
+    source_role: Literal["PRIMARY", "SUPPLEMENT"]
+    authors: tuple[str, ...] = Field(default_factory=tuple, max_length=20)
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    edition: str | None = Field(default=None, min_length=1, max_length=100)
+    publisher: str | None = Field(default=None, min_length=1, max_length=300)
+    year: int | None = Field(default=None, ge=1000, le=2100)
+    doi: str | None = Field(default=None, min_length=7, max_length=255)
+    isbn: str | None = Field(default=None, min_length=10, max_length=13)
+    license: str | None = Field(default=None, min_length=1, max_length=200)
+    manually_reviewed: bool = False
+
+    @field_validator("course", "source", mode="before")
+    @classmethod
+    def record_as_string(cls, value: Any) -> Any:
+        return _string_id(value)
+
+    @field_validator("authors", mode="before")
+    @classmethod
+    def authors_are_bounded(cls, value: Any) -> tuple[str, ...]:
+        return normalize_bibliographic_authors(value)
+
+    @field_validator("title", "edition", "publisher", "license", mode="before")
+    @classmethod
+    def text_is_normalized(cls, value: Any) -> str | None:
+        return normalize_bibliographic_text(value)
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def doi_is_normalized(cls, value: Any) -> str | None:
+        return normalize_doi(value)
+
+    @field_validator("isbn", mode="before")
+    @classmethod
+    def isbn_is_normalized(cls, value: Any) -> str | None:
+        return normalize_isbn(value)
+
+    def _prepare_save_data(self) -> dict[str, Any]:
+        return _record_fields(super()._prepare_save_data(), "course", "source")
 
 
 class Lab(CourseRecord):

@@ -38,6 +38,8 @@ export const QUERY_KEYS = {
   courses: ['courses'] as const,
   course: (id: string) => ['courses', id] as const,
   courseSources: (id: string) => ['courses', id, 'sources', 'eligible'] as const,
+  courseBibliography: (id: string) => ['courses', id, 'bibliography'] as const,
+  courseCoverage: (id: string) => ['courses', id, 'coverage'] as const,
   courseAnchors: (id: string) => ['courses', id, 'evidence', 'anchors'] as const,
   courseModels: ['courses', 'model-options'] as const,
   courseOutline: (id: string) => ['courses', id, 'outline'] as const,

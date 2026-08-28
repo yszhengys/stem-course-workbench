@@ -686,6 +686,41 @@ export const eligibleCourseSourceSchema = z.object({
 })
 export type EligibleCourseSource = z.infer<typeof eligibleCourseSourceSchema>
 
+export const bibliographicSourceSchema = z.object({
+  id: typedRecordId('course_bibliographic_source'),
+  course: courseRecordId,
+  source: typedRecordId('source'),
+  source_role: sourceRoleSchema,
+  authors: z.array(z.string().trim().min(1).max(200)).max(20),
+  title: z.string().min(1).max(500).nullable(),
+  edition: z.string().min(1).max(100).nullable(),
+  publisher: z.string().min(1).max(300).nullable(),
+  year: z.number().int().min(1000).max(2100).nullable(),
+  doi: z.string().regex(/^10\.\d{4,9}\/\S+$/).nullable(),
+  isbn: z.string().regex(/^(?:\d{9}[\dX]|\d{13})$/).nullable(),
+  license: z.string().min(1).max(200).nullable(),
+  manually_reviewed: z.boolean(),
+  created: z.string().min(1),
+  updated: z.string().min(1),
+}).strict()
+export type BibliographicSource = z.infer<typeof bibliographicSourceSchema>
+
+export const courseBibliographyUpdateRequestSchema = z.object({
+  expected_updated: z.string().min(1).nullable(),
+  authors: z.array(z.string().trim().min(1).max(200)).max(20),
+  title: z.string().trim().min(1).max(500).nullable(),
+  edition: z.string().trim().min(1).max(100).nullable(),
+  publisher: z.string().trim().min(1).max(300).nullable(),
+  year: z.number().int().min(1000).max(2100).nullable(),
+  doi: z.string().trim().min(1).max(255).nullable(),
+  isbn: z.string().trim().min(1).max(40).nullable(),
+  license: z.string().trim().min(1).max(200).nullable(),
+  manually_reviewed: z.boolean(),
+}).strict()
+export type CourseBibliographyUpdateRequest = z.infer<
+  typeof courseBibliographyUpdateRequestSchema
+>
+
 export const courseModelOptionSchema = z.object({
   adapter: z.enum(['codex_cli', 'open_notebook', 'ollama']),
   model: z.string().min(1).nullable(),

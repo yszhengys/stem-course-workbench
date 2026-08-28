@@ -20,6 +20,8 @@ from api.models import (
     CourseAcademicVerificationRequest,
     CourseActivityEventRequest,
     CourseAnswerFormat,
+    CourseBibliographicSourceResponse,
+    CourseBibliographyUpdateRequest,
     CourseBundleImportResponse,
     CourseConceptResponse,
     CourseDraftOperationRequest,
@@ -84,6 +86,7 @@ from open_notebook.course.learning_service import (
     LearningService,
 )
 from open_notebook.course.models import (
+    BibliographicSource,
     Chapter,
     CourseNote,
     CourseVersion,
@@ -97,6 +100,10 @@ from open_notebook.course.publication_service import (
     ExercisePublicationError,
     LabPublicationError,
     PublicationService,
+)
+from open_notebook.course.source_quality_service import (
+    BibliographyConflictError,
+    SourceQualityService,
 )
 from open_notebook.course.tutor_service import (
     TutorEvidence,
@@ -152,6 +159,7 @@ class CourseV2Service:
     authoring_service: AuthoringService | None = None
     publication_service: PublicationService | None = None
     portability_service: PortabilityService | None = None
+    source_quality_service: SourceQualityService | None = None
     lab_query: LabQuery = repo_query
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
 
@@ -179,6 +187,77 @@ class CourseV2Service:
         if self.portability_service is None:
             self.portability_service = PortabilityService()
         return self.portability_service
+
+    def _source_quality(self) -> SourceQualityService:
+        if self.source_quality_service is None:
+            self.source_quality_service = SourceQualityService()
+        return self.source_quality_service
+
+    @staticmethod
+    def _bibliography_response(
+        record: BibliographicSource,
+    ) -> CourseBibliographicSourceResponse:
+        if record.id is None or record.created is None or record.updated is None:
+            raise OpenNotebookError("Course bibliography record is invalid")
+        return CourseBibliographicSourceResponse(
+            id=str(record.id),
+            course=record.course,
+            source=record.source,
+            source_role=record.source_role,
+            authors=record.authors,
+            title=record.title,
+            edition=record.edition,
+            publisher=record.publisher,
+            year=record.year,
+            doi=record.doi,
+            isbn=record.isbn,
+            license=record.license,
+            manually_reviewed=record.manually_reviewed,
+            created=record.created,
+            updated=record.updated,
+        )
+
+    async def list_bibliography(
+        self, course_id: str
+    ) -> tuple[CourseBibliographicSourceResponse, ...]:
+        try:
+            records = await self._source_quality().list_bibliography(course_id)
+        except BibliographyConflictError as exc:
+            raise CourseConflictError(str(exc)) from exc
+        return tuple(self._bibliography_response(record) for record in records)
+
+    async def get_bibliography(
+        self, course_id: str, source_id: str
+    ) -> CourseBibliographicSourceResponse:
+        try:
+            record = await self._source_quality().get_bibliography(
+                course_id, source_id
+            )
+        except BibliographyConflictError as exc:
+            raise CourseConflictError(str(exc)) from exc
+        return self._bibliography_response(record)
+
+    async def put_bibliography(
+        self,
+        course_id: str,
+        source_id: str,
+        request: CourseBibliographyUpdateRequest,
+    ) -> CourseBibliographicSourceResponse:
+        try:
+            record = await self._source_quality().put_bibliography(
+                course_id,
+                source_id,
+                **request.model_dump(),
+            )
+        except BibliographyConflictError as exc:
+            raise CourseConflictError(str(exc)) from exc
+        return self._bibliography_response(record)
+
+    async def csl_json(self, course_id: str) -> list[dict[str, Any]]:
+        try:
+            return await self._source_quality().csl_json(course_id)
+        except BibliographyConflictError as exc:
+            raise CourseConflictError(str(exc)) from exc
 
     @staticmethod
     def _export_response(export: CourseExport) -> CourseExportResponse:

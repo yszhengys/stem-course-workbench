@@ -13,6 +13,12 @@ from open_notebook.course.contracts import (
     SafeLabKey,
     ValidationFinding,
 )
+from open_notebook.course.models import (
+    normalize_bibliographic_authors,
+    normalize_bibliographic_text,
+    normalize_doi,
+    normalize_isbn,
+)
 from open_notebook.course.v2_contracts import (
     AnswerType,
     ConceptMastery,
@@ -835,6 +841,68 @@ class StrictCourseRequest(BaseModel):
     """Reject unknown Course fields at the HTTP trust boundary."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class CourseBibliographyUpdateRequest(StrictCourseRequest):
+    expected_updated: datetime | None
+    authors: tuple[str, ...] = Field(default_factory=tuple, max_length=20)
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    edition: str | None = Field(default=None, min_length=1, max_length=100)
+    publisher: str | None = Field(default=None, min_length=1, max_length=300)
+    year: int | None = Field(default=None, ge=1000, le=2100)
+    doi: str | None = Field(default=None, min_length=7, max_length=255)
+    isbn: str | None = Field(default=None, min_length=10, max_length=13)
+    license: str | None = Field(default=None, min_length=1, max_length=200)
+    manually_reviewed: bool
+
+    @field_validator("expected_updated")
+    @classmethod
+    def expected_revision_is_aware(
+        cls, value: datetime | None
+    ) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("expected_updated must include a UTC offset")
+        return value.astimezone(timezone.utc) if value is not None else None
+
+    @field_validator("authors", mode="before")
+    @classmethod
+    def authors_are_normalized(cls, value: Any) -> tuple[str, ...]:
+        return normalize_bibliographic_authors(value)
+
+    @field_validator("title", "edition", "publisher", "license", mode="before")
+    @classmethod
+    def text_is_normalized(cls, value: Any) -> str | None:
+        return normalize_bibliographic_text(value)
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def doi_is_normalized(cls, value: Any) -> str | None:
+        return normalize_doi(value)
+
+    @field_validator("isbn", mode="before")
+    @classmethod
+    def isbn_is_normalized(cls, value: Any) -> str | None:
+        return normalize_isbn(value)
+
+
+class CourseBibliographicSourceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^course_bibliographic_source:[^:]+$")
+    course: str = Field(pattern=r"^course:[^:]+$")
+    source: str = Field(pattern=r"^source:[^:]+$")
+    source_role: Literal["PRIMARY", "SUPPLEMENT"]
+    authors: tuple[str, ...] = Field(max_length=20)
+    title: str | None
+    edition: str | None
+    publisher: str | None
+    year: int | None
+    doi: str | None
+    isbn: str | None
+    license: str | None
+    manually_reviewed: bool
+    created: datetime
+    updated: datetime
 
 
 def _bounded_json_answer(value: Any) -> Any:

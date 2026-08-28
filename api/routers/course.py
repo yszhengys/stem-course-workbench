@@ -23,6 +23,8 @@ from api.models import (
     ChapterUpdate,
     CourseAcademicVerificationRequest,
     CourseActivityEventRequest,
+    CourseBibliographicSourceResponse,
+    CourseBibliographyUpdateRequest,
     CourseBundleImportResponse,
     CourseChapterAttemptCreate,
     CourseChapterGenerateRequest,
@@ -518,6 +520,46 @@ async def associate_source(course_id: str, request: CourseSourceAssociation):
 @router.get("/courses/{course_id}/sources/eligible")
 async def list_eligible_sources(course_id: str):
     return await _call(course_commands.eligible_sources(course_id))
+
+
+@router.get(
+    "/courses/{course_id}/bibliography",
+    response_model=list[CourseBibliographicSourceResponse],
+)
+async def list_course_bibliography(course_id: str):
+    return await _call(course_v2_service.list_bibliography(course_id))
+
+
+@router.get(
+    "/courses/{course_id}/bibliography/csl-json",
+    response_model=list[dict[str, Any]],
+)
+async def get_course_bibliography_csl_json(course_id: str):
+    return await _call(course_v2_service.csl_json(course_id))
+
+
+@router.get(
+    "/courses/{course_id}/sources/{source_id}/bibliography",
+    response_model=CourseBibliographicSourceResponse,
+)
+async def get_course_source_bibliography(course_id: str, source_id: str):
+    return await _call(
+        course_v2_service.get_bibliography(course_id, source_id)
+    )
+
+
+@router.put(
+    "/courses/{course_id}/sources/{source_id}/bibliography",
+    response_model=CourseBibliographicSourceResponse,
+)
+async def put_course_source_bibliography(
+    course_id: str,
+    source_id: str,
+    request: CourseBibliographyUpdateRequest,
+):
+    return await _call(
+        course_v2_service.put_bibliography(course_id, source_id, request)
+    )
 
 
 @router.post(

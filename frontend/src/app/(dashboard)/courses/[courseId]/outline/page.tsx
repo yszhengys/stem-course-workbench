@@ -3,10 +3,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
-import { AlertTriangle, ArrowLeft, BookOpen, CheckCircle2, FileText, Network } from 'lucide-react'
+import { AlertTriangle, ArrowLeft, BookMarked, BookOpen, CheckCircle2, FileText, Network } from 'lucide-react'
 
 import { AppShell } from '@/components/layout/AppShell'
 import { CommandJobPanel } from '@/components/course/CommandJobPanel'
+import { BibliographicSourceEditor } from '@/components/course/authoring/BibliographicSourceEditor'
 import { CourseModelPicker } from '@/components/course/CourseModelPicker'
 import { EvidenceAnchorCard } from '@/components/course/EvidenceAnchorCard'
 import {
@@ -280,6 +281,22 @@ export default function CourseOutlinePage() {
               </CardContent>
             </Card>
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <BookMarked className="size-5 text-coral" />
+                {t('course.bibliographyTitle')}
+              </CardTitle>
+              <CardDescription>{t('course.bibliographyDescription')}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <BibliographicSourceEditor
+                courseId={courseId}
+                sources={sources.data ?? []}
+              />
+            </CardContent>
+          </Card>
 
           {course.data.outline_version_id && !outline.isError && (outline.isLoading || outline.isFetching) && (
             <CourseInlineLoading />

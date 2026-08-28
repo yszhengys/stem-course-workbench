@@ -1,0 +1,30 @@
+-- Migration 31: Course-owned bibliographic metadata.
+-- Upstream Source records remain unchanged; one Course may describe a shared
+-- Source differently from another Course.
+
+DEFINE TABLE IF NOT EXISTS course_bibliographic_source SCHEMAFULL;
+
+DEFINE FIELD IF NOT EXISTS course ON TABLE course_bibliographic_source TYPE record<course>;
+DEFINE FIELD IF NOT EXISTS source ON TABLE course_bibliographic_source TYPE record<source>;
+DEFINE FIELD IF NOT EXISTS source_role ON TABLE course_bibliographic_source TYPE string;
+DEFINE FIELD IF NOT EXISTS authors ON TABLE course_bibliographic_source TYPE array<string> DEFAULT [];
+DEFINE FIELD IF NOT EXISTS title ON TABLE course_bibliographic_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS edition ON TABLE course_bibliographic_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS publisher ON TABLE course_bibliographic_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS year ON TABLE course_bibliographic_source TYPE option<int>;
+DEFINE FIELD IF NOT EXISTS doi ON TABLE course_bibliographic_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS isbn ON TABLE course_bibliographic_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS license ON TABLE course_bibliographic_source TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS manually_reviewed ON TABLE course_bibliographic_source TYPE bool DEFAULT false;
+DEFINE FIELD IF NOT EXISTS created ON TABLE course_bibliographic_source DEFAULT time::now() VALUE $before OR time::now();
+DEFINE FIELD IF NOT EXISTS updated ON TABLE course_bibliographic_source DEFAULT time::now() VALUE time::now();
+
+DEFINE INDEX IF NOT EXISTS course_bibliography_identity_unique ON TABLE course_bibliographic_source FIELDS course, source UNIQUE;
+
+DEFINE EVENT IF NOT EXISTS course_bibliography_course_delete ON TABLE course WHEN ($after == NONE) THEN {
+    DELETE course_bibliographic_source WHERE course == $before.id;
+};
+
+DEFINE EVENT IF NOT EXISTS course_bibliography_source_delete ON TABLE source WHEN ($after == NONE) THEN {
+    DELETE course_bibliographic_source WHERE source == $before.id;
+};

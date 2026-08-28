@@ -5,7 +5,9 @@ import { SAFE_LAB_PROPOSAL_KEYS } from '@/lib/course/lab-proposals'
 import {
   BuildEvidenceRequest,
   AcademicArtifactKind,
+  bibliographicSourceSchema,
   courseAcademicVerificationRequestSchema,
+  courseBibliographyUpdateRequestSchema,
   courseDraftOperationRequestSchema,
   courseDraftResponseSchema,
   courseDraftValidationResponseSchema,
@@ -54,6 +56,7 @@ import {
   CourseExerciseVerificationRequest,
   CourseDraftOperationRequest,
   CourseAcademicVerificationRequest,
+  CourseBibliographyUpdateRequest,
   CourseLearningEventRequest,
   CourseLabApprovalRequest,
   CourseLearningUpgradeRequest,
@@ -167,6 +170,40 @@ export const courseApi = {
   async listEligibleSources(courseId: string) {
     const response = await apiClient.get(`/courses/${pathId(courseId)}/sources/eligible`)
     return z.array(eligibleCourseSourceSchema).parse(response.data)
+  },
+
+  async listBibliography(courseId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/bibliography`,
+    )
+    return z.array(bibliographicSourceSchema).parse(response.data)
+  },
+
+  async getBibliography(courseId: string, sourceId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/sources/${pathId(sourceId)}/bibliography`,
+    )
+    return bibliographicSourceSchema.parse(response.data)
+  },
+
+  async saveBibliography(
+    courseId: string,
+    sourceId: string,
+    request: CourseBibliographyUpdateRequest,
+  ) {
+    const payload = courseBibliographyUpdateRequestSchema.parse(request)
+    const response = await apiClient.put(
+      `/courses/${pathId(courseId)}/sources/${pathId(sourceId)}/bibliography`,
+      payload,
+    )
+    return bibliographicSourceSchema.parse(response.data)
+  },
+
+  async getBibliographyCslJson(courseId: string) {
+    const response = await apiClient.get(
+      `/courses/${pathId(courseId)}/bibliography/csl-json`,
+    )
+    return z.array(z.record(z.string(), z.unknown())).parse(response.data)
   },
 
   async associateSource(courseId: string, request: { source_id: string; role: 'PRIMARY' | 'SUPPLEMENT' }) {

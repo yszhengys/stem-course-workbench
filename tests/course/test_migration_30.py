@@ -21,9 +21,9 @@ def test_migration_30_is_registered_and_only_adds_visual_preview_fields() -> Non
     up = migration_sql("30")
     down = migration_sql("30_down")
 
-    assert len(manager.up_migrations) == 30
-    assert len(manager.down_migrations) == 30
-    assert manager.up_migrations[-1].sql == " ".join(
+    assert len(manager.up_migrations) >= 30
+    assert len(manager.down_migrations) >= 30
+    assert manager.up_migrations[29].sql == " ".join(
         line.strip()
         for line in up.splitlines()
         if line.strip() and not line.strip().startswith("--")
