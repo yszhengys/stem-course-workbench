@@ -2,6 +2,8 @@
 
 STEM Course Workbench 是基于 Open Notebook 的本地优先教材与学习工作台。它把 PDF/PPTX 教学材料转换为可追溯的数学或物理课程：先在 Build 模式建立 Docling 证据、生成并人工批准大纲、编辑和发布课程，再在 Learn 模式阅读、练习、实验、复习和使用带引用的章节导师。
 
+当前 Workbench 产品版本为 `2.0.0-dev`（development），兼容的上游基线为 Open Notebook 1.14.0。两个版本分别维护：Workbench 版本描述本项目功能，上游基线描述继承的 Python 包与架构，不能互相替代。
+
 V2 不会自动替代教师。生成内容必须有来源或明确标为教学推导；客观题由确定性规则评分，解释题和证明题只提供建议；无法可靠验证的内容会阻塞发布或要求人工检查。
 
 ## 最短启动路径
@@ -30,12 +32,12 @@ V2 不会自动替代教师。生成内容必须有来源或明确标为教学�
 
 - macOS Apple Silicon（ARM64），建议预留至少 25 GB 可用空间。
 - Docker Desktop 已安装并已启动；Docker 只用于 SurrealDB。
-- 项目自带的 `./.tools/bin/uv` 可执行；Python 环境由锁文件管理。
+- Python 环境由锁文件管理。启动器优先使用 `./.tools/bin/uv`，其次使用 `PATH` 中有效的 `uv`；两者都不存在时，会下载固定的官方 macOS ARM64 资产、验证内置 SHA256 后安装到被 Git 忽略的 `.tools/bin/`，不会执行远程 shell。
 - Node.js 20 或更新版本，以及 npm。
 - 若使用 Codex：本机 Codex CLI 已安装并完成登录。
 - 若使用 Ollama：Ollama 已启动，并提前拉取 `qwen3.5:9b` 或 `gpt-oss:20b`。
 
-首次运行可能需要安装锁定依赖和下载 Docling/Ollama 本地模型，因此会比后续启动慢。启动器不会安装 Homebrew，也不会删除已有模型。
+首次运行可能需要下载已校验的 `uv`、安装锁定依赖和下载 Docling/Ollama 本地模型，因此会比后续启动慢。启动器不会安装 Homebrew，也不会删除已有模型；`uv` 下载或校验失败时会停止并显示错误，不会运行未验证文件。
 
 常用命令：
 

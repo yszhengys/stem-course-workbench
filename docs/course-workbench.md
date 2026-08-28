@@ -2,6 +2,8 @@
 
 STEM Course Workbench V2 是 Open Notebook 的隔离 Course 模块。它复用 FastAPI、Next.js、SurrealDB、`surreal-commands`、Source/Notebook/Note 和模型供应商体系；上游改动限制在路由/命令注册、导航、迁移注册、依赖和启动入口。Build 与 Learn 共用已发布 artifact 和证据锚点，但写作状态与学习事件保持隔离。
 
+产品版本和上游兼容版本由仓库根目录 `workbench.toml` 分开记录：当前 Workbench 为 `2.0.0-dev`（development），上游基线为 Open Notebook 1.14.0；`pyproject.toml` 中 `open-notebook` 的包版本继续保持上游兼容值，不代表 Workbench 产品版本。
+
 ## 运行拓扑
 
 ```text

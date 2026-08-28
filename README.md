@@ -1,72 +1,35 @@
-<a id="readme-top"></a>
+# STEM Course Workbench
 
-<!-- [![Contributors][contributors-shield]][contributors-url] -->
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
-[![MIT License][license-shield]][license-url]
-<!-- [![LinkedIn][linkedin-shield]][linkedin-url] -->
+> 产品版本：`2.0.0-dev`（development） · 上游基线：Open Notebook `1.14.0`
 
+STEM Course Workbench 是一个单用户、local-first、证据可追溯的数学/物理教材制作与学习工作台。Build 模式负责 PDF/PPTX 取证、大纲审批、章节生成、审查和发布；Learn 模式负责教材阅读、确定性评分练习、掌握度、间隔复习、笔记、安全实验和带引用的章节导师。
 
-<!-- PROJECT LOGO -->
-<br />
-<div align="center">
-  <a href="https://github.com/lfnovo/open-notebook">
-    <img src="docs/assets/hero.svg" alt="Logo">
-  </a>
+本项目的公开源代码仓库是 [yszhengys/stem-course-workbench](https://github.com/yszhengys/stem-course-workbench)。课程原文、证据缓存、数据库、模型缓存、运行日志和 `.env` 只保留在本机，不进入 Git。
 
-  <h3 align="center">Open Notebook</h3>
+## 一键启动（Apple Silicon Mac）
 
-  <p align="center">
-    An open source, privacy-focused alternative to Google's Notebook LM!
-    <br /><strong>Join our <a href="https://discord.gg/37XJPXfz2w">Discord server</a> for help, to share workflow ideas, and suggest features!</strong>
-    <br />
-    <a href="https://www.open-notebook.ai"><strong>Checkout our website »</strong></a>
-    <br />
-    Follow <a href="https://x.com/lfnovo">@lfnovo on X</a> for updates
-    <br />
-    <br />
-    <a href="docs/0-START-HERE/index.md">📚 Get Started</a>
-    ·
-    <a href="docs/3-USER-GUIDE/index.md">📖 User Guide</a>
-    ·
-    <a href="docs/2-CORE-CONCEPTS/index.md">✨ Features</a>
-    ·
-    <a href="docs/1-INSTALLATION/index.md">🚀 Deploy</a>
-  </p>
-</div>
-
-<p align="center">
-<a href="https://trendshift.io/repositories/14536" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14536" alt="lfnovo%2Fopen-notebook | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-</p>
-
-<div align="center">
-  <!-- Keep these links. Translations will automatically update with the README. -->
-  <a href="https://zdoc.app/de/lfnovo/open-notebook">Deutsch</a> | 
-  <a href="https://zdoc.app/es/lfnovo/open-notebook">Español</a> | 
-  <a href="https://zdoc.app/fr/lfnovo/open-notebook">français</a> | 
-  <a href="https://zdoc.app/ja/lfnovo/open-notebook">日本語</a> | 
-  <a href="https://zdoc.app/ko/lfnovo/open-notebook">한국어</a> | 
-  <a href="https://zdoc.app/pt/lfnovo/open-notebook">Português</a> | 
-  <a href="https://zdoc.app/ru/lfnovo/open-notebook">Русский</a> | 
-  <a href="https://zdoc.app/zh/lfnovo/open-notebook">中文</a>
-</div>
-
-## STEM Course Workbench V2（本分支）
-
-本仓库在 Open Notebook 之上增加了本地优先、证据可追溯的数学/物理课程工作流。V2 将课程分成两个清晰入口：Build 用于取证、生成、结构化编辑、审查和发布；Learn 用于教材阅读、确定性评分练习、掌握度、间隔复习、笔记、安全实验和带引用的章节导师。
-
-Apple Silicon Mac 上可用一条命令启动，并直接进入新建课程页面：
+先启动 Docker Desktop，然后在仓库目录运行：
 
 ```bash
 ./scripts/course-workbench.sh
 ```
 
-课程列表中的“制作模式”和“学习模式”分别进入两个工作区。课程可手动导出为经过完整性校验的 `.stemcourse` 文件，并以全新 ID 导入，不会覆盖已有课程。
+启动器会优先复用仓库或系统已有的 `uv`；若两者都不存在，会下载固定版本的官方 macOS ARM64 资产并验证 SHA256 后安装，不执行远程 shell。服务就绪后会打开 `http://127.0.0.1:3000/courses/new`。
 
-开始使用：[STEM Course Workbench V2 中文使用说明](docs/0-START-HERE/course-workbench-user-guide.zh-CN.md) · [架构与维护说明](docs/course-workbench.md) · [上游 Open Notebook 文档](docs/index.md)
+- [STEM Course Workbench V2 中文使用说明](docs/0-START-HERE/course-workbench-user-guide.zh-CN.md)
+- [架构与维护说明](docs/course-workbench.md)
+- [报告漏洞](SECURITY.md)
+- [提交问题或功能建议](https://github.com/yszhengys/stem-course-workbench/issues/new/choose)
 
-> **公开仓库与本地数据：** 本仓库公开的是源代码、文档和明确可再分发的合成测试材料，不包含本机课程原文、证据缓存、数据库、模型缓存或 `.env`。当前 Course Workbench 是单用户、本地优先的开发配置；不要把 SurrealDB、API 或前端直接暴露到公网。
+> **当前边界：** 这是面向本机使用的开发版本，不提供多用户权限、云部署或协作编辑，也不应把 SurrealDB、API 或前端直接暴露到公网。模型输出不能替代教师或独立学术核验。
+
+## 基于 Open Notebook
+
+本项目是 [Open Notebook](https://github.com/lfnovo/open-notebook) `v1.14.0` 的独立维护衍生项目，保留其完整历史、MIT License、FastAPI、Next.js、SurrealDB、异步任务和多模型供应商体系。Workbench 的问题、功能建议和安全报告由本仓库接收；如问题可复现于未修改的上游版本，再由报告者或维护者转交上游。
+
+以下章节保留上游 Open Notebook 的通用能力与文档入口，便于理解继承的 Notebook、Source、Note、搜索、聊天和播客功能；其中指向 `lfnovo/open-notebook` 的社区链接属于上游项目。
+
+<a id="readme-top"></a>
 
 ## A private, multi-model, 100% local, full-featured alternative to Notebook LM
 

@@ -10,15 +10,15 @@ body:
 
         **Please try these resources first:**
 
-        1. 🤖 **[Installation Assistant ChatGPT](https://chatgpt.com/g/g-68776e2765b48191bd1bae3f30212631-open-notebook-installation-assistant)** - Our AI assistant can help you troubleshoot most installation issues instantly!
+        1. 📘 **[Workbench 中文使用说明](https://github.com/yszhengys/stem-course-workbench/blob/main/docs/0-START-HERE/course-workbench-user-guide.zh-CN.md)** - Follow the one-command macOS startup and status checklist first.
 
-        2. 📚 **[Installation Guide](https://github.com/lfnovo/open-notebook/blob/main/docs/getting-started/installation.md)** - Comprehensive setup instructions
+        2. 🚀 **[Repository Quick Start](https://github.com/yszhengys/stem-course-workbench#一键启动apple-silicon-mac)** - Check the supported platform and local-only topology.
 
-        3. 🐋 **[Docker Deployment Guide](https://github.com/lfnovo/open-notebook/blob/main/docs/deployment/docker.md)** - Detailed Docker setup
+        3. 🧭 **[Architecture and Operations](https://github.com/yszhengys/stem-course-workbench/blob/main/docs/course-workbench.md)** - Understand which service runs in Docker and which services run on the host.
 
-        4. 🦙 **Ollama Issues?** Read our [Ollama Guide](https://github.com/lfnovo/open-notebook/blob/main/docs/features/ollama.md) first
+        4. 🦙 **Model issue?** Check the repository's model configuration guide and redact all provider credentials from logs.
 
-        5. 💬 **[Discord Community](https://discord.gg/37XJPXfz2w)** - Get real-time help from the community
+        5. 🔎 Run `./scripts/course-workbench.sh status` and inspect the relevant launcher log before filing.
 
         ---
 
@@ -28,11 +28,11 @@ body:
     id: installation-method
     attributes:
       label: Installation Method
-      description: How are you trying to install Open Notebook?
+      description: How are you trying to start STEM Course Workbench?
       options:
-        - Docker (docker-compose - recommended)
-        - Docker (single container - v1-latest-single, deprecated)
-        - Local development (make start-all)
+        - One-command launcher on Apple Silicon macOS
+        - Manual host-mode startup (SurrealDB in Docker)
+        - Upstream Open Notebook Docker deployment
         - Other (please specify below)
     validations:
       required: true
@@ -55,9 +55,10 @@ body:
         Please provide relevant logs. **This is very important for diagnosing issues!**
 
         **How to get logs:**
-        - Docker single container: `docker logs open-notebook`
-        - Docker Compose: `docker compose logs -f`
-        - Specific service: `docker compose logs -f open_notebook`
+        - Status: `./scripts/course-workbench.sh status`
+        - API: `./scripts/course-workbench.sh logs api`
+        - Worker: `./scripts/course-workbench.sh logs worker`
+        - Frontend: `./scripts/course-workbench.sh logs frontend`
       placeholder: |
         Paste your logs here. Include the full error message and stack trace if available.
       render: shell
@@ -138,9 +139,9 @@ body:
       label: Pre-submission Checklist
       description: Please confirm you've tried these steps
       options:
-        - label: I tried the [Installation Assistant ChatGPT](https://chatgpt.com/g/g-68776e2765b48191bd1bae3f30212631-open-notebook-installation-assistant)
+        - label: I ran `./scripts/course-workbench.sh status` and checked the relevant log.
           required: false
-        - label: I read the relevant documentation ([Installation Guide](https://github.com/lfnovo/open-notebook/blob/main/docs/getting-started/installation.md) or [Ollama Guide](https://github.com/lfnovo/open-notebook/blob/main/docs/features/ollama.md))
+        - label: I read the [Workbench user guide](https://github.com/yszhengys/stem-course-workbench/blob/main/docs/0-START-HERE/course-workbench-user-guide.zh-CN.md).
           required: false
         - label: I searched existing issues to see if this was already reported
           required: true
